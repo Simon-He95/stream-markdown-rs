@@ -262,10 +262,33 @@ function needsLegacyCenter(text, context) {
     && context.parseOptions.requireClosingStrong && text.includes('**'))
 }
 
+function appendMarkdownFilenameText(nodes, text, center) {
+  const names = /(^|[\s([,"'“‘])([A-Z0-9](?:[A-Z0-9-]*[A-Z0-9])?)\.[mM][dD](?=$|[\s)\],;"'”’]|[.!?:](?:\s|$))/gu
+  let previous
+  for (const match of text.matchAll(names)) {
+    if (!/[A-Z].*[A-Z]/u.test(match[2]))
+      continue
+    const start = match.index + match[1].length
+    if (previous !== undefined)
+      nodes.push(textNode(text.slice(previous, start), false))
+    else if (start)
+      mergeText(nodes, textNode(text.slice(0, start), center))
+    previous = start
+  }
+  if (previous === undefined)
+    return false
+  nodes.push(textNode(text.slice(previous), false))
+  return true
+}
+
 function projectInlines(content, context) {
   if (content.plain || content.fragments) {
     const text = inlineRaw(content, '', context)
-    return text ? [textNode(text, needsLegacyCenter(text, context))] : []
+    const nodes = []
+    if (text && !(context.markstream && context.final && content.plain
+      && appendMarkdownFilenameText(nodes, text, true)))
+      nodes.push(textNode(text, needsLegacyCenter(text, context)))
+    return nodes
   }
   return projectInlineNodes(content.parsed, context)
 }
@@ -301,12 +324,12 @@ function legacyDelimitedText(children) {
   }).join('')
 }
 
-function customInlineNode(data, status, raw, context) {
+function customInlineNode(data, status, raw, context, insideLinkLabel = false) {
   const open = status === 'open'
   return {
     type: data.name, tag: data.name, attrs: data.attrs,
     content: readText(data.body, context),
-    children: projectInlineNodes(data.children, context),
+    children: projectInlineNodes(data.children, context, false, insideLinkLabel),
     raw, loading: open && !context.final, autoClosed: open,
   }
 }
@@ -345,7 +368,7 @@ function recoverAdjacentBracketLabel(inlines, index, nodes, label, context) {
   return adjacent[2] + '[' + label
 }
 
-function projectInlineNodes(inlines, context, insideLoadingLink = false) {
+function projectInlineNodes(inlines, context, insideLoadingLink = false, insideLinkLabel = false) {
   const nodes = []
   for (let index = 0; index < inlines.length; index++) {
     const { kind, span, data } = inlines[index]
@@ -391,8 +414,12 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false) {
       }
       const literalAsterisk = kind === 'text' && context.markstream && context.final
         && raw.includes('*') && /[^*]/u.test(raw) && /(?<!\\)(?:\\\\)*\*/u.test(raw)
-      mergeText(nodes, textNode(kind === 'softbreak' ? '\n' : readText(data, context),
-        kind !== 'softbreak' && !literalCodeMarker && !literalAsterisk))
+      const center = kind !== 'softbreak' && !literalCodeMarker && !literalAsterisk
+      const text = kind === 'softbreak' ? '\n' : readText(data, context)
+      if (!(kind === 'text' && context.markstream && context.final && !literalCodeMarker && !insideLinkLabel
+        && Array.isArray(data) && data[0] === span[0] && data[1] === span[1]
+        && appendMarkdownFilenameText(nodes, text, center)))
+        mergeText(nodes, textNode(text, center))
       if (literalCodeMarker && nodes.at(-1)?.type === 'text')
         delete nodes.at(-1).center
     }
@@ -407,7 +434,7 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false) {
       nodes.push({ type: 'inline_code', code, raw: code })
     }
     else if (kind === 'emphasis' || kind === 'strong' || kind === 'strikethrough') {
-      const children = projectInlineNodes(data, context)
+      const children = projectInlineNodes(data, context, false, insideLinkLabel)
       const marker = kind === 'emphasis' ? '*' : kind === 'strong' ? '**' : '~~'
       nodes.push({ type: kind, children, raw: context.markstream ? marker + legacyDelimitedText(children) + marker : raw })
     }
@@ -418,7 +445,7 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false) {
     }
     else if (kind === 'highlight' || kind === 'insert') {
       const marker = kind === 'highlight' ? '==' : '++'
-      const children = projectInlineNodes(data, context)
+      const children = projectInlineNodes(data, context, false, insideLinkLabel)
       nodes.push({ type: kind, children, raw: marker + displayText(children) + marker })
     }
     else if (kind === 'math_inline') {
@@ -435,7 +462,7 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false) {
       const destination = readText(data.destination, context)
       const href = markdownHref(destination)
       const title = data.title === null ? null : readText(data.title, context) || null
-      const children = projectInlineNodes(data.children, context, kind === 'link' && data.loading)
+      const children = projectInlineNodes(data.children, context, kind === 'link' && data.loading, true)
       const allowed = allowsLink(href, context, kind)
       const simpleMarkdownLink = context.markstream && kind === 'link' && raw.startsWith('[')
         && children.length === 1 && children[0].type === 'text'
@@ -520,7 +547,7 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false) {
       }
     }
     else if (kind === 'custom_inline') {
-      nodes.push(customInlineNode(data, data.status, raw, context))
+      nodes.push(customInlineNode(data, data.status, raw, context, insideLinkLabel))
     }
     else if (kind === 'html') {
       const header = htmlHeader(raw)
@@ -563,7 +590,12 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false) {
         && htmlHeader(context.read(image.span))?.tag === 'img' && allowsLink(href, context)
       const includeTail = autoClosed || loadingAnchor
       const last = includeTail ? inlines.length - 1 : end
-      let children = projectInlineNodes(inlines.slice(index + 1, includeTail ? inlines.length : end), context)
+      let children = projectInlineNodes(
+        inlines.slice(index + 1, includeTail ? inlines.length : end),
+        context,
+        false,
+        insideLinkLabel || tag === 'a',
+      )
       const source = last === index ? raw : normalize(context.read([span[0], inlines[last].span[1]]))
       const combined = autoClosed ? source + `</${tag}>` : source
       if (tag === 'a' && href && (end > index || loadingAnchor)) {

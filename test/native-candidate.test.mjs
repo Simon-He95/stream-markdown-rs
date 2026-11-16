@@ -976,6 +976,43 @@ test('final literal asterisks in prose retain their spelling and legacy metadata
   }
 })
 
+test('only source-validated uppercase Markdown filenames begin legacy literal text nodes', () => {
+  const session = createSession()
+  const negative = createSession()
+  const standard = createSession({ parseOptions: { markstream: false } })
+  const row = 'Read (DESIGN.md), README.md first ([change](https://example.org/c))'
+  try {
+    for (const candidate of [session, standard]) {
+      candidate.append('- ' + row + '\n\nFOO-42.MD')
+      candidate.finish()
+    }
+    const [list, standalone] = session.snapshot()
+    const paragraph = list.items[0].children[0]
+    assert.equal(paragraph.raw, row)
+    assert.deepEqual(paragraph.children.slice(0, 3), [
+      { type: 'text', content: 'Read (', raw: 'Read (', center: false },
+      { type: 'text', content: 'DESIGN.md), ', raw: 'DESIGN.md), ' },
+      { type: 'text', content: 'README.md first (', raw: 'README.md first (' },
+    ])
+    assert.equal(paragraph.children[3].href, 'https://example.org/c')
+    assert.deepEqual(standalone.children, [{ type: 'text', content: 'FOO-42.MD', raw: 'FOO-42.MD' }])
+    assert.equal(standard.snapshot()[0].items[0].children[0].children[0].content,
+      'Read (DESIGN.md), README.md first (')
+
+    negative.append('Use src/DESIGN.md and README\\.md, then `DESIGN.md` or [README.md](/docs)')
+    negative.finish()
+    assert.deepEqual(negative.snapshot()[0].children.map(node => node.type), ['text', 'inline_code', 'text', 'link'])
+    assert.equal(negative.snapshot()[0].children[0].content, 'Use src/DESIGN.md and README.md, then ')
+    assert.equal(negative.snapshot()[0].children[3].href, '/docs')
+    assert.equal(negative.snapshot()[0].children[3].children[0].center, false)
+  }
+  finally {
+    session.dispose()
+    negative.dispose()
+    standard.dispose()
+  }
+})
+
 test('final legacy inline pre and code use typed tail children and preserve paragraph source', () => {
   const body = ' elements; ref ([change](https://example.org/c))'
   const source = 'plain <pre><code>' + body
