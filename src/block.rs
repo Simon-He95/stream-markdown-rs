@@ -875,7 +875,6 @@ impl Engine {
         if self.running.is_some()
             || self.line_start >= self.scan
             || !matches!(self.active, None | Some(Active::Paragraph(_)))
-            || !self.containers.is_empty()
         {
             return Ok(false);
         }
@@ -885,6 +884,18 @@ impl Engine {
             return Ok(false);
         }
         let start = end - head.len();
+        if !self.containers.is_empty()
+            && (self.active.is_some()
+                || start != self.line_start
+                || self.containers.iter().any(|frame| {
+                    !matches!(
+                        frame.kind,
+                        Kind::Quote | Kind::List { .. } | Kind::Item { .. }
+                    )
+                }))
+        {
+            return Ok(false);
+        }
         let Some((_, _, info)) = opening_fence(head, start) else {
             if let Some(draft) = self
                 .draft
@@ -898,6 +909,8 @@ impl Engine {
         if self.active.is_some() {
             self.stop_leaf(source, output)?;
         }
+        // A non-indented line cannot rejoin a list or quote without an active paragraph.
+        self.close_containers(0, output);
         let (id, present) = self.block_id(start);
         self.draft = Some(Draft {
             id,

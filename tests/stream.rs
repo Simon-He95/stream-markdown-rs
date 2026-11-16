@@ -14,10 +14,7 @@ impl View {
     fn apply(&mut self, changes: &mut Vec<Change>) {
         for change in changes.drain(..) {
             match change {
-                Change::Insert {
-                    block,
-                    parent: None,
-                } => {
+                Change::Insert { block, .. } => {
                     assert!(self.blocks.insert(block.id, block).is_none());
                 }
                 Change::Replace(block) => {
@@ -1444,6 +1441,47 @@ fn markstream_fence_previews_the_info_and_keeps_the_id_at_the_newline() {
     parser.append("f\n+x\n", &mut changes).unwrap();
     assert!(matches!(changes.as_slice(),
         [Change::Replace(block), Change::AppendText { id: updated, .. }] if block.id == id && *updated == id));
+}
+
+#[test]
+fn an_outdented_fence_after_a_list_is_previewed_at_the_root() {
+    let options = Options {
+        markstream: true,
+        preview: Preview::Ai,
+        ..Options::default()
+    };
+    for suffix in ["s\nbody\n```\n", "` invalid\n"] {
+        let mut parser = Parser::new(options.clone());
+        let mut changes = Vec::new();
+        let mut view = View::default();
+        parser
+            .append("1. first\n2. second\n\n", &mut changes)
+            .unwrap();
+        view.apply(&mut changes);
+        parser.append("```j", &mut changes).unwrap();
+        let Some(Change::Insert {
+            block,
+            parent: None,
+        }) = changes.last()
+        else {
+            panic!("expected the outdented fence at the root: {changes:?}");
+        };
+        let id = block.id;
+        assert_eq!(block.status, BlockStatus::Open);
+        assert_eq!(parser.source(block.data.code_info().unwrap()), "j");
+        view.apply(&mut changes);
+        parser.append(suffix, &mut changes).unwrap();
+        view.apply(&mut changes);
+        parser.finish(&mut changes).unwrap();
+        view.apply(&mut changes);
+        let expected = parse(parser.source_text(), &options).unwrap();
+        assert_eq!(expected.parent(id), None);
+        assert_eq!(&view.blocks[&id], expected.nodes.last().unwrap());
+        assert_eq!(
+            view.blocks.into_values().collect::<Vec<_>>(),
+            expected.nodes
+        );
+    }
 }
 
 #[test]
