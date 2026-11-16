@@ -168,6 +168,10 @@ fn apply_changes(blocks: &mut StreamView, changes: &mut Vec<Change>) -> Result<(
                         content: InlineContent::Plain(body),
                         ..
                     }
+                    | BlockData::Summary {
+                        content: InlineContent::Plain(body),
+                        ..
+                    }
                     | BlockData::CustomTag { body, .. }
                     | BlockData::Math {
                         body: Text::Source(body),
@@ -285,6 +289,27 @@ impl Renderer<'_> {
                 self.html.push_str("</blockquote>\n");
             }
             BlockData::Vmr(_) => self.children(Some(block.id), false),
+            BlockData::Details(opening) => {
+                let raw = &self.source[Range::from(opening.span)];
+                self.raw_html(raw);
+                if !raw.ends_with("/>") {
+                    self.children(Some(block.id), false);
+                    if block.status == BlockStatus::Closed {
+                        self.html.push_str("</details>");
+                    }
+                }
+            }
+            BlockData::Summary { opening, content } => {
+                let raw = &self.source[Range::from(opening.span)];
+                self.raw_html(raw);
+                if !raw.ends_with("/>") {
+                    self.inline_content(content);
+                    if block.status == BlockStatus::Closed {
+                        self.html.push_str("</summary>");
+                    }
+                }
+            }
+
             BlockData::List {
                 ordered,
                 start,
@@ -471,7 +496,7 @@ impl Renderer<'_> {
                     escape(&mut self.html, text.as_str(self.source));
                     write!(self.html, "</{tag}>").unwrap();
                 }
-                InlineKind::Link(link) => {
+                InlineKind::Link(link) | InlineKind::LinkPreview(link) => {
                     self.html.push_str("<a href=\"");
                     escape_url(&mut self.html, link.destination.as_str(self.source));
                     self.html.push('"');
@@ -503,6 +528,9 @@ impl Renderer<'_> {
                 }
                 InlineKind::SoftBreak => self.html.push('\n'),
                 InlineKind::HardBreak => self.html.push_str("<br />\n"),
+                InlineKind::NumericReference(_) => {
+                    escape(&mut self.html, &self.source[Range::from(inline.span)])
+                }
                 InlineKind::FootnoteReference { label, .. } => {
                     escape(&mut self.html, &self.source[Range::from(*label)])
                 }
@@ -532,9 +560,13 @@ impl Renderer<'_> {
                 | InlineKind::Highlight(children)
                 | InlineKind::Insert(children) => self.image_alt(children),
                 InlineKind::Link(link)
+                | InlineKind::LinkPreview(link)
                 | InlineKind::Image(link)
                 | InlineKind::ImagePreview(link) => self.image_alt(&link.children),
                 InlineKind::SoftBreak | InlineKind::HardBreak => self.html.push(' '),
+                InlineKind::NumericReference(_) => {
+                    escape(&mut self.html, &self.source[Range::from(inline.span)])
+                }
                 InlineKind::FootnoteReference { label, .. } => {
                     escape(&mut self.html, &self.source[Range::from(*label)])
                 }

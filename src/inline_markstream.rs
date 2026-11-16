@@ -248,7 +248,7 @@ fn collect_parts<'a>(
                 collect_parts(children, level + 1, parts);
                 Part::Boundary
             }
-            InlineKind::Link(link) => {
+            InlineKind::Link(link) | InlineKind::LinkPreview(link) => {
                 collect_parts(&mut link.children, level + 1, parts);
                 Part::Boundary
             }
@@ -354,4 +354,62 @@ pub(super) fn smart_quotes(source: &str, nodes: &mut [super::Inline]) {
         rewritten.push_str(&original[cursor..]);
         *text = Text::Decoded(rewritten.into_boxed_str());
     }
+}
+
+pub(super) fn strip_preview_tail(source: &str, nodes: &mut Vec<super::Inline>, math: bool) {
+    let Some(last) = nodes.last_mut() else { return };
+    let super::InlineKind::Text(Text::Source(text)) = &mut last.kind else {
+        return;
+    };
+    let bytes = source.as_bytes();
+    let end = text.end;
+    if end == text.start {
+        return;
+    }
+    let marker = bytes[end - 1];
+    let single_dollar = math && marker == b'$' && (end < 2 || bytes[end - 2] != b'$');
+    if !single_dollar && !matches!(marker, b'*' | b'(' | b'\\') {
+        return;
+    }
+    let mut stop = end - 1;
+    if marker == b'*' {
+        while stop > text.start && bytes[stop - 1] == b'*' {
+            stop -= 1;
+        }
+    }
+    if escaped(bytes, stop) {
+        stop += 1;
+    }
+    if stop == text.start {
+        nodes.pop();
+    } else {
+        text.end = stop;
+        last.span.end = stop;
+    }
+}
+
+fn escaped(bytes: &[u8], at: usize) -> bool {
+    bytes[..at]
+        .iter()
+        .rev()
+        .take_while(|&&byte| byte == b'\\')
+        .count()
+        % 2
+        != 0
+}
+
+pub(super) fn escaped_code(source: &str, start: usize, end: usize) -> Option<(usize, Text)> {
+    let bytes = source.as_bytes();
+    let body = start + 2;
+    if bytes.get(body) == Some(&b'`') {
+        return None;
+    }
+    let line = memchr::memchr2(b'\n', b'\r', &bytes[body..end]).map_or(end, |offset| body + offset);
+    for offset in memchr::memmem::find_iter(&bytes[body..line], b"\\`") {
+        let close = body + offset;
+        if !escaped(bytes, close) && close > body {
+            return Some((close + 2, super::code_content(source, body, close)));
+        }
+    }
+    (body < line).then(|| (line, Text::Source(Span::new(body, line))))
 }

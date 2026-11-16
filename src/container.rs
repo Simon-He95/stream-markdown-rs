@@ -24,6 +24,10 @@ impl ListMarker {
 #[derive(Clone, Copy)]
 pub(crate) enum Kind {
     Quote,
+    Details {
+        opening_end: usize,
+        closed: bool,
+    },
     Vmr {
         header_end: usize,
         closed: bool,

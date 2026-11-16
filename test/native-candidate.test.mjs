@@ -300,3 +300,61 @@ test('native candidate projects Markstream inline extension payloads into legacy
     session.dispose()
   }
 })
+
+test('legacy delimiter raw uses typed content while the paragraph keeps the source spelling', () => {
+  const session = createSession()
+  try {
+    const input = '[**用 `pnpm` 安装**](https://a.test) [***x***](https://b.test)'
+    session.append(input)
+    session.finish()
+    const paragraph = session.snapshot()[0]
+    const links = paragraph.children.filter(node => node.type === 'link')
+    assert.equal(paragraph.raw, input)
+    assert.equal(links[0].text, '**用 pnpm 安装**')
+    assert.equal(links[1].text, '*x*')
+    assert.equal(links[1].children[0].children[0].type, 'strong')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('native candidate keeps a provisional table row out of the committed row list', () => {
+  const session = createSession()
+  try {
+    session.append('| A | B |\n| --- | --- |\n| one | ')
+    const preview = session.snapshot()[0]
+    assert.equal(preview.rows.length, 1)
+    assert.equal(preview.rows[0].raw, 'one|')
+    session.append('two |\n')
+    assert.equal(session.snapshot()[0].rows.length, 1)
+    assert.equal(session.snapshot()[0].rows[0].raw, 'one|two')
+    assert.equal(preview.rows[0].raw, 'one|')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('native candidate projects typed details and summary hierarchy separately from raw source', () => {
+  const session = createSession()
+  try {
+    const first = '<details open>\n<summary title="a > b">**sum**</summary>\n\n'
+    session.append(first)
+    session.append('- one\n- two\n\n```js\nconst value = 1\n```\n</details>\n')
+    session.finish()
+    const details = session.snapshot()[0]
+    assert.equal(details.tag, 'details')
+    assert.deepEqual(details.attrs, [['open', '']])
+    assert.ok(details.raw.startsWith(first))
+    assert.equal(details.children[0].tag, 'summary')
+    assert.deepEqual(details.children[0].attrs, [['title', 'a > b']])
+    assert.equal(details.children[0].children[0].type, 'strong')
+    assert.ok(details.content.includes('<ul>'))
+    assert.ok(details.content.includes('data-lang="js"'))
+    assert.ok(details.content.endsWith('</details>\n'))
+  }
+  finally {
+    session.dispose()
+  }
+})

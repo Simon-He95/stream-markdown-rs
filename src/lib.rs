@@ -9,6 +9,7 @@ mod tag;
 
 use std::{borrow::Cow, collections::HashMap, fmt, num::NonZeroUsize, ops::Range};
 
+pub use block::details::HtmlOpening;
 pub use block::vmr::{Vmr, VmrParameters};
 pub use inline::{Inline, InlineKind, Link};
 pub use plugin::{
@@ -72,6 +73,7 @@ pub struct Options {
     pub footnotes: bool,
     /// Enables Markstream syntax and typography extensions.
     pub markstream: bool,
+    pub require_closing_strong: bool,
     /// HTML-like element names that produce structured custom nodes.
     pub custom_tags: Vec<String>,
 }
@@ -172,6 +174,11 @@ pub enum BlockData {
     SegmentedHtml(Vec<RawLine>),
     Table(Box<TableData>),
     Vmr(Vmr),
+    Details(HtmlOpening),
+    Summary {
+        opening: HtmlOpening,
+        content: InlineContent,
+    },
     Math {
         body: Text,
     },
@@ -206,6 +213,7 @@ pub enum PreviewHint {
         table: Box<TableData>,
         loading: bool,
     },
+    TableRow(Vec<InlineContent>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

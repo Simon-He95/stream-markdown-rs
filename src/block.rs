@@ -1,3 +1,5 @@
+#[path = "details.rs"]
+pub(crate) mod details;
 #[path = "footnotes.rs"]
 mod footnotes;
 #[path = "vmr.rs"]
@@ -396,6 +398,7 @@ enum Active {
     Fence(Fence),
     Math(DisplayMath),
     Footnote(footnotes::Note),
+    Summary(details::Summary),
     Table(Table),
     Element(Element),
     Html(Html),
@@ -422,6 +425,7 @@ struct Dependent {
 enum Dependency {
     Leaf(Dependent),
     Footnote(footnotes::NoteBody),
+    Summary(details::SummaryBody),
     Cell {
         id: BlockId,
         index: usize,
@@ -434,6 +438,7 @@ impl Dependency {
         match self {
             Self::Leaf(leaf) => (leaf.id, None),
             Self::Footnote(body) => (body.id, None),
+            Self::Summary(body) => (body.id, None),
             Self::Cell { id, index, .. } => (*id, Some(*index)),
         }
     }
@@ -459,11 +464,15 @@ pub(crate) struct Engine {
     active: Option<Active>,
     containers: Vec<Frame>,
     draft: Option<Draft>,
+    html_draft: Option<BlockId>,
+    partial_list: Option<container::Prefix>,
     preview: Option<BlockId>,
+    row_preview_end: usize,
     inline_preview: Option<(BlockId, usize)>,
     separator: Option<SeparatorProbe>,
     fence_probe: Option<FenceProbe>,
     tag_probe: Option<tag::OpeningProbe>,
+    details_checked: usize,
     refs: References,
     footnotes: Option<Box<footnotes::Index>>,
     waiting: HashMap<String, Vec<Dependency>>,
@@ -487,11 +496,15 @@ impl Engine {
             active: None,
             containers: Vec::new(),
             draft: None,
+            html_draft: None,
+            partial_list: None,
             preview: None,
+            row_preview_end: 0,
             inline_preview: None,
             separator: None,
             fence_probe: None,
             tag_probe: None,
+            details_checked: 0,
             refs: References::default(),
             footnotes,
             waiting: HashMap::new(),
@@ -610,11 +623,16 @@ impl Engine {
                 let limit = self
                     .containers
                     .iter()
-                    .rposition(|frame| matches!(frame.kind, Kind::Vmr { .. }))
+                    .rposition(|frame| {
+                        matches!(frame.kind, Kind::Vmr { .. } | Kind::Details { .. })
+                    })
                     .map_or(0, |index| index + 1);
                 self.close_containers(limit, &mut output);
             }
-            if self.options.markstream && self.partial_vmr(source, &mut output)? {
+            if self.options.markstream
+                && (self.partial_vmr(source, &mut output)?
+                    || self.partial_details(source, &mut output)?)
+            {
                 return Ok(());
             }
             if self.options.footnotes
@@ -635,6 +653,9 @@ impl Engine {
                 && self.partial_display(source, &mut output)?
             {
                 return Ok(());
+            }
+            if self.options.markstream {
+                self.open_partial_list(source, &mut output)?;
             }
             self.partial(source, &mut output);
             if self.options.preview == Preview::Ai {
@@ -731,8 +752,117 @@ impl Engine {
         }
     }
 
+    fn preview_container_paragraph(&mut self, source: &str, output: &mut Output<'_>) -> bool {
+        let Some(Active::Paragraph(paragraph)) = &self.active else {
+            return false;
+        };
+        if !paragraph.visible || self.containers.is_empty() {
+            return false;
+        }
+        let id = paragraph.id;
+        let continuation = self.provisional_continuation(source);
+        let end = continuation.map_or(paragraph.span.end, |span| span.end);
+        if self.inline_preview == Some((id, end)) {
+            return true;
+        }
+        let body_end = continuation.map_or(paragraph.span.end, |_| paragraph.next);
+        let mut spans = smallvec::SmallVec::<[Span; 8]>::new();
+        if paragraph.parts.is_empty() {
+            spans.push(Span::new(paragraph.span.start, body_end));
+        } else {
+            let mut total = 0;
+            for span in &paragraph.parts {
+                let end = span.end.min(body_end);
+                total += end - span.start;
+                if total > 1024 {
+                    self.clear_inline_preview(id, output);
+                    return true;
+                }
+                spans.push(Span::new(span.start, end));
+            }
+        }
+        if let Some(span) = continuation {
+            spans.push(span);
+        }
+        if spans
+            .iter()
+            .map(|span| span.end - span.start)
+            .sum::<usize>()
+            > 1024
+        {
+            self.clear_inline_preview(id, output);
+            return true;
+        }
+        let mut nodes = inline::parse_fragments_preview(source, &spans, &self.options, &self.refs);
+        if self.options.footnotes {
+            self.resolve_footnote_nodes(source, &mut nodes, false);
+        }
+        if nodes.is_empty() {
+            self.clear_inline_preview(id, output);
+        } else {
+            self.inline_preview = Some((id, end));
+            output.update(Change::PreviewInlines { id, nodes });
+        }
+        true
+    }
+
+    fn provisional_continuation(&self, source: &str) -> Option<Span> {
+        if self.line_start >= self.scan {
+            return None;
+        }
+        let mut line = Line::new(self.line_start, self.scan, self.scan);
+        for frame in &self.containers {
+            let raw = &source[line.start..line.end];
+            let prefix = match frame.kind {
+                Kind::Quote => container::quote_at(raw, line.column, line.padding)?,
+                Kind::List { .. } | Kind::Vmr { .. } | Kind::Details { .. } => continue,
+                Kind::Item { indent, .. } => {
+                    let prefix =
+                        container::whitespace(raw.as_bytes(), line.column, line.padding, indent);
+                    if prefix.columns < indent {
+                        return None;
+                    }
+                    prefix
+                }
+            };
+            line.advance(prefix);
+        }
+        let raw = &source[line.start..line.end];
+        let head = unindent(raw);
+        if blank(head)
+            || interrupts_paragraph(head)
+            || setext(head).is_some()
+            || container::quote_at(raw, line.column, line.padding).is_some()
+            || container::list_at(raw, line.column, line.padding)
+                .is_some_and(|(marker, _)| marker.interrupts(raw))
+            || (self.options.markstream
+                && (self.vmr_opener(source, line) || self.details_opener(source, line)))
+            || (self.options.math && math_block::opening(head).is_some())
+            || self.is_custom_start(source, line.end - head.len(), line.end)
+        {
+            return None;
+        }
+        Some(Span::new(line.end - head.len(), line.end))
+    }
+
+    fn clear_inline_preview(&mut self, id: BlockId, output: &mut Output<'_>) {
+        if self
+            .inline_preview
+            .is_some_and(|(previous, _)| previous == id)
+        {
+            output.update(Change::PreviewInlines {
+                id,
+                nodes: Vec::new(),
+            });
+        }
+        self.inline_preview = None;
+    }
+
     fn preview_inline(&mut self, source: &str, output: &mut Output<'_>) {
         const MAX_PREVIEW_BYTES: usize = 1024;
+        if self.options.markstream && self.preview_container_paragraph(source, output) {
+            return;
+        }
         let target = match &self.active {
             Some(Active::Paragraph(paragraph))
                 if paragraph.visible && paragraph.parts.is_empty() =>
@@ -742,24 +872,24 @@ impl Engine {
                     Span::new(paragraph.span.start, paragraph.published),
                 ))
             }
-            None => self.draft.map(|draft| {
-                let mut start = draft.start;
-                if source.as_bytes()[start] == b'#'
-                    && let Some((_, content)) = atx(&source[start..draft.published], start)
-                {
-                    start = content.start;
-                }
-                (draft.id, Span::new(start, draft.published))
-            }),
+            None => self
+                .draft
+                .filter(|draft| Some(draft.id) != self.html_draft)
+                .map(|draft| {
+                    let mut start = draft.start;
+                    if source.as_bytes()[start] == b'#'
+                        && let Some((_, content)) = atx(&source[start..draft.published], start)
+                    {
+                        start = content.start;
+                    }
+                    (draft.id, Span::new(start, draft.published))
+                }),
             _ => None,
         };
         let Some((id, body)) = target else {
             self.inline_preview = None;
             return;
         };
-        let had_preview = self
-            .inline_preview
-            .is_some_and(|(previous, _)| previous == id);
         if body.end - body.start <= MAX_PREVIEW_BYTES {
             if self.inline_preview == Some((id, body.end)) {
                 return;
@@ -784,13 +914,7 @@ impl Engine {
                 }
             }
         }
-        if had_preview {
-            output.update(Change::PreviewInlines {
-                id,
-                nodes: Vec::new(),
-            });
-        }
-        self.inline_preview = None;
+        self.clear_inline_preview(id, output);
     }
 
     fn stream_fence_text(&mut self, bytes: &[u8], output: &mut Output<'_>) -> bool {
@@ -827,6 +951,7 @@ impl Engine {
 
     fn clear_preview(&mut self, output: &mut Output<'_>) {
         if let Some(id) = self.preview.take() {
+            self.row_preview_end = 0;
             output.update(Change::Preview { id, hint: None });
         }
     }
@@ -891,15 +1016,179 @@ impl Engine {
         Ok(true)
     }
 
+    fn partial_html(&mut self, source: &str, span: Span, output: &mut Output<'_>) -> bool {
+        if !self.options.markstream || self.active.is_some() || span.end - span.start > 1024 {
+            return false;
+        }
+        let head = unindent(&source[Range::from(span)]);
+        if !head.starts_with('<') {
+            return false;
+        }
+        let start = span.end - head.len();
+        let opener = tag::opening(source, start, span.end);
+        let block_rule = html_start(head, false);
+        let void = opener
+            .as_ref()
+            .is_some_and(|open| open.self_closing || is_void_html(open.tag.tag_name(source)));
+        let status = match block_rule {
+            Some(rule @ (HtmlEnd::Literal(_) | HtmlEnd::AsciiCase(_))) => Some(rule.closes(head)),
+            Some(HtmlEnd::Blank) => opener.as_ref().map(|open| {
+                void || tag::close(source, open.end, span.end, open.tag, &mut 1).is_some()
+            }),
+            None if void
+                && opener
+                    .as_ref()
+                    .is_some_and(|open| blank(&source[open.end..span.end])) =>
+            {
+                Some(true)
+            }
+            _ => None,
+        };
+        if status.is_none() && opener.is_none() {
+            return false;
+        }
+        let (id, present) = self
+            .draft
+            .map_or_else(|| (self.id(), false), |draft| (draft.id, true));
+        let (status, data) = if let Some(closed) = status {
+            self.html_draft = Some(id);
+            (
+                if closed {
+                    BlockStatus::Closed
+                } else {
+                    BlockStatus::Open
+                },
+                BlockData::Html,
+            )
+        } else {
+            self.html_draft = None;
+            (
+                BlockStatus::Open,
+                BlockData::Paragraph(InlineContent::Plain(Span::new(start, span.end))),
+            )
+        };
+        self.draft = Some(Draft {
+            id,
+            start,
+            published: span.end,
+        });
+        output.done(
+            Block {
+                id,
+                span,
+                status,
+                data,
+            },
+            present,
+            self.parent(),
+        );
+        true
+    }
+
+    fn open_partial_list(
+        &mut self,
+        source: &str,
+        output: &mut Output<'_>,
+    ) -> Result<(), ParseError> {
+        if self.partial_list.is_some() {
+            for frame in &mut self.containers {
+                if frame.end < self.scan {
+                    frame.end = self.scan;
+                    output.update(Change::SetStatus {
+                        id: frame.id,
+                        status: BlockStatus::Open,
+                        end: self.scan,
+                    });
+                }
+            }
+            return Ok(());
+        }
+        if self.running.is_some()
+            || !self.containers.is_empty()
+            || self.draft.is_some()
+            || !matches!(self.active, None | Some(Active::Paragraph(_)))
+        {
+            return Ok(());
+        }
+        let raw = &source[self.line_start..self.scan];
+        let Some((marker, prefix)) = container::list_at(raw, 0, 0) else {
+            return Ok(());
+        };
+        if self.active.is_some() && !marker.interrupts(raw) {
+            return Ok(());
+        }
+        let content = unindent(&raw[marker.content..]);
+        if !content
+            .as_bytes()
+            .first()
+            .is_some_and(|&byte| ordinary_start(byte) || partial_inline_start(content))
+        {
+            return Ok(());
+        }
+        self.stop_leaf(source, output)?;
+        self.open_container(
+            Kind::List {
+                style: marker.style,
+                ordinal: marker.ordinal,
+                tight: true,
+            },
+            self.line_start,
+            self.scan,
+            output,
+        );
+        self.open_container(
+            Kind::Item {
+                indent: marker.indent,
+                blank: false,
+                has_content: true,
+                task: None,
+            },
+            self.line_start,
+            self.scan,
+            output,
+        );
+        self.partial_list = Some(prefix);
+        Ok(())
+    }
+
+    fn partial_table_row(
+        &mut self,
+        source: &str,
+        span: Span,
+        columns: usize,
+        id: BlockId,
+        output: &mut Output<'_>,
+    ) {
+        if span.end - span.start > 1024 {
+            self.clear_preview(output);
+            return;
+        }
+        if self.preview == Some(id) && self.row_preview_end == span.end {
+            return;
+        }
+        let cells = cell_spans(source, span)
+            .chain(std::iter::repeat(Span::new(span.end, span.end)))
+            .take(columns)
+            .map(InlineContent::Plain)
+            .collect();
+        self.preview = Some(id);
+        self.row_preview_end = span.end;
+        output.update(Change::Preview {
+            id,
+            hint: Some(PreviewHint::TableRow(cells)),
+        });
+    }
+
     fn partial(&mut self, source: &str, output: &mut Output<'_>) {
         let end = self.scan;
-        let start = self.line_start;
+        let start = self.line_start + self.partial_list.map_or(0, |prefix| prefix.bytes);
         if self.running.is_some()
             || start >= end
-            || self
-                .containers
-                .iter()
-                .any(|frame| !matches!(frame.kind, Kind::Vmr { .. }))
+            || (self.partial_list.is_none()
+                && self
+                    .containers
+                    .iter()
+                    .any(|frame| !matches!(frame.kind, Kind::Vmr { .. } | Kind::Details { .. })))
         {
             return;
         }
@@ -930,6 +1219,31 @@ impl Engine {
             return;
         }
         if matches!(self.active, Some(Active::Element(_))) {
+            return;
+        }
+        if self.options.markstream
+            && let Some(Active::Html(html)) = &mut self.active
+        {
+            if !blank(head) {
+                emit_append(output, html.id, &mut html.span.end, end);
+            }
+            return;
+        }
+        if byte == b'<' && self.partial_html(source, Span::new(start, end), output) {
+            return;
+        }
+        if let Some(Active::Table(table)) = &self.active
+            && self.options.preview == Preview::Ai
+            && byte == b'|'
+            && !blank(&head[1..])
+        {
+            self.partial_table_row(
+                source,
+                Span::new(start, end),
+                table.columns,
+                table.id,
+                output,
+            );
             return;
         }
         if let Some(Active::Paragraph(paragraph)) = &self.active
@@ -1057,6 +1371,11 @@ impl Engine {
         mut line: Line,
         output: &mut Output<'_>,
     ) -> Result<(), ParseError> {
+        if let Some(prefix) = self.partial_list.take() {
+            line.advance(prefix);
+            self.extend_containers(line.next);
+            return self.line(source, line, output);
+        }
         if self.containers.is_empty() {
             let raw = &source[line.start..line.end];
             let marker = if raw.starts_with(' ') {
@@ -1071,10 +1390,21 @@ impl Engine {
         let physical_blank = blank(&source[line.start..line.end]);
         let mut matched = 0;
         let mut vmr_close = None;
+        let mut details_close = None;
         while let Some(frame) = self.containers.get(matched) {
             let remaining = &source[line.start..line.end];
             let prefix = match frame.kind {
                 Kind::Quote => container::quote_at(remaining, line.column, line.padding),
+                Kind::Details { .. } => {
+                    details_close = self
+                        .details_closer(source, line, *frame)
+                        .map(|end| (matched, line, end));
+                    Some(container::Prefix {
+                        bytes: 0,
+                        columns: 0,
+                        padding: line.padding,
+                    })
+                }
                 Kind::Vmr { .. } => {
                     vmr_close = self
                         .vmr_closer(source, line, *frame)
@@ -1122,6 +1452,11 @@ impl Engine {
             line.advance(prefix);
         }
 
+        if let Some((index, close, end)) = details_close
+            && (matched < self.containers.len() || !self.details_leaf_protected())
+        {
+            return self.close_details(source, close, index, end, output);
+        }
         if let Some((index, close)) = vmr_close
             && (matched < self.containers.len() || !self.vmr_leaf_protected())
         {
@@ -1133,7 +1468,8 @@ impl Engine {
             let starts_container = container::quote_at(remaining, line.column, line.padding)
                 .is_some()
                 || container::list_at(remaining, line.column, line.padding).is_some()
-                || self.options.markstream && self.vmr_opener(source, line);
+                || self.options.markstream
+                    && (self.vmr_opener(source, line) || self.details_opener(source, line));
             if matches!(self.active, Some(Active::Paragraph(_)))
                 && !blank(remaining)
                 && !starts_container
@@ -1173,6 +1509,7 @@ impl Engine {
                     | Active::Html(_)
                     | Active::Math(_)
                     | Active::Footnote(_)
+                    | Active::Summary(_)
             )
         ) || self.running.is_some()
         {
@@ -1354,9 +1691,34 @@ impl Engine {
         };
         let start = line.end - head.len();
 
+        if self.batch
+            && self.active.is_none()
+            && leading.columns < 4
+            && head
+                .as_bytes()
+                .first()
+                .is_some_and(|&byte| ordinary_start(byte))
+            && !self.options.math
+            && !self.options.markstream
+            && self.plugins.is_empty()
+        {
+            self.start_paragraph(head, start, line, output);
+            return Ok(());
+        }
+
         if self.options.markstream
             && head.starts_with(':')
             && self.open_vmr_line(source, line, output)?
+        {
+            return Ok(());
+        }
+        if self.options.markstream
+            && (head.starts_with('<')
+                || self
+                    .containers
+                    .iter()
+                    .any(|frame| matches!(frame.kind, Kind::Details { .. })))
+            && self.open_details_line(source, line, output)?
         {
             return Ok(());
         }
@@ -1367,6 +1729,9 @@ impl Engine {
             return Ok(());
         }
         match self.active.take() {
+            Some(Active::Summary(summary)) => {
+                return self.advance_summary(source, summary, line, output);
+            }
             Some(Active::Footnote(note)) => {
                 if self.advance_footnote(source, note, line, output)? {
                     return Ok(());
@@ -1506,6 +1871,7 @@ impl Engine {
                 self.close_indented(code, output);
             }
             Some(Active::Table(mut table)) => {
+                self.clear_preview(output);
                 if !blank(head) && !interrupts_paragraph(head) {
                     let spans = cell_spans(source, line.span())
                         .take(table.columns)
@@ -1816,7 +2182,7 @@ impl Engine {
             return Ok(());
         }
         if let Some(end) = html_start(head, true) {
-            let id = self.id();
+            let (id, present) = self.block_id(start);
             let span = Span::new(line.start, line.next);
             let segmented = self.parent().is_some();
             let first_line = segmented.then(|| vec![line.raw()]);
@@ -1829,7 +2195,7 @@ impl Engine {
                         status: BlockStatus::Closed,
                         data,
                     },
-                    false,
+                    present,
                     self.parent(),
                 );
             } else {
@@ -1847,15 +2213,18 @@ impl Engine {
                 let data = (segmented && !self.batch)
                     .then(|| vec![line.raw()])
                     .map_or(BlockData::Html, BlockData::SegmentedHtml);
-                output.open(
-                    Block {
-                        id,
-                        span,
-                        status: BlockStatus::Open,
-                        data,
-                    },
-                    self.parent(),
-                );
+                if !self.batch {
+                    output.done(
+                        Block {
+                            id,
+                            span,
+                            status: BlockStatus::Open,
+                            data,
+                        },
+                        present,
+                        self.parent(),
+                    );
+                }
                 self.active = Some(Active::Html(html));
             }
             return Ok(());
@@ -1867,6 +2236,11 @@ impl Engine {
             return Ok(());
         }
 
+        self.start_paragraph(head, start, line, output);
+        Ok(())
+    }
+
+    fn start_paragraph(&mut self, head: &str, start: usize, line: Line, output: &mut Output<'_>) {
         let draft = self.draft;
         let (id, _) = self.block_id(start);
         let visible = !self.batch && !(head.starts_with('[') && head.contains("]:"));
@@ -1894,10 +2268,10 @@ impl Engine {
             next: line.next,
             parts: Vec::new(),
         }));
-        Ok(())
     }
 
     fn block_id(&mut self, start: usize) -> (BlockId, bool) {
+        self.html_draft = None;
         if let Some(draft) = self.draft.take().filter(|draft| draft.start == start) {
             (draft.id, true)
         } else {
@@ -1933,6 +2307,7 @@ impl Engine {
             }
             Active::Math(math) => self.display_fallback(source, math, output)?,
             Active::Footnote(note) => self.finish_footnote(source, note, output)?,
+            Active::Summary(summary) => self.finish_summary(source, summary, output)?,
             Active::Fence(fence) => {
                 let end = fence.body.end;
                 self.close_code(fence, end, status, output);
@@ -2272,6 +2647,7 @@ impl Engine {
                     Dependency::Footnote(body) => {
                         self.finish_footnote_body(source, body, output)?
                     }
+                    Dependency::Summary(body) => self.finish_summary_body(source, body, output)?,
                     Dependency::Cell { id, index, span } => {
                         let content = self.stream_cell(source, id, index, span)?;
                         output.update(Change::ReplaceTableCell { id, index, content });
@@ -2470,6 +2846,10 @@ impl Engine {
                     content: InlineContent::Plain(span),
                     ..
                 }
+                | BlockData::Summary {
+                    content: InlineContent::Plain(span),
+                    ..
+                }
                 | BlockData::Heading {
                     content: InlineContent::Plain(span),
                     ..
@@ -2481,7 +2861,8 @@ impl Engine {
                     match &mut block.data {
                         BlockData::Paragraph(node)
                         | BlockData::Heading { content: node, .. }
-                        | BlockData::Footnote { content: node, .. } => *node = content,
+                        | BlockData::Footnote { content: node, .. }
+                        | BlockData::Summary { content: node, .. } => *node = content,
                         _ => unreachable!(),
                     }
                 }
@@ -2798,6 +3179,17 @@ fn blank(line: &str) -> bool {
 fn container_block(frame: Frame, mut status: BlockStatus) -> Block {
     let data = match frame.kind {
         Kind::Quote => BlockData::Quote,
+        Kind::Details {
+            opening_end,
+            closed,
+        } => {
+            if status == BlockStatus::Closed && !closed {
+                status = BlockStatus::Incomplete;
+            }
+            BlockData::Details(details::HtmlOpening {
+                span: Span::new(frame.start, opening_end),
+            })
+        }
         Kind::Vmr {
             header_end,
             closed,
@@ -3007,6 +3399,15 @@ fn interrupts_paragraph(text: &str) -> bool {
         Some(b'<') => html_start(text, false).is_some(),
         _ => false,
     }
+}
+
+fn is_void_html(name: &str) -> bool {
+    [
+        "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param",
+        "source", "track", "wbr",
+    ]
+    .iter()
+    .any(|element| name.eq_ignore_ascii_case(element))
 }
 
 fn html_start(line: &str, allow_type_seven: bool) -> Option<HtmlEnd> {

@@ -173,6 +173,18 @@ function projectInlines(content, context) {
   return projectInlineNodes(content.parsed, context)
 }
 
+function legacyDelimitedText(children) {
+  return children.map((child) => {
+    if (child.type === 'link')
+      return ''
+    if (child.type === 'image')
+      return child.raw
+    return child.content ?? child.code ?? (
+      child.children ? legacyDelimitedText(child.children) : child.raw
+    )
+  }).join('')
+}
+
 function projectInlineNodes(inlines, context) {
   const nodes = []
   for (let index = 0; index < inlines.length; index++) {
@@ -189,7 +201,9 @@ function projectInlineNodes(inlines, context) {
       nodes.push({ type: 'inline_code', code, raw: code })
     }
     else if (kind === 'emphasis' || kind === 'strong' || kind === 'strikethrough') {
-      nodes.push({ type: kind, children: projectInlineNodes(data, context), raw })
+      const children = projectInlineNodes(data, context)
+      const marker = kind === 'emphasis' ? '*' : kind === 'strong' ? '**' : '~~'
+      nodes.push({ type: kind, children, raw: context.markstream ? marker + legacyDelimitedText(children) + marker : raw })
     }
     else if (kind === 'subscript' || kind === 'superscript') {
       const marker = kind === 'subscript' ? '~' : '^'
@@ -208,11 +222,24 @@ function projectInlineNodes(inlines, context) {
       const id = context.read(data.label)
       nodes.push({ type: kind, id, raw: `[^${id}]` })
     }
+    else if (kind === 'reference') {
+      nodes.push({ type: kind, id: context.read(data.label), raw })
+    }
     else if (kind === 'link' || kind === 'image') {
       const href = markdownHref(readText(data.destination, context))
       const title = data.title === null ? null : readText(data.title, context) || null
       const children = projectInlineNodes(data.children, context)
-      if (!allowsLink(href, context, kind)) {
+      const allowed = allowsLink(href, context, kind)
+      if (kind === 'link' && data.loading) {
+        const text = legacyLinkText(children)
+        const visibleHref = allowed ? href : ''
+        const visibleChildren = children.map(child => child.type === 'text' ? textNode(child.content, false) : child)
+        nodes.push({
+          type: kind, href: visibleHref, title: title ?? '', text, children: visibleChildren,
+          raw: `[${text}](${visibleHref})`, loading: true, markup: '',
+        })
+      }
+      else if (!allowed) {
         mergeText(nodes, textNode(displayText(children), false))
       }
       else if (kind === 'image') {
@@ -258,7 +285,7 @@ function projectInlineNodes(inlines, context) {
             depth++
         }
       }
-      const children = projectInlineNodes(inlines.slice(index + 1, end), context)
+      let children = projectInlineNodes(inlines.slice(index + 1, end), context)
       const combined = end > index ? normalize(context.read([span[0], inlines[end].span[1]])) : raw
       const tag = header?.tag
       const href = header && attrValue(header.attrs, 'href')
@@ -274,6 +301,13 @@ function projectInlineNodes(inlines, context) {
       }
       else {
         const custom = tag && context.customTags.includes(tag)
+        if (context.markstream && !custom) {
+          children = children.map(child => (
+            (child.type === 'text' || child.type === 'reference') && /^\[\d+\]$/.test(child.raw)
+              ? textNode(child.raw, false)
+              : child
+          ))
+        }
         nodes.push({
           type: custom ? tag : 'html_inline',
           ...(tag && { tag, attrs: header.attrs }),
@@ -331,7 +365,7 @@ function displayFence(block, context) {
   const { span, data } = block
   const info = data.info === null ? '' : context.read(data.info)
   let content = data.lines ? rawLines(data.lines, context) : readText(data.body, context)
-  let loading = block.open && !context.final
+  let loading = block.status === 'open' && !context.final
   let sourceSpan = span
   if (context.markstream && loading && block.parent === null && span[1] < context.length) {
     const lineEnd = context.lineStarts[lineAt(context.lineStarts, span[0]) + 1] ?? span[1]
@@ -356,9 +390,11 @@ function projectTableRow(values, alignments, header, context) {
   return { type: 'table_row', cells, raw: cells.map(cell => cell.raw).join('|') }
 }
 
-function projectTable(data, loading, map, context) {
+function projectTable(data, loading, map, context, provisionalRow) {
   const header = projectTableRow(data.header, data.alignments, true, context)
   const rows = data.rows.map(row => projectTableRow(row, data.alignments, false, context))
+  if (provisionalRow)
+    rows.push(projectTableRow(provisionalRow, data.alignments, false, context))
   return { type: 'table', header, rows, raw: [header, ...rows].map(row => row.raw).join('\n'), loading, ...map }
 }
 
@@ -390,7 +426,7 @@ function vmrValue(text) {
 }
 
 function vmrNode(block, nodes, context) {
-  const { data, span, open } = block
+  const { data, span, status } = block
   const children = projectChildren(nodes, block.children, context)
   const name = context.read(data.name)
   const args = data.args ? context.read(data.args) : undefined
@@ -424,20 +460,105 @@ function vmrNode(block, nodes, context) {
 
   return {
     type: 'vmr_container', name, attrs, children, raw: raw + ':::',
-    loading: open && !context.final,
+    loading: status === 'open' && !context.final,
     ...sourceMap([span[0], Math.max(span[1], bodyEnd)], context),
   }
 }
 
+function escapeHtml(value) {
+  return value.replace(/[&<>"']/g, char => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[char])
+}
+
+function renderDetailChild(node, inlineParagraph = false) {
+  const children = () => (node.children ?? []).map(child => renderDetailChild(child)).join('')
+  switch (node.type) {
+    case 'text':
+      return escapeHtml(node.content)
+    case 'inline_code':
+      return '<code>' + escapeHtml(node.code) + '</code>'
+    case 'strong':
+      return '<strong>' + children() + '</strong>'
+    case 'emphasis':
+      return '<em>' + children() + '</em>'
+    case 'strikethrough':
+      return '<s>' + children() + '</s>'
+    case 'hardbreak':
+      return '<br>\n'
+    case 'link':
+      return '<a href="' + escapeHtml(node.href) + '">' + children() + '</a>'
+    case 'paragraph':
+      return inlineParagraph ? children() : '<p>' + children() + '</p>\n'
+    case 'heading':
+      return '<h' + node.level + '>' + children() + '</h' + node.level + '>\n'
+    case 'blockquote':
+      return '<blockquote>\n' + children() + '</blockquote>\n'
+    case 'list': {
+      const tag = node.ordered ? 'ol' : 'ul'
+      const start = node.ordered && node.start !== 1 ? ' start="' + node.start + '"' : ''
+      const items = node.items.map(item => '<li>' + item.children.map(child => (
+        renderDetailChild(child, item.children.length === 1)
+      )).join('') + '</li>\n').join('')
+      return '<' + tag + start + '>\n' + items + '</' + tag + '>\n'
+    }
+    case 'code_block':
+      return '<div class="code-block" data-lang="' + escapeHtml(node.language) + '"><pre>'
+        + escapeHtml(node.code) + '</pre></div>'
+    case 'html_block':
+    case 'html_inline':
+      return node.content
+    default:
+      return escapeHtml(node.raw)
+  }
+}
+
+function detailNode(block, nodes, raw, map, context) {
+  const { status, data } = block
+  const open = status === 'open'
+  const summary = block.kind === 'summary'
+  const attrs = data.attrs
+  if (summary) {
+    const content = raw.trimEnd()
+    return {
+      type: 'html_block', tag: 'summary', content, raw: content,
+      ...(attrs.length && { attrs }),
+      loading: open && !context.final, children: projectInlines(data.content, context), ...map,
+    }
+  }
+
+  const children = projectChildren(nodes, block.children, context)
+  const opening = normalize(context.read(data.opening))
+  const openerLine = lineAt(context.lineStarts, data.opening[0])
+  const openerLineEnd = context.lineStarts[openerLine + 1]
+  if (open && !children.length && openerLineEnd > block.span[1]
+    && !context.read([data.opening[1], openerLineEnd]).trim()) {
+    const surfaceSpan = [block.span[0], openerLineEnd]
+    raw = normalize(context.read(surfaceSpan))
+    map = sourceMap(surfaceSpan, context)
+  }
+  const body = children.map((child, index) => renderDetailChild(
+    child,
+    openerLine === lineAt(context.lineStarts, nodes.get(block.children[index]).span[0]),
+  )).join('')
+  const closing = status === 'closed' ? raw.match(/<\/details[ \t]*>[ \t]*\n?$/i)?.[0] : null
+  return {
+    type: 'html_block', tag: 'details', attrs, children, raw,
+    content: opening + body + (closing ?? '</details>'),
+    loading: open && !context.final, ...map,
+  }
+}
+
 function projectBlock(block, nodes, context) {
-  const { kind, span, data, open } = block
+  const { kind, span, data, status } = block
+  const open = status === 'open'
   const raw = normalize(context.read(span))
   const map = sourceMap(span, context)
 
   switch (kind) {
     case 'paragraph': {
       const preview = block.preview
-      if (preview) {
+      if (preview?.kind === 'table') {
         const previewMap = sourceMap([span[0], context.length], context)
         return projectTable(preview.data, preview.loading, previewMap, context)
       }
@@ -450,7 +571,13 @@ function projectBlock(block, nodes, context) {
     case 'code_block':
       return displayFence(block, context)
     case 'indented_code': {
-      const text = rawLines(data.lines, context).trim()
+      const content = rawLines(data.lines, context)
+      const text = content.trim()
+      const literal = /^(?:const|let|var)\b/.test(text) || /^<\/?[a-z][\w:.-]*(?:\s|>)/i.test(text)
+      if (!context.markstream || !context.fixIndentedCodeBlock || data.lines.length > 1 || literal) {
+        const code = content.endsWith('\n') ? content : content + '\n'
+        return { type: 'code_block', language: '', code, raw: code, loading: false, ...map, ...map.sourceMap }
+      }
       return { type: 'paragraph', children: text ? [textNode(text)] : [], raw: text }
     }
     case 'vmr_container':
@@ -484,20 +611,32 @@ function projectBlock(block, nodes, context) {
       }
       return { type: kind, children, raw: children.map(child => child.raw).join(kind === 'blockquote' ? '\n' : ''), ...map }
     }
-    case 'table':
-      return projectTable(data, false, map, context)
+    case 'table': {
+      const row = block.preview?.kind === 'table_row' ? block.preview.cells : null
+      const tableMap = row ? sourceMap([span[0], context.length], context) : map
+      return projectTable(data, false, tableMap, context, row)
+    }
     case 'custom': {
       const body = readText(data.body, context)
-      const content = context.markstream ? body.replace(/^\n/, '') : body
+      let content = context.markstream ? body.replace(/^\n/, '') : body
+      if (context.markstream && status === 'closed')
+        content = content.replace(/\n$/, '')
       return { type: data.name, tag: data.name, attrs: data.attrs.length ? data.attrs : undefined, content, raw, loading: open && !context.final, ...map }
     }
+    case 'details':
+    case 'summary':
+      return detailNode(block, nodes, raw, map, context)
     case 'html_block': {
       const content = data.lines ? rawLines(data.lines, context) : raw
       const header = htmlHeader(content.trimStart())
+      const loading = status === 'open' && !context.final && !header?.closed
+      const display = context.markstream && loading && header?.tag
+        ? content + `</${header.tag}>`
+        : content
       return {
-        type: kind, content, raw: content, tag: header?.tag ?? '',
+        type: kind, content: display, raw: content, tag: header?.tag ?? '',
         ...(header?.attrs.length && { attrs: header.attrs }),
-        loading: open && !context.final,
+        loading,
         ...map,
       }
     }

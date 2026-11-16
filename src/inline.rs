@@ -34,8 +34,10 @@ pub enum InlineKind {
     Highlight(Vec<Inline>),
     Insert(Vec<Inline>),
     Link(Box<Link>),
+    LinkPreview(Box<Link>),
     Image(Box<Link>),
     ImagePreview(Box<Link>),
+    NumericReference(Span),
     Html,
     FootnoteReference {
         label: Span,
@@ -278,6 +280,26 @@ pub(crate) fn parse_fragments(
     refs: &References,
     unresolved: Option<&mut Vec<String>>,
 ) -> Vec<Inline> {
+    parse_fragments_inner(source, fragments, options, refs, unresolved, false)
+}
+
+pub(crate) fn parse_fragments_preview(
+    source: &str,
+    fragments: &[Span],
+    options: &Options,
+    refs: &References,
+) -> Vec<Inline> {
+    parse_fragments_inner(source, fragments, options, refs, None, true)
+}
+
+fn parse_fragments_inner(
+    source: &str,
+    fragments: &[Span],
+    options: &Options,
+    refs: &References,
+    unresolved: Option<&mut Vec<String>>,
+    preview: bool,
+) -> Vec<Inline> {
     let mut nonempty = fragments
         .iter()
         .copied()
@@ -290,7 +312,7 @@ pub(crate) fn parse_fragments(
         contiguous.end = part.end;
         next
     }) {
-        return parse_inner(source, contiguous, options, refs, unresolved, None, false);
+        return parse_inner(source, contiguous, options, refs, unresolved, None, preview);
     }
 
     let capacity = fragments.iter().map(|part| part.end - part.start).sum();
@@ -322,7 +344,7 @@ pub(crate) fn parse_fragments(
         refs,
         unresolved,
         Some((source, &mut references)),
-        false,
+        preview,
     );
     references.sort_unstable();
     remap_nodes(&mut nodes, &joined, &mapping, &references);
@@ -372,7 +394,11 @@ fn remap_nodes(nodes: &mut [Inline], joined: &str, parts: &[Fragment], reference
             | InlineKind::Strikethrough(children)
             | InlineKind::Highlight(children)
             | InlineKind::Insert(children) => remap_nodes(children, joined, parts, references),
-            InlineKind::Link(link) | InlineKind::Image(link) | InlineKind::ImagePreview(link) => {
+            InlineKind::NumericReference(label) => *label = map_span(*label, parts),
+            InlineKind::Link(link)
+            | InlineKind::LinkPreview(link)
+            | InlineKind::Image(link)
+            | InlineKind::ImagePreview(link) => {
                 if references.binary_search(&node.span.start).is_err() {
                     remap_text(&mut link.destination, joined, parts);
                     if let Some(title) = &mut link.title {
@@ -405,6 +431,9 @@ pub(crate) fn needs_markstream_markup(text: &str) -> bool {
         || ["==", "++", "\"", "'"]
             .iter()
             .any(|needle| text.contains(needle))
+        || text
+            .trim_end_matches([' ', '\t', '\r', '\n'])
+            .ends_with('(')
 }
 
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
@@ -537,6 +566,9 @@ fn parse_inner(
             preview,
         )
     };
+    if options.markstream && preview {
+        markstream::strip_preview_tail(source, &mut nodes, options.math);
+    }
     if options.markstream && markstream::needs_quotes(content(source, input)) {
         markstream::smart_quotes(source, &mut nodes);
     }
@@ -667,6 +699,15 @@ fn parse_with<S: Storage, const MATH: bool, const MARKSTREAM: bool>(
         let mut delimiter = None;
         let mut next_special = None;
         let kind = match bytes[i] {
+            b'\\' if MARKSTREAM && preview && i + 1 < end && bytes[i + 1] == b'`' => {
+                if let Some((finish, code)) = markstream::escaped_code(source, i, end) {
+                    i = finish;
+                    InlineKind::Code(code)
+                } else {
+                    i += 2;
+                    InlineKind::Text(Text::Source(span(begin + 1, i)))
+                }
+            }
             b'\\' if i + 1 < end && bytes[i + 1].is_ascii_punctuation() => {
                 i += 2;
                 InlineKind::Text(Text::Source(span(begin + 1, i)))
@@ -713,6 +754,14 @@ fn parse_with<S: Storage, const MATH: bool, const MARKSTREAM: bool>(
                 if let Some(close) = end_code_span(bytes, n, end, n - begin, &mut backticks) {
                     i = close + n - begin;
                     InlineKind::Code(code_content(source, n, close))
+                } else if MARKSTREAM && preview && n - begin == 1 && n < end {
+                    i = memchr::memchr2(b'\n', b'\r', &bytes[n..end])
+                        .map_or(end, |offset| n + offset);
+                    if i == n {
+                        InlineKind::Text(Text::Source(span(begin, i)))
+                    } else {
+                        InlineKind::Code(Text::Source(span(n, i)))
+                    }
                 } else {
                     i = n;
                     InlineKind::Text(Text::Source(span(begin, i)))
@@ -781,19 +830,21 @@ fn parse_with<S: Storage, const MATH: bool, const MARKSTREAM: bool>(
                         end,
                         refs,
                         unresolved.as_deref_mut(),
-                        preview && bracket.image,
+                        preview && (bracket.image || MARKSTREAM),
                     ) {
                         let child_start = bracket.token + 1;
                         let linkify_image = gfm_autolink && bracket.image;
                         let mut children = if tokens.len() == child_start + 1 && !linkify_image {
                             singleton(tokens.pop().unwrap().into_inline(&mut payloads))
                         } else {
-                            finish_tokens::<S>(
+                            finish_tokens::<S, MARKSTREAM>(
                                 source,
                                 &mut tokens,
                                 child_start,
                                 &mut payloads,
                                 linkify_image,
+                                preview && !bracket.image,
+                                options.require_closing_strong,
                             )
                         };
                         tokens.pop();
@@ -808,18 +859,59 @@ fn parse_with<S: Storage, const MATH: bool, const MARKSTREAM: bool>(
                         } else {
                             source
                         };
+                        if MARKSTREAM && preview && !bracket.image {
+                            markstream::strip_preview_tail(source, &mut children, math);
+                        }
+                        let wrapper = if MARKSTREAM
+                            && target.loading
+                            && !bracket.image
+                            && children.len() == 1
+                        {
+                            match &children[0].kind {
+                                InlineKind::Strong(_) => Some(2),
+                                InlineKind::Emphasis(_) => Some(1),
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
+                        if wrapper.is_some() {
+                            let child = children.pop().unwrap();
+                            children = match child.kind {
+                                InlineKind::Strong(nested) | InlineKind::Emphasis(nested) => nested,
+                                _ => unreachable!(),
+                            };
+                        }
                         let link = Box::new(Link {
                             destination: decode_span(target_source, target.destination),
                             title: target.title.map(|value| decode_span(target_source, value)),
                             children,
                         });
-                        let kind = if target.loading {
-                            InlineKind::ImagePreview(link)
-                        } else if bracket.image {
-                            InlineKind::Image(link)
+                        let kind = if bracket.image {
+                            if target.loading {
+                                InlineKind::ImagePreview(link)
+                            } else {
+                                InlineKind::Image(link)
+                            }
                         } else {
                             link_generation += 1;
-                            InlineKind::Link(link)
+                            if target.loading {
+                                InlineKind::LinkPreview(link)
+                            } else {
+                                InlineKind::Link(link)
+                            }
+                        };
+                        let kind = if let Some(width) = wrapper {
+                            delimiter_kind(
+                                b'*',
+                                width,
+                                vec![Inline {
+                                    span: span(open.start, target.end),
+                                    kind,
+                                }],
+                            )
+                        } else {
+                            kind
                         };
                         tokens.push(Token::from_inline(
                             span(open.start, target.end),
@@ -828,6 +920,19 @@ fn parse_with<S: Storage, const MATH: bool, const MARKSTREAM: bool>(
                             &mut payloads,
                         ));
                         i = target.end;
+                        continue;
+                    }
+                    if MARKSTREAM
+                        && !bracket.image
+                        && numeric_reference(source, open.end, begin, end)
+                    {
+                        tokens.truncate(bracket.token);
+                        tokens.push(Token::from_inline(
+                            span(open.start, i),
+                            InlineKind::NumericReference(span(open.end, begin)),
+                            None,
+                            &mut payloads,
+                        ));
                         continue;
                     }
                 }
@@ -876,7 +981,15 @@ fn parse_with<S: Storage, const MATH: bool, const MARKSTREAM: bool>(
         i = next;
     }
 
-    finish_tokens::<S>(source, &mut tokens, 0, &mut payloads, gfm_autolink)
+    finish_tokens::<S, MARKSTREAM>(
+        source,
+        &mut tokens,
+        0,
+        &mut payloads,
+        gfm_autolink,
+        preview,
+        options.require_closing_strong,
+    )
 }
 
 fn literal_math_in_image(nodes: &mut [Inline]) {
@@ -890,9 +1003,10 @@ fn literal_math_in_image(nodes: &mut [Inline]) {
             | InlineKind::Insert(children) => {
                 literal_math_in_image(children);
             }
-            InlineKind::Link(link) | InlineKind::Image(link) | InlineKind::ImagePreview(link) => {
-                literal_math_in_image(&mut link.children)
-            }
+            InlineKind::Link(link)
+            | InlineKind::LinkPreview(link)
+            | InlineKind::Image(link)
+            | InlineKind::ImagePreview(link) => literal_math_in_image(&mut link.children),
             _ => {}
         }
     }
@@ -1071,12 +1185,14 @@ fn matching(open: Delimiter, close: Delimiter) -> bool {
         }
 }
 
-fn finish_tokens<S: Storage>(
+fn finish_tokens<S: Storage, const MARKSTREAM: bool>(
     source: &str,
     tokens: &mut S::Tokens,
     start: usize,
     payloads: &mut S::Payloads,
     gfm_autolink: bool,
+    preview: bool,
+    require_closing_strong: bool,
 ) -> Vec<Inline> {
     let head = tokens.len();
     if head == start {
@@ -1145,6 +1261,20 @@ fn finish_tokens<S: Storage>(
                             .min(close_span.end - close_span.start)
                             .min(2)
                     };
+                    // The rest of a closing run can arrive in a later chunk.
+                    let open_used = if MARKSTREAM
+                        && preview
+                        && !require_closing_strong
+                        && close.marker == b'*'
+                        && used == 1
+                        && open_span.end - open_span.start == 2
+                        && close_span.end - close_span.start == 1
+                        && tokens[i].next == usize::MAX
+                    {
+                        2
+                    } else {
+                        used
+                    };
                     let mut cursor = tokens[opener].next;
                     let children = if cursor != i && tokens[cursor].next == i {
                         singleton(tokens[cursor].into_inline(payloads))
@@ -1158,12 +1288,12 @@ fn finish_tokens<S: Storage>(
                         children
                     };
 
-                    let kind = delimiter_kind(close.marker, used, children);
-                    tokens[opener].span.end -= used;
+                    let kind = delimiter_kind(close.marker, open_used, children);
+                    tokens[opener].span.end -= open_used;
                     tokens[i].span.start += used;
                     tokens[opener].next = tokens.len();
                     let mut group = Token::from_inline(
-                        span(open_span.end - used, close_span.start + used),
+                        span(open_span.end - open_used, close_span.start + used),
                         kind,
                         None,
                         payloads,
@@ -1171,7 +1301,8 @@ fn finish_tokens<S: Storage>(
                     group.next = i;
                     tokens.push(group);
                     openers.truncate(
-                        position + usize::from(open_span.end - open_span.start - used >= min_width),
+                        position
+                            + usize::from(open_span.end - open_span.start - open_used >= min_width),
                     );
                 }
             }
@@ -1181,6 +1312,9 @@ fn finish_tokens<S: Storage>(
             }
         }
 
+        if MARKSTREAM && preview {
+            preview_openers::<S>(tokens, payloads, &openers, require_closing_strong);
+        }
         let mut cursor = start;
         while cursor != usize::MAX {
             let token = tokens[cursor];
@@ -1193,6 +1327,67 @@ fn finish_tokens<S: Storage>(
         return gfm_linkify(source, output);
     }
     output
+}
+
+fn preview_openers<S: Storage>(
+    tokens: &mut S::Tokens,
+    payloads: &mut S::Payloads,
+    openers: &[usize],
+    require_closing_strong: bool,
+) {
+    let first_preview = tokens.len();
+    for &index in openers.iter().rev() {
+        let opener = tokens[index];
+        let delimiter = opener.delimiter().unwrap();
+        let width = opener.span.end - opener.span.start;
+        if delimiter.marker != b'*'
+            || delimiter.closes
+            || !(1..=3).contains(&width)
+            || require_closing_strong && width >= 2
+        {
+            continue;
+        }
+        let mut at = opener.next;
+        let mut end = opener.span.end;
+        let mut children = Vec::new();
+        while at != usize::MAX {
+            let token = tokens[at];
+            if at < first_preview
+                && let TokenKind::Rich(index) = token.kind
+            {
+                let kind = payloads[index].as_ref().unwrap();
+                if matches!(
+                    kind,
+                    InlineKind::Emphasis(_)
+                        | InlineKind::Strong(_)
+                        | InlineKind::Strikethrough(_)
+                        | InlineKind::Highlight(_)
+                        | InlineKind::Insert(_)
+                ) {
+                    break;
+                }
+            }
+            end = token.span.end;
+            push_inline(&mut children, token.into_inline(payloads));
+            at = token.next;
+        }
+        if children.is_empty() {
+            continue;
+        }
+        let kind = if width == 3 {
+            InlineKind::Strong(vec![Inline {
+                span: span(opener.span.start + 2, end),
+                kind: InlineKind::Emphasis(children),
+            }])
+        } else {
+            delimiter_kind(b'*', width, children)
+        };
+        let mut group = Token::from_inline(span(opener.span.start, end), kind, None, payloads);
+        group.next = at;
+        tokens[index].span.end = opener.span.start;
+        tokens[index].next = tokens.len();
+        tokens.push(group);
+    }
 }
 
 fn delimiter_kind(marker: u8, width: usize, children: Vec<Inline>) -> InlineKind {
@@ -1460,7 +1655,7 @@ fn link_target(
     end: usize,
     refs: &References,
     unresolved: Option<&mut Vec<String>>,
-    preview_image: bool,
+    preview_destination: bool,
 ) -> Option<Target> {
     let bytes = source.as_bytes();
     if next < end && bytes[next] == b'(' {
@@ -1473,7 +1668,7 @@ fn link_target(
                 loading: false,
             });
         }
-        if preview_image && let Some(destination) = pending_image_destination(source, next + 1, end)
+        if preview_destination && let Some(destination) = pending_destination(source, next + 1, end)
         {
             return Some(Target {
                 end,
@@ -1518,13 +1713,41 @@ fn link_target(
     }
 }
 
-fn pending_image_destination(source: &str, start: usize, end: usize) -> Option<Span> {
-    let start = skip_link_space(source.as_bytes(), start, end)?;
+fn pending_destination(source: &str, start: usize, end: usize) -> Option<Span> {
+    let bytes = source.as_bytes();
+    let start = skip_link_space(bytes, start, end)?;
     if start == end {
         return Some(span(start, end));
     }
-    let (destination, consumed) = link_destination(source, start, end)?;
-    (consumed == end && destination.start != destination.end).then_some(destination)
+    if let Some((destination, consumed)) = link_destination(source, start, end) {
+        return (consumed == end && destination.start != destination.end).then_some(destination);
+    }
+    // A destination with an unfinished parenthesized component is still a draft,
+    // provided every byte so far belongs to that component.
+    (bytes[start] != b'<'
+        && !bytes[start..end]
+            .iter()
+            .any(|byte| matches!(byte, b' ' | 0..=31 | 127)))
+    .then_some(span(start, end))
+}
+
+fn numeric_reference(source: &str, start: usize, close: usize, end: usize) -> bool {
+    let bytes = source.as_bytes();
+    if start == close || !bytes[start..close].iter().all(u8::is_ascii_digit) {
+        return false;
+    }
+    let next = close + 1;
+    if next == end {
+        return true;
+    }
+    match bytes[next] {
+        b'(' => false,
+        b'[' => label_end(source, next + 1, end).is_none_or(|closing| {
+            bytes[next + 1..closing].iter().all(u8::is_ascii_digit)
+                || closing + 1 < end && bytes[closing + 1] == b'('
+        }),
+        _ => true,
+    }
 }
 
 fn autolink_end(source: &str, i: usize, end: usize) -> Option<(usize, bool)> {
@@ -2590,5 +2813,205 @@ mod tests {
         );
         let parsed = parse(source, span(0, source.len()), &Options::default(), &refs);
         assert_eq!(parsed, [original(0, source.len())]);
+    }
+
+    #[test]
+    fn markstream_preview_groups_unclosed_asterisks_without_altering_final_text() {
+        let options = Options {
+            markstream: true,
+            ..Options::default()
+        };
+        let refs = References::default();
+        for source in ["**bold", "**bold*", "prefix **bold"] {
+            let nodes = parse_preview(source, span(0, source.len()), &options, &refs);
+            let [
+                Inline {
+                    kind: InlineKind::Strong(children),
+                    ..
+                },
+            ] = &nodes[nodes.len() - 1..]
+            else {
+                panic!("expected provisional strong in {source}");
+            };
+            assert!(
+                matches!(&children[0].kind, InlineKind::Text(text) if text.as_str(source) == "bold")
+            );
+        }
+        let source = "**bold";
+        let final_nodes = parse(source, span(0, source.len()), &options, &refs);
+        assert_eq!(final_nodes, [original(0, source.len())]);
+        let ordinary = parse_preview(source, span(0, source.len()), &Options::default(), &refs);
+        assert_eq!(ordinary, final_nodes);
+    }
+
+    #[test]
+    fn markstream_preview_wraps_outer_and_label_strong_around_links() {
+        let options = Options {
+            markstream: true,
+            ..Options::default()
+        };
+        let refs = References::default();
+        let source = "**[DR **(Danmarks Radio)](https://example.com/)*";
+        let nodes = parse_preview(source, span(0, source.len()), &options, &refs);
+        let [
+            Inline {
+                kind: InlineKind::Strong(children),
+                ..
+            },
+        ] = nodes.as_slice()
+        else {
+            panic!("expected outer provisional strong");
+        };
+        let [
+            Inline {
+                kind: InlineKind::Link(link),
+                ..
+            },
+        ] = children.as_slice()
+        else {
+            panic!("expected confirmed link");
+        };
+        assert!(matches!(link.children[1].kind, InlineKind::Strong(_)));
+
+        let source = "[**x**](https://example.com";
+        let nodes = parse_preview(source, span(0, source.len()), &options, &refs);
+        let [
+            Inline {
+                kind: InlineKind::Strong(children),
+                ..
+            },
+        ] = nodes.as_slice()
+        else {
+            panic!("expected provisional strong around link");
+        };
+        let [
+            Inline {
+                kind: InlineKind::LinkPreview(link),
+                ..
+            },
+        ] = children.as_slice()
+        else {
+            panic!("expected provisional link");
+        };
+        assert_eq!(link.destination.as_str(source), "https://example.com");
+        assert!(
+            matches!(&link.children[0].kind, InlineKind::Text(text) if text.as_str(source) == "x")
+        );
+    }
+
+    #[test]
+    fn markstream_numeric_references_keep_ids_and_yield_to_link_targets() {
+        let options = Options {
+            markstream: true,
+            ..Options::default()
+        };
+        let refs = References::default();
+        let source = "先看[01][2][三](https://example.com";
+        let nodes = parse_preview(source, span(0, source.len()), &options, &refs);
+        let ids = nodes
+            .iter()
+            .filter_map(|node| match node.kind {
+                InlineKind::NumericReference(label) => Some(content(source, label)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["01", "2"]);
+        assert!(matches!(
+            nodes.last().unwrap().kind,
+            InlineKind::LinkPreview(_)
+        ));
+
+        let source = "[1](/url)";
+        let nodes = parse(source, span(0, source.len()), &options, &refs);
+        assert!(matches!(
+            nodes.as_slice(),
+            [Inline {
+                kind: InlineKind::Link(_),
+                ..
+            }]
+        ));
+        let source = "[1][unresolved]";
+        let nodes = parse(source, span(0, source.len()), &options, &refs);
+        assert_eq!(nodes, [original(0, source.len())]);
+    }
+
+    #[test]
+    fn markstream_fragment_preview_keeps_partial_code_spans_in_source() {
+        let options = Options {
+            markstream: true,
+            ..Options::default()
+        };
+        let refs = References::default();
+        let source = "> **title**\n> `code";
+        let newline = source.find('\n').unwrap();
+        let parts = [span(2, newline + 1), span(newline + 3, source.len())];
+        let nodes = parse_fragments_preview(source, &parts, &options, &refs);
+        assert!(matches!(&nodes[2].kind, InlineKind::Code(body) if body.as_str(source) == "code"));
+        let final_nodes = parse_fragments(source, &parts, &options, &refs, None);
+        assert!(
+            matches!(&final_nodes[2].kind, InlineKind::Text(body) if body.as_str(source) == "`code")
+        );
+        let source = r"escaped \`code\`";
+        let nodes = parse_preview(source, span(0, source.len()), &options, &refs);
+        assert!(matches!(&nodes[1].kind, InlineKind::Code(body) if body.as_str(source) == "code"));
+    }
+
+    #[test]
+    fn markstream_preview_hides_only_ambiguous_literal_tails() {
+        let options = Options {
+            math: true,
+            markstream: true,
+            ..Options::default()
+        };
+        let refs = References::default();
+        for (source, expected) in [
+            ("plain text(", "plain text"),
+            ("*italic**", "italic"),
+            ("math $x$ and $", " and "),
+            ("math $x$ and $$", " and $$"),
+            ("math $x$ and $12", " and $12"),
+            (r"price \$", "$"),
+            (r"literal \*", "*"),
+        ] {
+            let nodes = parse_preview(source, span(0, source.len()), &options, &refs);
+            let last = nodes.last().unwrap();
+            let actual = match &last.kind {
+                InlineKind::Text(value) => value.as_str(source),
+                InlineKind::Emphasis(children) => match &children[0].kind {
+                    InlineKind::Text(value) => value.as_str(source),
+                    _ => unreachable!(),
+                },
+                _ => panic!("unexpected preview shape for {source}"),
+            };
+            assert_eq!(actual, expected, "{source}");
+        }
+        let source = "math $x$ and $";
+        let nodes = parse(source, span(0, source.len()), &options, &refs);
+        assert!(
+            matches!(&nodes.last().unwrap().kind, InlineKind::Text(value) if value.as_str(source) == " and $")
+        );
+    }
+
+    #[test]
+    fn markstream_preview_can_require_a_complete_strong_run() {
+        let options = Options {
+            markstream: true,
+            require_closing_strong: true,
+            ..Options::default()
+        };
+        let refs = References::default();
+        let source = "前缀 **stro";
+        let nodes = parse_preview(source, span(0, source.len()), &options, &refs);
+        assert_eq!(nodes, [original(0, source.len())]);
+        let source = "**word*";
+        let nodes = parse_preview(source, span(0, source.len()), &options, &refs);
+        assert!(
+            !nodes
+                .iter()
+                .any(|node| matches!(node.kind, InlineKind::Strong(_)))
+        );
+        let source = "**word**";
+        let nodes = parse_preview(source, span(0, source.len()), &options, &refs);
+        assert!(matches!(nodes[0].kind, InlineKind::Strong(_)));
     }
 }

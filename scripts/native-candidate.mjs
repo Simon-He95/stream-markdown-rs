@@ -55,7 +55,8 @@ export function createSession({ factoryOptions, parseOptions = {} } = {}) {
   const footnotes = (parseOptions.enableFootnotes ?? factoryOptions?.enableFootnotes) !== false
   const validateLink = parseOptions.validateLink ?? factoryOptions?.markdownItOptions?.validateLink
   const markstream = parseOptions.markstream ?? factoryOptions?.markstream ?? true
-  request('create', session, { customTags, math, footnotes, markstream })
+  const fixIndentedCodeBlock = parseOptions.enableFixIndentedCodeBlock ?? factoryOptions?.enableFixIndentedCodeBlock ?? true
+  request('create', session, { customTags, math, footnotes, markstream, requireClosingStrong: parseOptions.requireClosingStrong })
   const nodes = new Map()
   const roots = []
   const lineStarts = [0]
@@ -130,6 +131,7 @@ export function createSession({ factoryOptions, parseOptions = {} } = {}) {
           length,
           final,
           markstream,
+          fixIndentedCodeBlock,
           customTags,
           parseOptions,
           validateLink,
@@ -207,8 +209,8 @@ function applyChange(nodes, roots, change) {
       break
     }
     case 'status':
-      block.open = change.open
-      if (!change.open) {
+      block.status = change.status
+      if (change.status !== 'open') {
         delete block.previewInlines
         delete block.preview
       }

@@ -777,6 +777,149 @@ fn markstream_projects_a_root_inline_prefix_once_it_cannot_be_a_block_marker() {
     );
     assert!(
         matches!(changes.last(), Some(Change::PreviewInlines { nodes, .. }) if
-        nodes.iter().any(|node| matches!(node.kind, InlineKind::Link(_))))
+        nodes.iter().any(|node| matches!(&node.kind, InlineKind::Strong(children) if children.iter().any(|child| matches!(child.kind, InlineKind::Link(_))))))
+    );
+}
+
+#[test]
+fn an_incomplete_table_row_is_previewed_then_committed_once() {
+    let mut parser = Parser::new(Options {
+        preview: Preview::Ai,
+        ..Options::default()
+    });
+    let mut changes = Vec::new();
+    parser
+        .append("| A | B |\n| --- | --- |\n", &mut changes)
+        .unwrap();
+    changes.clear();
+    parser.append("| 1 | ", &mut changes).unwrap();
+    let [
+        Change::Preview {
+            id,
+            hint: Some(PreviewHint::TableRow(cells)),
+        },
+    ] = changes.as_slice()
+    else {
+        panic!("expected a provisional row")
+    };
+    let id = *id;
+    let [InlineContent::Plain(first), InlineContent::Plain(second)] = cells.as_slice() else {
+        panic!("expected two cells")
+    };
+    assert_eq!(parser.source(*first), "1");
+    assert_eq!(parser.source(*second), "");
+    changes.clear();
+    parser.append("2 |\n", &mut changes).unwrap();
+    assert!(matches!(changes.as_slice(),
+        [Change::Preview { id: cleared, hint: None }, Change::AddRow { id: committed, .. }] if *cleared == id && *committed == id));
+}
+
+#[test]
+fn a_partial_ordered_item_keeps_its_list_and_inline_ids_on_line_completion() {
+    let options = Options {
+        markstream: true,
+        preview: Preview::Ai,
+        ..Options::default()
+    };
+    let mut parser = Parser::new(options.clone());
+    let mut changes = Vec::new();
+    parser.append("1.  ", &mut changes).unwrap();
+    assert!(changes.is_empty());
+    parser.append("**标题** `one`", &mut changes).unwrap();
+    let inserts = changes
+        .iter()
+        .filter_map(|change| match change {
+            Change::Insert { parent, block } => Some((*parent, block)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [
+        (None, list),
+        (Some(item_parent), item),
+        (Some(body_parent), body),
+    ] = inserts.as_slice()
+    else {
+        panic!("expected an open list, item and paragraph")
+    };
+    assert_eq!(*item_parent, list.id);
+    assert_eq!(*body_parent, item.id);
+    let body_id = body.id;
+    assert!(changes.iter().any(
+        |change| matches!(change, Change::PreviewInlines { id, nodes }
+        if *id == body_id && matches!(nodes[0].kind, InlineKind::Strong(_)))
+    ));
+    changes.clear();
+    parser.append("\n", &mut changes).unwrap();
+    assert!(
+        changes
+            .iter()
+            .all(|change| !matches!(change, Change::Insert { .. }))
+    );
+    parser.finish(&mut changes).unwrap();
+    let expected = parse(parser.source_text(), &options).unwrap();
+    assert!(
+        changes
+            .iter()
+            .any(|change| matches!(change, Change::Replace(block) if *block == expected.nodes[2]))
+    );
+}
+
+#[test]
+fn indented_list_continuation_is_visible_before_its_newline() {
+    let options = Options {
+        markstream: true,
+        preview: Preview::Ai,
+        ..Options::default()
+    };
+    let mut parser = Parser::new(options);
+    let mut changes = Vec::new();
+    parser.append("- **标题**\n   前缀", &mut changes).unwrap();
+    let Some(Change::PreviewInlines { nodes, .. }) = changes.last() else {
+        panic!("expected a preview spanning the indented continuation");
+    };
+    assert!(
+        nodes
+            .iter()
+            .any(|node| matches!(node.kind, InlineKind::Strong(_)))
+    );
+    assert!(nodes.iter().any(|node| matches!(&node.kind,
+        InlineKind::Text(text) if text.as_str(parser.source_text()) == "前缀")));
+    changes.clear();
+    parser.append("继续\n", &mut changes).unwrap();
+    assert!(
+        changes
+            .iter()
+            .any(|change| matches!(change, Change::AddTextFragment { .. }))
+    );
+}
+
+#[test]
+fn markstream_html_drafts_keep_source_and_ids_at_same_line_closure() {
+    let options = Options {
+        markstream: true,
+        preview: Preview::Ai,
+        ..Options::default()
+    };
+    let mut parser = Parser::new(options.clone());
+    let mut changes = Vec::new();
+    let mut view = View::default();
+    parser.append("<div", &mut changes).unwrap();
+    assert!(changes.is_empty());
+    parser.append(">hello", &mut changes).unwrap();
+    view.apply(&mut changes);
+    let root = view.blocks.values().next().unwrap();
+    let id = root.id;
+    assert_eq!(root.status, BlockStatus::Open);
+    assert!(matches!(root.data, BlockData::Html));
+    parser.append("</div>", &mut changes).unwrap();
+    view.apply(&mut changes);
+    let root = &view.blocks[&id];
+    assert_eq!(root.status, BlockStatus::Closed);
+    assert_eq!(parser.source(root.span), "<div>hello</div>");
+    parser.finish(&mut changes).unwrap();
+    view.apply(&mut changes);
+    assert_eq!(
+        view.blocks.into_values().collect::<Vec<_>>(),
+        parse(parser.source_text(), &options).unwrap().nodes
     );
 }

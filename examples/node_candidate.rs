@@ -6,8 +6,9 @@ use std::{
     io::{self, BufRead, BufWriter, Write},
 };
 use stream_markdown_rs::{
-    Alignment, Block, BlockData, Change, Inline, InlineContent, InlineKind, Options, Parser,
-    PluginField, PluginFieldValue, Preview, PreviewHint, RawLine, Span, Syntax, TableData, Text,
+    Alignment, Block, BlockData, BlockStatus, Change, HtmlOpening, Inline, InlineContent,
+    InlineKind, Options, Parser, PluginField, PluginFieldValue, Preview, PreviewHint, RawLine,
+    Span, Syntax, TableData, Text,
 };
 
 fn main() -> io::Result<()> {
@@ -50,6 +51,7 @@ fn request(sessions: &mut HashMap<u64, Parser>, input: &Value) -> Result<Value, 
             math: input["math"].as_bool().unwrap_or(true),
             footnotes: input["footnotes"].as_bool().unwrap_or(true),
             markstream: input["markstream"].as_bool().unwrap_or(true),
+            require_closing_strong: input["requireClosingStrong"].as_bool().unwrap_or(false),
         }));
         return Ok(Value::Null);
     }
@@ -100,6 +102,7 @@ fn inline(value: &Inline) -> Value {
             "math_inline",
             json!({ "body": text(body), "loading": loading }),
         ),
+        InlineKind::NumericReference(label) => ("reference", json!({ "label": span(*label) })),
         InlineKind::FootnoteReference { label, .. } => {
             ("footnote_reference", json!({ "label": span(*label) }))
         }
@@ -110,8 +113,11 @@ fn inline(value: &Inline) -> Value {
         InlineKind::Superscript(body) => ("superscript", text(body)),
         InlineKind::Highlight(children) => ("highlight", json!(inlines(children))),
         InlineKind::Insert(children) => ("insert", json!(inlines(children))),
-        InlineKind::Link(link) | InlineKind::Image(link) | InlineKind::ImagePreview(link) => {
-            let kind = if matches!(value.kind, InlineKind::Link(_)) {
+        InlineKind::Link(link)
+        | InlineKind::LinkPreview(link)
+        | InlineKind::Image(link)
+        | InlineKind::ImagePreview(link) => {
+            let kind = if matches!(value.kind, InlineKind::Link(_) | InlineKind::LinkPreview(_)) {
                 "link"
             } else {
                 "image"
@@ -121,7 +127,7 @@ fn inline(value: &Inline) -> Value {
                 json!({
                     "destination": text(&link.destination),
                     "title": link.title.as_ref().map(text),
-                    "loading": matches!(value.kind, InlineKind::ImagePreview(_)),
+                    "loading": matches!(value.kind, InlineKind::ImagePreview(_) | InlineKind::LinkPreview(_)),
                     "children": inlines(&link.children),
                 }),
             )
@@ -181,6 +187,15 @@ fn block(value: &Block, source: &str) -> Value {
             "indented_code",
             json!({ "lines": lines.iter().copied().map(raw_line).collect::<Vec<_>>() }),
         ),
+        BlockData::Details(opening) => ("details", html_opening_value(*opening, source)),
+        BlockData::Summary {
+            opening,
+            content: value,
+        } => {
+            let mut opening = html_opening_value(*opening, source);
+            opening["content"] = content(value);
+            ("summary", opening)
+        }
         BlockData::ThematicBreak => ("thematic_break", Value::Null),
         BlockData::Math { body } => ("math_block", json!({ "body": text(body) })),
         BlockData::Footnote {
@@ -233,10 +248,27 @@ fn block(value: &Block, source: &str) -> Value {
     json!({
         "id": value.id.0,
         "span": span(value.span),
-        "open": value.status == stream_markdown_rs::BlockStatus::Open,
+        "status": status_name(value.status),
         "kind": kind,
         "data": data,
     })
+}
+
+fn html_opening_value(opening: HtmlOpening, source: &str) -> Value {
+    json!({
+        "opening": span(opening.span),
+        "attrs": opening.tag(source).attrs(source)
+            .map(|attr| (attr.name, attr.value.unwrap_or_default()))
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn status_name(status: BlockStatus) -> &'static str {
+    match status {
+        BlockStatus::Open => "open",
+        BlockStatus::Closed => "closed",
+        BlockStatus::Incomplete => "incomplete",
+    }
 }
 
 fn table_value(table: &TableData) -> Value {
@@ -296,7 +328,7 @@ fn change_value(change: &Change, source: &str) -> Value {
             json!({ "op": "replace_cell", "id": id.0, "index": index, "cell": content(value) })
         }
         Change::SetStatus { id, status, end } => {
-            json!({ "op": "status", "id": id.0, "open": *status == stream_markdown_rs::BlockStatus::Open, "end": end })
+            json!({ "op": "status", "id": id.0, "status": status_name(*status), "end": end })
         }
         Change::Remove { id } => json!({ "op": "remove", "id": id.0 }),
         Change::PreviewInlines { id, nodes } => {
@@ -304,7 +336,8 @@ fn change_value(change: &Change, source: &str) -> Value {
         }
         Change::Preview { id, hint } => {
             json!({ "op": "preview", "id": id.0, "hint": hint.as_ref().map(|hint| match hint {
-                PreviewHint::Table { table, loading } => json!({ "data": table_value(table), "loading": loading }),
+                PreviewHint::Table { table, loading } => json!({ "kind": "table", "data": table_value(table), "loading": loading }),
+                PreviewHint::TableRow(cells) => json!({ "kind": "table_row", "cells": cells.iter().map(content).collect::<Vec<_>>() }),
             }) })
         }
     }

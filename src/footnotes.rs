@@ -451,6 +451,7 @@ impl Engine {
                     Dependency::Footnote(body) => {
                         self.finish_footnote_body(source, body, output)?
                     }
+                    Dependency::Summary(body) => self.finish_summary_body(source, body, output)?,
                 }
             }
         }
