@@ -450,6 +450,62 @@ function projectUnclosedImageLink(inlines, nodes, context) {
   }
 }
 
+function projectUnclosedDestination(inlines, index, nodes, context) {
+  const link = inlines[index]
+  const previous = inlines[index - 1]
+  const text = nodes.at(-1)
+  if (previous?.kind !== 'text' || previous.span[1] !== link.span[0] || text?.type !== 'text'
+    || link.data.loading || !/^https?:\/\//iu.test(context.read(link.span)))
+    return false
+  const label = /(?<!\\)\[([^\[\]\\*&`\r\n]+)\]\($/u.exec(context.read(previous.span))
+  const tail = context.read([link.span[1], inlines.at(-1).span[1]])
+  if (!label || !text.content.endsWith(label[0]) || !/^[ \t]+\S/u.test(tail) || /[\r\n)]/u.test(tail))
+    return false
+  const href = (context.read(link.span) + tail).trimEnd()
+  if (!allowsLink(href, context))
+    return false
+  text.content = text.content.slice(0, -label[0].length)
+  text.raw = text.raw.slice(0, -label[0].length)
+  if (!text.content)
+    nodes.pop()
+  const node = linkNode(href, '', [textNode(label[1], false)], '')
+  delete node.attrs
+  node.loading = true
+  nodes.push(node)
+  return true
+}
+
+function projectStrongBeforeMath(inlines, index, nodes, context) {
+  const strong = inlines[index]
+  const [link] = strong.data
+  const after = inlines[index + 1]
+  const math = after?.kind === 'text' ? inlines[index + 2] : after
+  if (strong.data.length !== 1 || link.kind !== 'link' || math?.kind !== 'math_inline'
+    || math.data.loading || lineAt(context.lineStarts, strong.span[0]) !== lineAt(context.lineStarts, math.span[0]))
+    return false
+  const code = link.data.children.at(-1)
+  const destination = link.data.destination
+  if (code?.kind !== 'code' || link.data.loading || link.data.title !== null || !Array.isArray(destination)
+    || context.read([code.span[1], destination[0]]) !== ']('
+    || !/^\)\*\*$/u.test(context.read([destination[1], strong.span[1]])))
+    return false
+  const url = readText(destination, context)
+  const href = markdownHref(url)
+  if (!/^https?:\/\//iu.test(url) || !allowsLink(href, context))
+    return false
+  // A completed formula makes the legacy math rule capture the preceding source.
+  mergeText(nodes, textNode(readText([strong.span[0], code.span[0]], context), false))
+  delete nodes.at(-1).center
+  const value = readText(code.data, context)
+  nodes.push(
+    { type: 'inline_code', code: value, raw: value },
+    textNode(']('),
+    linkNode(href, null, [textNode(url)], 'linkify'),
+    textNode(')**', false),
+  )
+  return true
+}
+
 function legacyDelimitedText(children) {
   return children.map((child) => {
     if (child.type === 'link')
@@ -785,6 +841,9 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false, insideL
       nodes.push(node)
     }
     else if (kind === 'emphasis' || kind === 'strong' || kind === 'strikethrough') {
+      if (kind === 'strong' && context.markstream && !insideLinkLabel
+        && projectStrongBeforeMath(inlines, index, nodes, context))
+        continue
       const children = projectInlineNodes(data, context, false, insideLinkLabel)
       const marker = kind === 'emphasis' ? '*' : kind === 'strong' ? '**' : '~~'
       if (kind === 'strong' && context.markstream && !context.final && !insideLinkLabel && raw.startsWith('**')
@@ -824,6 +883,8 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false, insideL
       const title = data.title === null ? null : readText(data.title, context) || null
       const children = projectInlineNodes(data.children, context, kind === 'link' && data.loading, true)
       const allowed = allowsLink(href, context, kind)
+      if (context.markstream && kind === 'link' && allowed && projectUnclosedDestination(inlines, index, nodes, context))
+        break
       if (context.markstream && kind === 'link' && allowed && !data.loading && title === null
         && children.at(-1)?.type === 'math_inline' && !children.at(-1).loading
         && Array.isArray(data.destination) && /^(?:https?|ftp):\/\//iu.test(destination)
@@ -1463,7 +1524,7 @@ function projectBlock(block, nodes, context) {
           ) ?? ''
         }
       }
-      const imageLink = context.markstream && context.final && inlines.parsed
+      const imageLink = context.markstream && (context.final || !open) && inlines.parsed
         ? projectUnclosedImageLink(inlines.parsed, children, context)
         : undefined
       return { type: kind, children: imageLink ? [imageLink] : children, raw: projectedRaw, ...map }

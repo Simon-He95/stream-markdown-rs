@@ -1973,6 +1973,7 @@ test('legacy final view can display a complete image under its unclosed outer UR
   const standard = createSession({ parseOptions: { markstream: false } })
   const rejected = createSession({ parseOptions: { validateLink: href => !href.startsWith('https://example.com/') } })
   const closed = createSession()
+  const streaming = createSession()
   try {
     for (const session of [legacy, standard, rejected, closed]) {
       session.append(source.slice(0, -7))
@@ -1992,12 +1993,62 @@ test('legacy final view can display a complete image under its unclosed outer UR
     assert.equal(standard.snapshot()[0].children[0].content, '[')
     assert.equal(rejected.snapshot()[0].children.some(node => node.type === 'link'), false)
     assert.equal(closed.snapshot()[0].children[0].loading, false)
+    streaming.append(source + '\n\nA later paragraph')
+    assert.deepEqual(streaming.snapshot()[0], paragraph)
   }
   finally {
     legacy.dispose()
     standard.dispose()
     rejected.dispose()
     closed.dispose()
+    streaming.dispose()
+  }
+})
+
+test('legacy incomplete destinations preserve the original draft and honor URL validation', () => {
+  const source = 'Prefix **draft [label](https://example.com/path with `code'
+  const legacy = createSession()
+  const standard = createSession({ parseOptions: { markstream: false } })
+  const rejected = createSession({ parseOptions: { validateLink: href => !href.includes(' ') } })
+  try {
+    for (const session of [legacy, standard, rejected]) {
+      session.append(source)
+      session.finish()
+    }
+    const link = legacy.snapshot()[0].children.find(node => node.type === 'link')
+    assert.equal(link.href, 'https://example.com/path with `code')
+    assert.equal(link.loading, true)
+    for (const session of [standard, rejected]) {
+      const links = session.snapshot()[0].children.filter(node => node.type === 'link')
+      assert.deepEqual(links.map(node => node.href), ['https://example.com/path'])
+    }
+  }
+  finally {
+    legacy.dispose()
+    standard.dispose()
+    rejected.dispose()
+  }
+})
+
+test('legacy strong links preserve literal source before a completed formula', () => {
+  const source = 'Prefix **[label `code`](https://example.com/path)** $x$'
+  const session = createSession()
+  try {
+    session.append(source)
+    session.finish()
+    const children = session.snapshot()[0].children
+    assert.deepEqual(children.map(node => [node.type, node.content ?? node.code ?? node.href]), [
+      ['text', 'Prefix **[label '],
+      ['inline_code', 'code'],
+      ['text', ']('],
+      ['link', 'https://example.com/path'],
+      ['text', ')** '],
+      ['math_inline', 'x'],
+    ])
+    assert.equal(children[3].markup, 'linkify')
+  }
+  finally {
+    session.dispose()
   }
 })
 
