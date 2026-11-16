@@ -496,7 +496,7 @@ pub(crate) struct Engine {
     fence_probe: Option<FenceProbe>,
     tag_probe: Option<tag::OpeningProbe>,
     promoted_tag: Option<usize>,
-    details_checked: usize,
+    html_progress: details::HtmlProgress,
     refs: References,
     footnotes: Option<Box<footnotes::Index>>,
     waiting: HashMap<String, Vec<Dependency>>,
@@ -533,7 +533,7 @@ impl Engine {
             fence_probe: None,
             tag_probe: None,
             promoted_tag: None,
-            details_checked: 0,
+            html_progress: details::HtmlProgress::Scanning(0),
             refs: References::default(),
             footnotes,
             waiting: HashMap::new(),
@@ -582,6 +582,9 @@ impl Engine {
     ) -> Result<(), ParseError> {
         self.finalizing = final_input;
         self.metrics.input_bytes = source.len();
+        if self.options.markstream {
+            self.resume_html_line_ending(source, final_input, &mut output);
+        }
         let bytes = source.as_bytes();
         while self.scan < source.len() {
             if self.batch

@@ -57,6 +57,11 @@ enum EndTag {
     Complete(usize),
 }
 
+pub(super) enum HtmlProgress {
+    Scanning(usize),
+    ClosingLine(BlockId),
+}
+
 fn match_end(source: &str, start: usize, end: usize, name: Name) -> EndTag {
     let candidate = &source.as_bytes()[start..end];
     let mark = name.closing();
@@ -197,6 +202,44 @@ pub(super) struct Summary {
 }
 
 impl Engine {
+    pub(super) fn resume_html_line_ending(
+        &mut self,
+        source: &str,
+        final_input: bool,
+        output: &mut Output<'_>,
+    ) {
+        let HtmlProgress::ClosingLine(id) = self.html_progress else {
+            return;
+        };
+        let bytes = source.as_bytes();
+        let mut at = self.scan;
+        while matches!(bytes.get(at), Some(b' ' | b'\t')) {
+            at += 1;
+        }
+        if !final_input && (at == bytes.len() || bytes.get(at..) == Some(b"\r")) {
+            return;
+        }
+        let end = if at == bytes.len() {
+            Some(at)
+        } else {
+            super::line_break(bytes, at, bytes.len())
+        };
+        self.html_progress = HtmlProgress::Scanning(self.line_start);
+        if let Some(end) = end
+            && end > self.line_start
+        {
+            self.metrics.scanned_bytes += end - self.scan;
+            self.scan = end;
+            self.line_start = end;
+            self.extend_containers(end);
+            output.update(Change::SetStatus {
+                id,
+                status: BlockStatus::Closed,
+                end,
+            });
+        }
+    }
+
     #[inline]
     pub(crate) fn publish_html_container_progress(
         &self,
@@ -353,6 +396,15 @@ impl Engine {
             *closed = true;
         }
         frame.end = end;
+        if !self.finalizing
+            && line.next == line.end
+            && close_end <= self.scan
+            && source.as_bytes()[close_end..self.scan]
+                .iter()
+                .all(|&byte| matches!(byte, b' ' | b'\t'))
+        {
+            self.html_progress = HtmlProgress::ClosingLine(frame.id);
+        }
         self.close_containers(index, output);
         self.extend_containers(end);
         if tail {
@@ -581,6 +633,9 @@ impl Engine {
         }
 
         while self.line_start < self.scan {
+            let HtmlProgress::Scanning(checked) = self.html_progress else {
+                return Ok(false);
+            };
             let line = Line::new(self.line_start, self.scan, self.scan);
             if matches!(self.active, Some(Active::Summary(_))) {
                 let Some(Active::Summary(mut summary)) = self.active.take() else {
@@ -642,9 +697,9 @@ impl Engine {
                 self.line(source, Line::new(self.line_start, end, end), output)?;
                 self.line_start = end;
             } else if let Some((_, tag)) = self.html_container() {
-                let from = self.details_checked.max(line.start).min(line.end);
+                let from = checked.max(line.start).min(line.end);
                 let (through, close) = find_end(source, from, line.end, &[tag]);
-                self.details_checked = through;
+                self.html_progress = HtmlProgress::Scanning(through);
                 let Some((_, close)) = close else {
                     return Ok(false);
                 };

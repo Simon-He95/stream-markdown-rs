@@ -670,15 +670,6 @@ function detailNode(block, nodes, raw, map, context) {
   const openerLine = lineAt(context.lineStarts, data.opening[0])
   const openerLineEnd = context.lineStarts[openerLine + 1]
   const last = nodes.get(block.children.at(-1))
-  if (status === 'closed' && /<\/details[ \t]*>$/i.test(raw)) {
-    const end = block.span[1]
-    const lineEnd = context.lineStarts[lineAt(context.lineStarts, end) + 1]
-    if (lineEnd !== undefined && /^[ \t]*(?:\r\n?|\n)$/.test(context.read([end, lineEnd]))) {
-      const surfaceSpan = [block.span[0], lineEnd]
-      raw = normalize(context.read(surfaceSpan))
-      map = sourceMap(surfaceSpan, context)
-    }
-  }
   if (context.markstream && open && last?.kind === 'summary' && last.status === 'open') {
     const surfaceSpan = [block.span[0], context.length]
     raw = normalize(context.read(surfaceSpan))

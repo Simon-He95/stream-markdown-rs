@@ -10,6 +10,51 @@ fn options() -> Options {
 }
 
 #[test]
+fn html_container_closing_ranges_match_full_parse_at_every_split() {
+    for source in [
+        "<details>\r\n<summary>Summary</summary>\r\n\r\ntext\r\n</details> \t\r\nnext\r\n",
+        "<section>\nintro\n\ntext\n</section>\t\nnext\n",
+        "<details>\ntext\n</details>  ",
+        "<details>\ntext\n</details> outside\n",
+    ] {
+        let expected = parse(source, &options()).unwrap().nodes.remove(0);
+        assert_eq!(expected.status, BlockStatus::Closed);
+        for split in source
+            .char_indices()
+            .map(|(index, _)| index)
+            .chain([source.len()])
+        {
+            let mut parser = Parser::new(options());
+            let mut changes = Vec::new();
+            parser.append(&source[..split], &mut changes).unwrap();
+            parser.append(&source[split..], &mut changes).unwrap();
+            parser.finish(&mut changes).unwrap();
+            let mut actual = None;
+            for change in changes {
+                match change {
+                    Change::Insert { block, .. } | Change::Replace(block)
+                        if block.id == expected.id =>
+                    {
+                        actual = Some(block)
+                    }
+                    Change::SetStatus { id, status, end } if id == expected.id => {
+                        let block = actual.as_mut().expect("update follows the original insert");
+                        block.status = status;
+                        block.span.end = end;
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(
+                actual.as_ref(),
+                Some(&expected),
+                "split {split}: {source:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn div_promotes_at_a_blank_line_and_keeps_typed_children_and_original_attributes() {
     let source = "<DIV role=note>\r\n**bold**\r\n\r\n- item\r\n\r\n</div>\r\n# outside\r\n";
     let document = parse(source, &options()).unwrap();
