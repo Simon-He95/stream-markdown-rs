@@ -2340,6 +2340,29 @@ fn a_provisional_html_closer_keeps_raw_bytes_separate_from_visible_content() {
 }
 
 #[test]
+fn an_image_link_prefix_without_alt_text_stays_plain_in_the_native_view() {
+    let mut parser = Parser::new(Options {
+        markstream: true,
+        preview: Preview::Ai,
+        ..Options::default()
+    });
+    let mut changes = Vec::new();
+    let mut view = View::default();
+    for chunk in ["[![", " "] {
+        parser.append(chunk, &mut changes).unwrap();
+        assert!(!changes.iter().any(|change| {
+            matches!(change, Change::PreviewInlines { nodes, .. } if !nodes.is_empty())
+        }));
+        view.apply(&mut changes);
+        let block = view.blocks.first_key_value().unwrap().1;
+        assert!(matches!(
+            block.data,
+            BlockData::Paragraph(InlineContent::Plain(_))
+        ));
+    }
+}
+
+#[test]
 fn incomplete_image_link_is_previewed_without_a_destination() {
     let options = Options {
         markstream: true,

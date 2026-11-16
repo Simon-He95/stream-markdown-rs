@@ -332,6 +332,40 @@ function pendingBadgeLink(image) {
   }
 }
 
+function projectFormattedDraftBadge(node, nodes, context) {
+  const [image] = node.data.children
+  if (node.data.children.length !== 1 || image.kind !== 'image' || !image.data.loading
+    || image.span[0] !== node.span[0] + 1 || image.span[1] !== node.span[1]
+    || context.read([node.span[0], image.span[0]]) !== '[')
+    return false
+  const [label, formatted] = image.data.children
+  const destination = image.data.destination
+  if (image.data.children.length !== 2 || label.kind !== 'text' || formatted.kind !== 'emphasis'
+    || !Array.isArray(destination) || context.read([formatted.span[1], destination[0]]) !== ']('
+    || destination[1] !== image.span[1])
+    return false
+  const alt = readText(label.data, context)
+  if (!/[\p{L}\p{N}]/u.test(alt))
+    return false
+  const url = readText(destination, context)
+  const [match] = url ? legacyLinkify.match(url) ?? [] : []
+  if (url && (match?.index !== 0 || match.lastIndex !== url.length || !allowsLink(match.url, context)))
+    return false
+
+  nodes.push(pendingBadgeLink({
+    type: 'image', src: '', alt, title: null,
+    raw: readText([image.span[0], formatted.span[0]], context), loading: true,
+  }))
+  nodes.push(...projectInlineNodes([formatted], context))
+  nodes.push({ ...textNode(url ? '](' : ']'), raw: '](' })
+  if (match) {
+    const link = linkNode(match.url, null, [textNode(url)], 'linkify')
+    link.loading = true
+    nodes.push(link)
+  }
+  return true
+}
+
 function projectDraftBadge(children, source, context, withheldHtml, standalone) {
   const tail = children.at(-1)
   if (withheldHtml && tail?.type === 'link' && tail.markup === 'html' && !tail.loading
@@ -356,7 +390,8 @@ function projectDraftBadge(children, source, context, withheldHtml, standalone) 
     if (standalone && children.length === 1 && tail?.type === 'text'
       && tail.content === source && tail.raw === source) {
       const alt = PENDING_BADGE_ALT.exec(source)?.[1]
-      if (alt && /[\p{L}\p{N}]/u.test(alt))
+      // The legacy view reserves an empty badge slot while the native node is still text.
+      if (source === '[![' || (alt && /[\p{L}\p{N}]/u.test(alt)))
         children[0] = pendingBadgeLink({ type: 'image', src: '', alt, title: null, raw: source.slice(1), loading: true })
     }
     return
@@ -524,6 +559,34 @@ function projectStrongBeforeMath(inlines, index, nodes, context) {
     textNode(')**', false),
   )
   return true
+}
+
+function projectStrongCodeLabel(inlines, children, context) {
+  const [link] = inlines
+  const [view] = children
+  if (inlines.length !== 1 || link.kind !== 'link' || link.data.loading
+    || children.length !== 1 || view.type !== 'link' || view.markup !== '')
+    return
+  const code = link.data.children.at(-1)
+  const [label, renderedCode] = view.children
+  if (code?.kind !== 'code' || view.children.length !== 2
+    || label.type !== 'text' || renderedCode.type !== 'inline_code')
+    return
+  const source = readText([link.data.children[0].span[0], code.span[0]], context)
+  const emphasis = /^([^\\*\r\n]*)\\\*([^\\*\r\n]+)\\\*([^\\*\r\n]*)$/u.exec(source)
+  if (!emphasis)
+    return
+  const [, left, body, right] = emphasis
+  const raw = `*${body}*`
+  if (left + raw + right !== label.content)
+    return
+  view.children = [
+    ...(left ? [textNode(left, false)] : []),
+    { type: 'emphasis', children: [textNode(body)], raw },
+    ...(right ? [textNode(right)] : []),
+    renderedCode,
+  ]
+  return view.text
 }
 
 function projectOpenStrongMathLabel(inlines, index, nodes, children, context) {
@@ -922,6 +985,9 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false, insideL
         continue
       const children = projectInlineNodes(data, context, false, insideLinkLabel)
       const marker = kind === 'emphasis' ? '*' : kind === 'strong' ? '**' : '~~'
+      const label = kind === 'strong' && context.markstream
+        ? projectStrongCodeLabel(data, children, context)
+        : undefined
       if (kind === 'strong' && context.markstream && !context.final && !insideLinkLabel && raw.startsWith('**')
         && data.length === 1 && data[0].kind === 'text'
         && data[0].span[0] === span[0] + 2 && data[0].span[1] === span[1]) {
@@ -931,7 +997,7 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false, insideL
           && previous.raw === previous.content && previous.content === readText(before.data, context))
           delete previous.center
       }
-      nodes.push({ type: kind, children, raw: context.markstream ? marker + legacyDelimitedText(children) + marker : raw })
+      nodes.push({ type: kind, children, raw: context.markstream ? marker + (label ?? legacyDelimitedText(children)) + marker : raw })
     }
     else if (kind === 'subscript' || kind === 'superscript') {
       const marker = kind === 'subscript' ? '~' : '^'
@@ -954,6 +1020,9 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false, insideL
       nodes.push({ type: kind, id: context.read(data.label), raw })
     }
     else if (kind === 'link' || kind === 'image') {
+      if (context.markstream && !context.final && kind === 'link' && data.loading
+        && projectFormattedDraftBadge(inlines[index], nodes, context))
+        continue
       const destination = readText(data.destination, context)
       const href = markdownHref(destination)
       const title = data.title === null ? null : readText(data.title, context) || null

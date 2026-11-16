@@ -2130,19 +2130,15 @@ test('an image-link preview recognizes only the unescaped bracket after typed te
   }
 
   const escaped = createSession()
-  const unconfirmed = createSession()
   try {
     escaped.append('literal \\[![Second](https://images.example/part')
     const [before, image] = escaped.snapshot()[0].children
     assert.equal(before.content, 'literal [')
     assert.equal(image.type, 'image')
     assert.equal(image.loading, true)
-    unconfirmed.append('[![')
-    assert.ok(unconfirmed.snapshot().every(node => node.children?.every(child => child.type !== 'link' && child.type !== 'image') ?? true))
   }
   finally {
     escaped.dispose()
-    unconfirmed.dispose()
   }
 })
 
@@ -2341,13 +2337,17 @@ test('a line-leading HTML anchor waits for its withheld image child in the legac
   }
 })
 
-test('standalone nested-image preview requires real alt text and has no URL until confirmed', () => {
+test('legacy standalone image links expose a loading placeholder with no URL', () => {
   const session = createSession()
   try {
     session.append('[![')
-    assert.equal(session.snapshot()[0].children[0].type, 'text')
+    const [paragraph] = session.snapshot()
+    assert.deepEqual(paragraph.children, [{
+      type: 'link', href: '', title: null, text: '', raw: '[]()', loading: true, markup: '',
+      children: [{ type: 'image', src: '', alt: '', title: null, raw: '![', loading: true }],
+    }])
     session.append(' ')
-    assert.equal(session.snapshot()[0].children[0].type, 'text')
+    assert.deepEqual(session.snapshot()[0], paragraph)
   }
   finally {
     session.dispose()
@@ -2370,6 +2370,31 @@ test('standalone nested-image preview requires real alt text and has no URL unti
   }
   finally {
     withAlt.dispose()
+  }
+})
+
+test('legacy nested image previews expose confirmed emphasis without supplying an image URL', () => {
+  const session = createSession()
+  try {
+    session.append('[![Alt *label*](')
+    const [badge, emphasis, tail] = session.snapshot()[0].children
+    assert.equal(badge.children[0].src, '')
+    assert.equal(badge.children[0].alt, 'Alt ')
+    assert.equal(emphasis.type, 'emphasis')
+    assert.equal(tail.content, ']')
+    assert.equal(tail.raw, '](')
+    session.append('https://example.com/image.png')
+    const link = session.snapshot()[0].children.at(-1)
+    assert.equal(link.href, 'https://example.com/image.png')
+    assert.equal(link.loading, true)
+    assert.equal(session.snapshot()[0].children[0].children[0].src, '')
+    session.append(')](/docs)')
+    const [confirmed] = session.snapshot()[0].children
+    assert.equal(confirmed.href, '/docs')
+    assert.equal(confirmed.children[0].src, 'https://example.com/image.png')
+  }
+  finally {
+    session.dispose()
   }
 })
 
