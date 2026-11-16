@@ -1,0 +1,17 @@
+[package]
+name = "stream-markdown-rs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+description = "Incremental Markdown parser for Rust terminal applications"
+
+[dependencies]
+memchr = "2.8"
+html-escape = "0.3.1"
+unicode-casefold = "0.2"
+unicode-general-category = "1.1"
+
+[workspace]
+resolver = "3"
+members = ["crates/bench", "crates/plugin-host"]

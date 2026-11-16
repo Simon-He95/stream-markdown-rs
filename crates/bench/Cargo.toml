@@ -1,0 +1,15 @@
+[package]
+name = "stream-markdown-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+default = ["candidate"]
+candidate = ["dep:stream-markdown-rs"]
+count-allocations = []
+
+[dependencies]
+pulldown-cmark = { version = "=0.13.6", default-features = false, features = ["simd"] }
+serde_json = "1"
+stream-markdown-rs = { path = "../..", optional = true }
