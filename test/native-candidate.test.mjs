@@ -1706,6 +1706,52 @@ test('legacy draft URLs preserve the evidenced code label and same-line code con
   }
 })
 
+test('legacy relative drafts with evidenced code or filename labels retain literal display', () => {
+  const code = createSession()
+  const filename = createSession()
+  const plain = createSession()
+  const denied = createSession({ parseOptions: { validateLink: () => false } })
+  try {
+    const codeSource = '- 🧰 Parser toolkit: [`stream-markdown-parser`](./packages/markdown-'
+    const filenameSource = '- 支持与求助入口：[SUPPORT.md](./SUPPORT.md'
+    for (const [session, source] of [[code, codeSource], [filename, filenameSource]]) {
+      session.append(source.slice(0, -5))
+      session.append(source.slice(-5))
+      assert.equal(session.snapshot()[0].items[0].children[0].raw, source.slice(2))
+    }
+    assert.deepEqual(code.snapshot()[0].items[0].children[0].children, [
+      { type: 'text', content: '🧰 Parser toolkit: [', raw: '🧰 Parser toolkit: [', center: false },
+      { type: 'inline_code', code: 'stream-markdown-parser', raw: 'stream-markdown-parser' },
+      { type: 'text', content: '](./packages/markdown-', raw: '](./packages/markdown-', center: false },
+    ])
+    assert.deepEqual(filename.snapshot()[0].items[0].children[0].children, [
+      { type: 'text', content: '支持与求助入口：[', raw: '支持与求助入口：[', center: false },
+      { type: 'text', content: 'SUPPORT.md](./SUPPORT.md', raw: 'SUPPORT.md](./SUPPORT.md' },
+    ])
+    for (const [session, href] of [[code, './packages/markdown-'], [filename, './SUPPORT.md']]) {
+      session.append(')')
+      const link = session.snapshot()[0].items[0].children[0].children.at(-1)
+      assert.equal(link.href, href)
+      assert.equal(link.markup, '')
+      assert.equal(link.loading, false)
+    }
+    plain.append('See [ordinary label](./relative')
+    denied.append('See [`code`](./relative')
+    for (const session of [plain, denied]) {
+      const link = session.snapshot()[0].children[1]
+      assert.equal(link.type, 'link')
+      assert.equal(link.href, '')
+      assert.equal(link.loading, true)
+    }
+  }
+  finally {
+    code.dispose()
+    filename.dispose()
+    plain.dispose()
+    denied.dispose()
+  }
+})
+
 test('legacy preview keeps adjacent-bracket recovery within unresolved link text', () => {
   const options = { parseOptions: { validateLink: href => !/^\s*javascript:/i.test(href) } }
   const session = createSession(options)
@@ -1888,6 +1934,35 @@ test('an image-link preview recognizes only the unescaped bracket after typed te
   }
 })
 
+test('legacy badge runs hold an unfinished image label and an unset outer href', () => {
+  const session = createSession()
+  const standalone = createSession()
+  try {
+    const previous = '[![Docs](/badge.svg)](/docs)\n'
+    session.append(previous + '[![N')
+    const draft = session.snapshot()[0]
+    assert.equal(draft.raw, previous + '[![N')
+    assert.deepEqual(draft.children.at(-1), {
+      type: 'link', href: '', title: null, text: 'N', raw: '[N]()', loading: true, markup: '',
+      children: [{ type: 'image', src: '', alt: 'N', title: null, raw: '![N', loading: true }],
+    })
+    session.append('ext](/next.svg)]')
+    const waiting = session.snapshot()[0].children
+    assert.equal(waiting.at(-2).children[0].src, '/next.svg')
+    assert.equal(waiting.at(-2).href, '')
+    assert.equal(waiting.at(-1).content, ']')
+    session.append('(/next)')
+    assert.equal(session.snapshot()[0].children.at(-1).href, '/next')
+
+    standalone.append('Unrelated [![N')
+    assert.equal(standalone.snapshot()[0].children.at(-1).type, 'text')
+  }
+  finally {
+    session.dispose()
+    standalone.dispose()
+  }
+})
+
 test('confirmed HTML image under an anchor preserves raw markup and the parent link attributes', () => {
   const image = '<img src="/badge.svg" alt="badge" width="250" />'
   const anchor = `<a href="/docs" target="_blank">${image}</a>`
@@ -1995,6 +2070,36 @@ test('legacy preview preserves a directly observed pre and code opening pair tog
   finally {
     session.dispose()
     closing.dispose()
+  }
+})
+
+test('a later legacy HTML badge uses its real anchor while its image tag is unfinished', () => {
+  const session = createSession()
+  const denied = createSession({ parseOptions: { validateLink: href => href !== '/next' } })
+  try {
+    const previous = '<a href="/demo"><img src="/one"></a>\n'
+    const anchor = '<a href="/next" target="_blank">'
+    const source = previous + anchor + '<img src="/unclosed'
+    session.append(source)
+    const [draft] = session.snapshot()
+    assert.equal(draft.raw, previous + anchor)
+    assert.deepEqual(draft.children.slice(1), [
+      { type: 'text', content: '\n', raw: '\n' },
+      {
+        type: 'link', href: '/next', title: null, text: '/next', raw: anchor, loading: true, markup: 'html',
+        attrs: [['href', '/next'], ['target', '_blank']], children: [{ type: 'text', content: '/next', raw: '/next' }],
+      },
+    ])
+    session.append('\"></a>')
+    assert.equal(session.snapshot()[0].children.at(-1).children[0].tag, 'img')
+    assert.equal(session.snapshot()[0].children.at(-1).loading, false)
+
+    denied.append(source)
+    assert.ok(!denied.snapshot()[0].children.some(child => child.href === '/next'))
+  }
+  finally {
+    session.dispose()
+    denied.dispose()
   }
 })
 

@@ -7,6 +7,7 @@ import { LinkifyIt } from 'linkify-it'
 const VOID = new Set('area base br col embed hr img input link meta param source track wbr'.split(' '))
 const HTML_START = /^<([A-Z][\w:.-]*)(\s(?:[^"'<>]|"[^"]*"|'[^']*')*)?\s*\/?>/i
 const HTML_ATTRIBUTE = /([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g
+const MARKDOWN_FILENAME = /(^|[\s([,"'“‘])([A-Z0-9](?:[A-Z0-9-]*[A-Z0-9])?)\.[mM][dD](?=$|[\s)\],;"'”’]|[.!?:](?:\s|$))/gu
 const legacyLinkify = new LinkifyIt({ fuzzyLink: true })
 
 export function projectBlocks(nodes, roots, context) {
@@ -301,6 +302,53 @@ function projectDraftHttpHost(children, source, context) {
   children.push(linkNode(match.url, null, [textNode(host[0])], 'linkify'))
 }
 
+function pendingBadgeLink(image) {
+  return {
+    type: 'link', href: '', title: null, text: image.alt, children: [image],
+    raw: `[${image.alt}]()`, loading: true, markup: '',
+  }
+}
+
+function projectDraftBadge(children, source, context, withheldHtml) {
+  const tail = children.at(-1)
+  if (withheldHtml && tail?.type === 'link' && tail.markup === 'html' && !tail.loading
+    && tail.children.some(child => child.type === 'html_inline' && child.tag === 'img')) {
+    const pending = normalize(withheldHtml)
+    const lead = /^\n {0,3}/u.exec(pending)?.[0]
+    const markup = lead && HTML_START.exec(pending.slice(lead.length))?.[0]
+    const header = markup && htmlHeader(markup)
+    const href = header?.tag === 'a' && !header.closed && attrValue(header.attrs, 'href')
+    if (href && /^<img(?:[ \t]|$)[^<>\r\n]*$/iu.test(pending.slice(lead.length + markup.length))
+      && allowsLink(href, context)) {
+      const title = attrValue(header.attrs, 'title')
+      const attrs = title === '' ? [...header.attrs, ['title', title]] : header.attrs
+      const link = linkNode(href, title, [textNode(href, false)], 'html', markup, attrs)
+      link.loading = true
+      children.push(textNode('\n', false), link)
+      return lead + markup
+    }
+  }
+  const lineStart = source.lastIndexOf('\n')
+  if (lineStart < 0)
+    return
+  const line = source.slice(lineStart + 1).replace(/^ {0,3}/u, '')
+  const previous = children.at(-2)
+  const hasBadge = node => node?.type === 'link' && !node.loading && node.children.some(child => child.type === 'image')
+  if (tail?.type !== 'text' || tail.raw !== tail.content)
+    return
+  if (hasBadge(previous) && tail.raw === `\n${line}`) {
+    const alt = /^\[!\[([^\[\]\\<>*&`\r\n]*)(?:\])?$/u.exec(line)
+    if (alt) {
+      tail.content = tail.raw = '\n'
+      children.push(pendingBadgeLink({ type: 'image', src: '', alt: alt[1], title: null, raw: line.slice(1), loading: true }))
+    }
+  }
+  else if (tail.raw === ']' && previous?.type === 'image' && !previous.loading && line.startsWith('[![') && line.endsWith(')]')
+    && children.at(-3)?.type === 'text' && children.at(-3).raw === '\n[' && hasBadge(children.at(-4))) {
+    children.splice(-3, 2, textNode('\n', false), pendingBadgeLink(previous))
+  }
+}
+
 function attrValue(attrs, name) {
   for (let i = attrs.length - 1; i >= 0; i--) {
     if (attrs[i][0].toLowerCase() === name)
@@ -329,9 +377,8 @@ function needsLegacyCenter(text, context) {
 }
 
 function appendMarkdownFilenameText(nodes, text, center, final) {
-  const names = /(^|[\s([,"'“‘])([A-Z0-9](?:[A-Z0-9-]*[A-Z0-9])?)\.[mM][dD](?=$|[\s)\],;"'”’]|[.!?:](?:\s|$))/gu
   let previous
-  for (const match of text.matchAll(names)) {
+  for (const match of text.matchAll(MARKDOWN_FILENAME)) {
     if (!/[A-Z].*[A-Z]/u.test(match[2]))
       continue
     if (!final && !/[\p{L}\p{N}]/u.test(text.slice(match.index + match[0].length)))
@@ -474,14 +521,51 @@ function projectParenthesisBeforeLink(inlines, index, nodes, waitingForHref, con
   delete previous.center
 }
 
-function projectCodeAdjacentDraftLink(inlines, index, nodes, children, href, context) {
-  const { span, data } = inlines[index]
-  if (children.length !== 1 || data.children.length !== 1 || data.title !== null
-    || !Array.isArray(data.destination) || data.destination[1] !== span[1] || !/^https?:\/\//iu.test(href))
-    return false
+function explicitDraftLabel({ span, data }, context) {
+  if (data.children.length !== 1 || data.title !== null
+    || !Array.isArray(data.destination) || data.destination[1] !== span[1])
+    return
   const label = data.children[0]
-  if (label.span[0] !== span[0] + 1 || context.read([span[0], label.span[0]]) !== '['
-    || context.read([label.span[1], data.destination[0]]) !== '](')
+  if (label.span[0] === span[0] + 1 && context.read([span[0], label.span[0]]) === '['
+    && context.read([label.span[1], data.destination[0]]) === '](')
+    return label
+}
+
+function projectRelativeDraftLink(inlines, index, nodes, children, destination, context) {
+  if (children.length !== 1 || !/^(?:\.{1,2}\/|\/(?!\/)|#)[^\s()<>\[\]\\]+$/u.test(destination))
+    return false
+  const inline = inlines[index]
+  const label = explicitDraftLabel(inline, context)
+  const before = inlines[index - 1]
+  const preceding = nodes.at(-1)
+  if (!label || context.read(inline.data.destination) !== destination
+    || before?.kind !== 'text' || before.span[1] !== inline.span[0]
+    || preceding?.type !== 'text' || preceding.raw !== preceding.content
+    || context.read(before.span) !== preceding.content)
+    return false
+  const child = children[0]
+  const code = label.kind === 'code' && child.type === 'inline_code'
+    && context.read([label.span[0], label.span[0] + 1]) === '`'
+  if (!code) {
+    if (label.kind !== 'text' || child.type !== 'text' || context.read(label.span) !== child.content)
+      return false
+    const match = child.content.matchAll(MARKDOWN_FILENAME).next().value
+    if (!match || match[0] !== child.content || !/[A-Z].*[A-Z]/u.test(match[2]))
+      return false
+  }
+  mergeText(nodes, textNode('['))
+  if (code)
+    nodes.push(child)
+  nodes.push(textNode((code ? '' : child.content) + '](' + destination, code))
+  return true
+}
+
+function projectCodeAdjacentDraftLink(inlines, index, nodes, children, href, context) {
+  if (children.length !== 1 || !/^https?:\/\//iu.test(href))
+    return false
+  const { span } = inlines[index]
+  const label = explicitDraftLabel(inlines[index], context)
+  if (!label)
     return false
   const previous = inlines[index - 1]
   const precedingText = nodes.at(-1)
@@ -721,6 +805,10 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false, insideL
         let text = legacyLinkText(children, context.markstream)
         const hasImage = children.some(child => child.type === 'image')
         const ready = context.markstream && !hasImage ? pendingLinkDestination(destination) : destination
+        const waitingForHref = context.markstream && !hasImage && !ready
+        if (!context.final && waitingForHref && allowed
+          && projectRelativeDraftLink(inlines, index, nodes, children, destination, context))
+          continue
         const preparedHref = ready === destination ? href : markdownHref(ready)
         const visibleHref = allowed && (preparedHref === href || !preparedHref || allowsLink(preparedHref, context, kind))
           ? preparedHref
@@ -730,7 +818,6 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false, insideL
           continue
         const linkified = Boolean(visibleHref && context.markstream && ready !== destination)
         let visibleChildren = children.map(child => child.type === 'text' ? textNode(child.content, false) : child)
-        const waitingForHref = context.markstream && !hasImage && !ready
         if (waitingForHref && allowed && simpleMarkdownLink && title === null) {
           const recovered = recoverAdjacentBracketLabel(inlines, index, nodes, text, context)
           if (recovered !== text) {
@@ -1279,6 +1366,7 @@ function projectBlock(block, nodes, context) {
       }
       const rawContent = block.rawFragments ? { fragments: block.rawFragments } : data
       let projectedRaw = inlineRaw(rawContent, raw.trim(), context, span[1])
+      let withheldHtml
       const parsed = block.previewInlines?.parsed
       const last = parsed?.at(-1)
       const committedEnd = rawContent.fragments?.at(-1)?.[1]
@@ -1295,8 +1383,10 @@ function projectBlock(block, nodes, context) {
       }
       if (context.markstream && open && last && last.span[1] < span[1]) {
         const tail = context.read([last.span[1], span[1]])
-        if (tail.trimStart().startsWith('<'))
+        if (tail.trimStart().startsWith('<')) {
+          withheldHtml = tail
           projectedRaw = normalize(context.read([data.plain?.[0] ?? span[0], last.span[1]]))
+        }
         if (!context.final && parsed.length === 1 && last.kind === 'html'
           && /^<img(?:[\s/]|$)/i.test(tail)) {
           const anchor = htmlHeader(projectedRaw)
@@ -1306,8 +1396,15 @@ function projectBlock(block, nodes, context) {
       }
       const inlines = block.previewInlines ?? data
       const children = projectInlines(inlines, context)
-      if (open)
+      if (open) {
         projectDraftHttpHost(children, projectedRaw, context)
+        if (context.markstream && !context.final) {
+          const badgeTail = withheldHtml ?? (block.parent === null && span[1] < context.length
+            ? context.read([span[1], context.length])
+            : undefined)
+          projectedRaw += projectDraftBadge(children, projectedRaw, context, badgeTail) ?? ''
+        }
+      }
       const imageLink = context.markstream && context.final && inlines.parsed
         ? projectUnclosedImageLink(inlines.parsed, children, context)
         : undefined
