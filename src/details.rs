@@ -160,21 +160,11 @@ fn wrapper_remains_open(source: &str, mut at: usize, end: usize, name: Name) -> 
                 !opener.self_closing && inner.eq_ignore_ascii_case(&name.opening()[1..]),
             );
             at = opener.end;
-            if let Some((_, closer)) = [
-                (b"script".as_slice(), b"</script>".as_slice()),
-                (b"style", b"</style>"),
-                (b"textarea", b"</textarea>"),
-            ]
-            .into_iter()
-            .find(|(tag, _)| inner.eq_ignore_ascii_case(tag))
-            {
-                let Some(close) = bytes[at..end]
-                    .windows(closer.len())
-                    .position(|part| part.eq_ignore_ascii_case(closer))
-                else {
+            if let Some(raw) = tag::RawTextTag::from_name(inner) {
+                let Some(close) = raw.find_end(bytes, at, end) else {
                     return false;
                 };
-                at += close + closer.len();
+                at = close;
             }
         } else {
             at = position + 1;

@@ -198,8 +198,60 @@ pub(crate) struct BodyScanner {
 
 enum BodyToken {
     Opening(OpeningProbe),
-    Closing { start: usize, checked: usize },
-    Comment { start: usize, checked: usize },
+    Closing {
+        start: usize,
+        checked: usize,
+    },
+    Comment {
+        start: usize,
+        checked: usize,
+    },
+    RawText {
+        start: usize,
+        checked: usize,
+        tag: RawTextTag,
+    },
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum RawTextTag {
+    Script,
+    Style,
+    Textarea,
+}
+
+impl RawTextTag {
+    pub(crate) fn from_name(name: &[u8]) -> Option<Self> {
+        if name.eq_ignore_ascii_case(b"script") {
+            Some(Self::Script)
+        } else if name.eq_ignore_ascii_case(b"style") {
+            Some(Self::Style)
+        } else if name.eq_ignore_ascii_case(b"textarea") {
+            Some(Self::Textarea)
+        } else {
+            None
+        }
+    }
+
+    fn closer(self) -> &'static [u8] {
+        match self {
+            Self::Script => b"</script>",
+            Self::Style => b"</style>",
+            Self::Textarea => b"</textarea>",
+        }
+    }
+
+    pub(crate) fn find_end(self, bytes: &[u8], start: usize, end: usize) -> Option<usize> {
+        let closer = self.closer();
+        let last = end.checked_sub(closer.len())?;
+        if last < start {
+            return None;
+        }
+        memchr::memchr_iter(b'<', &bytes[start..=last])
+            .map(|relative| start + relative)
+            .find(|&offset| bytes[offset..offset + closer.len()].eq_ignore_ascii_case(closer))
+            .map(|offset| offset + closer.len())
+    }
 }
 
 fn same_name<const IGNORE_CASE: bool>(left: &[u8], right: &[u8]) -> bool {
@@ -229,10 +281,18 @@ impl BodyScanner {
                 Some(BodyToken::Opening(mut probe)) => {
                     if let Some(stop) = probe.update(source, end) {
                         if let Some(inner) = opening(source, probe.start, stop) {
-                            if !inner.self_closing
-                                && same_name::<HTML>(inner.tag.tag_name(source).as_bytes(), name)
-                            {
-                                *depth += 1;
+                            if !inner.self_closing {
+                                let inner_name = inner.tag.tag_name(source).as_bytes();
+                                if same_name::<HTML>(inner_name, name) {
+                                    *depth += 1;
+                                } else if HTML && let Some(tag) = RawTextTag::from_name(inner_name)
+                                {
+                                    self.token = Some(BodyToken::RawText {
+                                        start: probe.start,
+                                        checked: stop,
+                                        tag,
+                                    });
+                                }
                             }
                             self.at = stop;
                         } else {
@@ -274,6 +334,22 @@ impl BodyScanner {
                         return (start, None);
                     };
                     self.at = from + relative + 3;
+                }
+                Some(BodyToken::RawText {
+                    start,
+                    checked,
+                    tag,
+                }) => {
+                    let from = checked.saturating_sub(tag.closer().len() - 1).max(self.at);
+                    let Some(close) = tag.find_end(bytes, from, end) else {
+                        self.token = Some(BodyToken::RawText {
+                            start,
+                            checked: end,
+                            tag,
+                        });
+                        return (start, None);
+                    };
+                    self.at = close;
                 }
                 None => {
                     let Some(relative) = memchr::memchr(b'<', &bytes[self.at..end]) else {

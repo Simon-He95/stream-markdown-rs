@@ -433,9 +433,13 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false) {
             depth++
         }
       }
-      let children = projectInlineNodes(inlines.slice(index + 1, end), context)
-      const combined = end > index ? normalize(context.read([span[0], inlines[end].span[1]])) : raw
       const tag = header?.tag
+      const autoClosed = context.markstream && context.final && end === index && !header?.closed
+        && (tag === 'pre' || tag === 'code')
+      const last = autoClosed ? inlines.length - 1 : end
+      let children = projectInlineNodes(inlines.slice(index + 1, autoClosed ? inlines.length : end), context)
+      const source = last === index ? raw : normalize(context.read([span[0], inlines[last].span[1]]))
+      const combined = autoClosed ? source + `</${tag}>` : source
       const href = header && attrValue(header.attrs, 'href')
       if (tag === 'a' && href && end > index) {
         if (allowsLink(href, context)) {
@@ -462,11 +466,11 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false) {
           content: custom ? combined.slice(raw.length, combined.lastIndexOf('</')) : combined,
           children,
           raw: combined,
-          loading: false,
-          autoClosed: false,
+          loading: autoClosed,
+          autoClosed,
         })
       }
-      index = end
+      index = last
     }
     else {
       nodes.push({ type: kind, raw, ...data })

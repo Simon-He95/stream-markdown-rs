@@ -126,6 +126,28 @@ test('native candidate ignores apparent HTML closers inside a split comment', ()
   }
 })
 
+test('native candidate keeps HTML open across literal closers in raw text elements', () => {
+  for (const tag of ['script', 'style', 'textarea']) {
+    const session = createSession()
+    try {
+      const opening = `<DIV><${tag}>`
+      const rawBody = 'x = "</div>"'
+      const rawCloser = `</${tag.toUpperCase()}>`
+      for (const chunk of [opening, rawBody, rawCloser.slice(0, -2), rawCloser.slice(-2), 'after</di']) {
+        session.append(chunk)
+        assert.equal(session.snapshot()[0].loading, true, tag)
+      }
+      session.append('v>')
+      assert.equal(session.snapshot()[0].loading, false, tag)
+      session.finish()
+      assert.equal(session.snapshot()[0].raw, `${opening}${rawBody}${rawCloser}after</div>`)
+    }
+    finally {
+      session.dispose()
+    }
+  }
+})
+
 test('native candidate exposes complete attributes from a multiline registered opening', () => {
   const session = createSession({ factoryOptions: { customHtmlTags: ['tool-call'] } })
   try {
@@ -751,6 +773,39 @@ test('final literal asterisks in prose retain their spelling and legacy metadata
       type: 'text', content: 'plain * and *', raw: 'plain * and *', center: false,
     })
     assert.equal(standard.snapshot()[0].items[0].children[0].children[0].center, false)
+  }
+  finally {
+    legacy.dispose()
+    standard.dispose()
+  }
+})
+
+test('final legacy inline pre and code use typed tail children and preserve paragraph source', () => {
+  const body = ' elements; ref ([change](https://example.org/c))'
+  const source = 'plain <pre><code>' + body
+  const legacy = createSession()
+  const standard = createSession({ parseOptions: { markstream: false } })
+  try {
+    for (const session of [legacy, standard]) {
+      session.append('plain <pre><co')
+      session.append('de>' + body + '\n\nkeep <pre><code>x</code></pre> tail')
+      session.finish()
+    }
+    const [unclosed, closed] = legacy.snapshot()
+    assert.equal(unclosed.raw, source)
+    assert.equal(unclosed.children.length, 2)
+    const pre = unclosed.children[1]
+    assert.equal(pre.raw, '<pre><code>' + body + '</pre>')
+    assert.equal(pre.loading, true)
+    assert.equal(pre.autoClosed, true)
+    const [code] = pre.children
+    assert.equal(code.raw, '<code>' + body + '</code>')
+    assert.equal(code.loading, true)
+    assert.equal(code.autoClosed, true)
+    assert.equal(code.children[1].href, 'https://example.org/c')
+    assert.equal(closed.children[1].loading, false)
+    assert.equal(closed.children[2].content, ' tail')
+    assert.equal(standard.snapshot()[0].children[1].raw, '<pre>')
   }
   finally {
     legacy.dispose()
