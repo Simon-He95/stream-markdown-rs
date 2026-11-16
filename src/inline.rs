@@ -617,7 +617,10 @@ fn first_special_mode<const MATH: bool, const MARKSTREAM: bool>(
     bytes: &[u8],
     gfm: bool,
 ) -> Option<usize> {
-    use std::arch::aarch64::{vandq_u8, vdupq_n_u8, vld1q_u8, vmaxvq_u8, vqtbl1q_u8, vshrq_n_u8};
+    use std::arch::aarch64::{
+        vandq_u8, vceqq_u8, vdupq_n_u8, vld1q_u8, vmaxvq_u8, vminvq_u8, vorrq_u8, vqtbl1q_u8,
+        vshrq_n_u8,
+    };
 
     const COMMONMARK: [u8; 16] = marker_table(false, false, false);
     const GFM: [u8; 16] = marker_table(true, false, false);
@@ -628,6 +631,7 @@ fn first_special_mode<const MATH: bool, const MARKSTREAM: bool>(
     const COMMONMARK_BOTH: [u8; 16] = marker_table(false, true, true);
     const GFM_BOTH: [u8; 16] = marker_table(true, true, true);
     const HIGH_BITS: [u8; 16] = [1, 2, 4, 8, 16, 32, 64, 128, 0, 0, 0, 0, 0, 0, 0, 0];
+    const LANES: [u8; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
     let (chunks, tail) = bytes.as_chunks::<16>();
     if !chunks.is_empty() {
         // The lookup tables and each exact chunk contain 16 readable bytes.
@@ -651,10 +655,9 @@ fn first_special_mode<const MATH: bool, const MARKSTREAM: bool>(
                 let high = vshrq_n_u8::<4>(bytes);
                 let candidates = vandq_u8(vqtbl1q_u8(table, low), vqtbl1q_u8(high_bits, high));
                 if vmaxvq_u8(candidates) != 0 {
-                    return chunk
-                        .iter()
-                        .position(|&byte| special_mode::<MATH, MARKSTREAM>(byte, gfm))
-                        .map(|n| index * 16 + n);
+                    let lanes = vld1q_u8(LANES.as_ptr());
+                    let first = vminvq_u8(vorrq_u8(lanes, vceqq_u8(candidates, vdupq_n_u8(0))));
+                    return Some(index * 16 + usize::from(first));
                 }
             }
         }
@@ -2450,6 +2453,29 @@ fn trailing_email_end(source: &str, start: usize, end: usize, xmpp: bool) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vector_marker_lookup_matches_scalar_in_every_lane_and_mode() {
+        fn check<const MATH: bool, const MARKSTREAM: bool>(bytes: &[u8], gfm: bool) {
+            let scalar = bytes
+                .iter()
+                .position(|&byte| special_mode::<MATH, MARKSTREAM>(byte, gfm));
+            assert_eq!(first_special_mode::<MATH, MARKSTREAM>(bytes, gfm), scalar);
+        }
+        let mut bytes = [b'x'; 49];
+        for index in 0..bytes.len() {
+            for byte in 0..=u8::MAX {
+                bytes[index] = byte;
+                for gfm in [false, true] {
+                    check::<false, false>(&bytes, gfm);
+                    check::<false, true>(&bytes, gfm);
+                    check::<true, false>(&bytes, gfm);
+                    check::<true, true>(&bytes, gfm);
+                }
+            }
+            bytes[index] = b'x';
+        }
+    }
     use crate::Reference;
 
     #[test]
