@@ -507,6 +507,31 @@ test('native candidate projects typed details and summary hierarchy separately f
   }
 })
 
+test('open HTML wrapper includes the current child source and keeps a held summary closer in raw', () => {
+  const session = createSession()
+  const opening = '<div class="same">\nBETA\n\n<details>\n<summary>S'
+  try {
+    session.append(opening)
+    session.append('</summ')
+    const [held] = session.snapshot()
+    assert.equal(held.raw, opening + '</summ')
+    assert.equal(held.content, opening + '\n</div>')
+    assert.equal(held.children.at(-1).children[0].content, '<summary>S</summ')
+
+    const rest = 'ary>\n\nbody\n\n</details>\n\ntrailing copy:\nx1\n'
+    session.append(rest)
+    session.append('未结束')
+    const [wrapper] = session.snapshot()
+    assert.equal(wrapper.raw, opening + '</summ' + rest + '未结束')
+    assert.equal(wrapper.content, wrapper.raw + '\n</div>')
+    assert.equal(wrapper.children.at(-1).raw, 'trailing copy:\nx1\n未结束')
+    assert.equal(wrapper.loading, true)
+  }
+  finally {
+    session.dispose()
+  }
+})
+
 test('native candidate retains typed custom tag children alongside the source payload', () => {
   const session = createSession({ parseOptions: { customHtmlTags: ['widget'] } })
   try {

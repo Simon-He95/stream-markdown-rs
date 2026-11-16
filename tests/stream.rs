@@ -498,6 +498,63 @@ fn multiline_opening_attributes_do_not_make_a_same_line_custom_body_block_level(
 }
 
 #[test]
+fn segmented_html_publishes_only_completed_source_lines() {
+    let mut parser = Parser::new(Options {
+        markstream: true,
+        preview: Preview::Ai,
+        ..Options::default()
+    });
+    let mut changes = Vec::new();
+    parser.append("<details>\n<div>\n", &mut changes).unwrap();
+    let id = changes
+        .iter()
+        .find_map(|change| match change {
+            Change::Insert { block, .. } if matches!(block.data, BlockData::SegmentedHtml(_)) => {
+                Some(block.id)
+            }
+            _ => None,
+        })
+        .expect("expected raw HTML under details");
+    changes.clear();
+    parser.append("一行", &mut changes).unwrap();
+    assert!(!changes.iter().any(|change| matches!(change,
+        Change::AppendText { id: updated, .. } if *updated == id)));
+    changes.clear();
+    parser.append("\n", &mut changes).unwrap();
+    assert!(changes.iter().any(|change| matches!(change,
+        Change::AddRawLine { id: updated, line, .. } if *updated == id && parser.source(line.span) == "一行\n")));
+}
+
+#[test]
+fn split_crlf_blank_line_does_not_close_a_list_early() {
+    let mut parser = Parser::new(Options::default());
+    let mut changes = Vec::new();
+    parser.append("- item\n\n", &mut changes).unwrap();
+    let id = changes
+        .iter()
+        .find_map(|change| match change {
+            Change::Insert {
+                block,
+                parent: None,
+            } if matches!(block.data, BlockData::List { .. }) => Some(block.id),
+            _ => None,
+        })
+        .expect("expected an open list");
+    changes.clear();
+    parser.append("\r", &mut changes).unwrap();
+    assert!(!changes.iter().any(|change| matches!(change,
+        Change::Replace(block) if block.id == id && block.status == BlockStatus::Closed)));
+    parser.append("\nnext\n", &mut changes).unwrap();
+    parser.finish(&mut changes).unwrap();
+    let span = parse(parser.source_text(), &Options::default())
+        .unwrap()
+        .nodes[0]
+        .span;
+    assert!(changes.iter().any(|change| matches!(change,
+        Change::Replace(block) if block.id == id && block.status == BlockStatus::Closed && block.span == span)));
+}
+
+#[test]
 fn rejected_or_incomplete_multiline_openers_replay_the_buffer_once() {
     let options = Options {
         custom_tags: vec!["tool-call".into()],
@@ -523,6 +580,57 @@ fn rejected_or_incomplete_multiline_openers_replay_the_buffer_once() {
         );
         assert!(parser.metrics().scanned_bytes <= 2 * source.len());
     }
+}
+
+#[test]
+fn late_definitions_backpatch_custom_children_without_rebuilding_unrelated_blocks() {
+    let options = Options {
+        custom_tags: vec!["tool-call".into()],
+        footnotes: true,
+        ..Options::default()
+    };
+    let mut parser = Parser::new(options.clone());
+    let mut changes = Vec::new();
+    let mut view = View::default();
+    parser
+        .append(
+            "<tool-call>\n[label][ref] and [^note]\n</tool-call>\n\nStable\n\n",
+            &mut changes,
+        )
+        .unwrap();
+    view.apply(&mut changes);
+    let id = view
+        .blocks
+        .values()
+        .find(|block| matches!(block.data, BlockData::CustomTag(_)))
+        .unwrap()
+        .id;
+    let stable = view
+        .blocks
+        .values()
+        .find(|block| matches!(block.data, BlockData::Paragraph(_)))
+        .unwrap()
+        .clone();
+
+    for definition in ["[ref]: /destination\n\n", "[^note]: note body\n\n"] {
+        parser.append(definition, &mut changes).unwrap();
+        assert!(
+            changes
+                .iter()
+                .any(|change| matches!(change, Change::Replace(block) if block.id == id))
+        );
+        assert!(
+            !changes
+                .iter()
+                .any(|change| matches!(change, Change::Replace(block) if block.id == stable.id))
+        );
+        view.apply(&mut changes);
+    }
+    parser.finish(&mut changes).unwrap();
+    view.apply(&mut changes);
+    let expected = parse(parser.source_text(), &options).unwrap().nodes;
+    assert_eq!(view.blocks.into_values().collect::<Vec<_>>(), expected);
+    assert_eq!(parser.metrics().invalidated_blocks, 2);
 }
 
 #[test]

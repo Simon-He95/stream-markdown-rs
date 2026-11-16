@@ -863,13 +863,36 @@ function projectBlock(block, nodes, context) {
       return detailNode(block, nodes, raw, map, context)
     case 'html_wrapper': {
       const tag = data.tag.toLowerCase()
+      let visibleEnd = span[1]
+      let rawEnd = visibleEnd
+      if (context.markstream && open && !context.final) {
+        const last = nodes.get(block.children.at(-1))
+        if (last?.kind === 'paragraph' && last.status === 'open') {
+          // The child can already have text beyond the wrapper's last complete line.
+          visibleEnd = Math.max(visibleEnd, last.span[1])
+          rawEnd = visibleEnd
+        }
+        if (last?.kind === 'details' && last.status === 'open') {
+          const summary = nodes.get(last.children.at(-1))
+          const close = '</summary'
+          const remaining = context.length - rawEnd
+          if (summary?.kind === 'summary' && summary.status === 'open' && summary.span[1] === rawEnd
+            && remaining >= 2 && remaining <= close.length) {
+            const tail = context.read([rawEnd, context.length]).toLowerCase()
+            if (tail.startsWith('</') && close.startsWith(tail))
+              rawEnd = context.length
+          }
+        }
+      }
+      const visible = visibleEnd === span[1] ? raw : readText([span[0], visibleEnd], context)
+      const wrapperRaw = rawEnd === visibleEnd ? visible : readText([span[0], rawEnd], context)
       return {
-        type: 'html_block', tag, raw,
-        content: status === 'closed' ? raw : raw + `\n</${tag}>`,
+        type: 'html_block', tag, raw: wrapperRaw,
+        content: status === 'closed' ? visible : visible + `\n</${tag}>`,
         ...(data.attrs.length && { attrs: data.attrs }),
         loading: open && !context.final,
         children: projectChildren(nodes, block.children, context),
-        ...map,
+        ...(rawEnd === span[1] ? map : sourceMap([span[0], rawEnd], context)),
       }
     }
     case 'html_block': {

@@ -465,6 +465,7 @@ struct Dependent {
 #[derive(Clone)]
 enum Dependency {
     Leaf(Dependent),
+    Element(Arc<ElementBody>),
     Footnote(footnotes::NoteBody),
     Summary(details::SummaryBody),
     Cell {
@@ -478,11 +479,22 @@ impl Dependency {
     fn key(&self) -> (BlockId, Option<usize>) {
         match self {
             Self::Leaf(leaf) => (leaf.id, None),
+            Self::Element(body) => (body.id, None),
             Self::Footnote(body) => (body.id, None),
             Self::Summary(body) => (body.id, None),
             Self::Cell { id, index, .. } => (*id, Some(*index)),
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct ElementBody {
+    id: BlockId,
+    span: Span,
+    body: Span,
+    tag: Tag,
+    status: BlockStatus,
+    promoted: bool,
 }
 
 struct Registered {
@@ -701,6 +713,7 @@ impl Engine {
             }
             if self.active.is_none()
                 && !self.containers.is_empty()
+                && self.line_start < self.scan
                 && let Some(&byte) = bytes.get(self.line_start)
                 && (ordinary_start(byte) || byte == b'|')
             {
@@ -1655,7 +1668,7 @@ impl Engine {
         if self.options.markstream
             && let Some(Active::Html(html)) = &mut self.active
         {
-            if !blank(head) {
+            if html.lines.is_none() && !blank(head) {
                 emit_append(output, html.id, &mut html.span.end, end);
             }
             return;
@@ -3078,21 +3091,51 @@ impl Engine {
         present: bool,
         output: &mut Output<'_>,
     ) -> Result<(), ParseError> {
+        self.emit_element_body(
+            source,
+            ElementBody {
+                id: element.id,
+                span: Span::new(element.start, end),
+                body: element.body,
+                tag: element.tag,
+                status,
+                promoted: element.promoted,
+            },
+            present,
+            output,
+        )
+    }
+
+    fn emit_element_body(
+        &mut self,
+        source: &str,
+        body: ElementBody,
+        present: bool,
+        output: &mut Output<'_>,
+    ) -> Result<(), ParseError> {
         let children = if self.batch {
             Vec::new()
         } else {
-            self.custom_children(source, element.body)?
+            self.unresolved.clear();
+            self.clear_footnote_unresolved();
+            let children = self.custom_children(source, body.body, true)?;
+            if !self.unresolved.is_empty() || self.has_unresolved_footnotes() {
+                let dependency = Dependency::Element(Arc::new(body));
+                self.track_footnote_dependency(&dependency);
+                self.track_dependency(dependency);
+            }
+            children
         };
         output.done(
             Block {
-                id: element.id,
-                span: Span::new(element.start, end),
-                status,
+                id: body.id,
+                span: body.span,
+                status: body.status,
                 data: BlockData::CustomTag(Box::new(CustomElement {
-                    tag: element.tag,
-                    body: element.body,
+                    tag: body.tag,
+                    body: body.body,
                     children,
-                    promoted: element.promoted,
+                    promoted: body.promoted,
                 })),
             },
             present,
@@ -3105,8 +3148,9 @@ impl Engine {
         &mut self,
         source: &str,
         body: Span,
+        track: bool,
     ) -> Result<Vec<crate::Inline>, ParseError> {
-        match self.parse_inline(source, body, false)? {
+        match self.parse_inline(source, body, track)? {
             InlineContent::Parsed(children) => Ok(children),
             InlineContent::Plain(span) if span.start < span.end => Ok(vec![crate::Inline {
                 span,
@@ -3167,6 +3211,9 @@ impl Engine {
                 }
                 match dependent {
                     Dependency::Leaf(leaf) => self.finish_leaf(source, leaf, true, output)?,
+                    Dependency::Element(body) => {
+                        self.emit_element_body(source, *body, true, output)?
+                    }
                     Dependency::Footnote(body) => {
                         self.finish_footnote_body(source, body, output)?
                     }
@@ -3417,7 +3464,7 @@ impl Engine {
                     }
                 }
                 BlockData::CustomTag(element) => {
-                    element.children = self.custom_children(source, element.body)?;
+                    element.children = self.custom_children(source, element.body, false)?;
                 }
                 BlockData::Table(data) => {
                     for cell in &mut data.cells {

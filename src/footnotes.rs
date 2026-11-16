@@ -404,6 +404,12 @@ impl Engine {
         }
     }
 
+    pub(super) fn has_unresolved_footnotes(&self) -> bool {
+        self.footnotes
+            .as_ref()
+            .is_some_and(|index| !index.unresolved.is_empty())
+    }
+
     pub(super) fn track_footnote_dependency(&mut self, dependency: &Dependency) {
         let Some(index) = self.footnotes.as_mut() else {
             return;
@@ -444,6 +450,9 @@ impl Engine {
                 }
                 match dependency {
                     Dependency::Leaf(leaf) => self.finish_leaf(source, leaf, true, output)?,
+                    Dependency::Element(body) => {
+                        self.emit_element_body(source, *body, true, output)?
+                    }
                     Dependency::Cell { id, index, span } => {
                         let content = self.stream_cell(source, id, index, span)?;
                         output.update(Change::ReplaceTableCell { id, index, content });
