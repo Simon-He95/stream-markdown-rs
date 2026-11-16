@@ -1099,6 +1099,51 @@ test('legacy final view uses only contiguous matched escaped backticks as displa
   }
 })
 
+test('legacy formula labels separate confirmed code and math from the URL', () => {
+  const text = 'Prefix **strong [label `code` and $x_1$](https://example.com/a_(b)) suffix**'
+  const legacy = createSession()
+  const native = createSession({ parseOptions: { markstream: false } })
+  try {
+    legacy.append(text)
+    const open = legacy.snapshot()[0].children[1]
+    assert.equal(open.type, 'strong')
+    assert.equal(open.raw, '**strong [label `code` and x_1]() suffix**')
+    assert.deepEqual(open.children.map(child => child.type), [
+      'text', 'inline_code', 'text', 'math_inline', 'text', 'link', 'text',
+    ])
+    assert.equal(open.children[3].content, 'x_1')
+    assert.equal(open.children[5].href, 'https://example.com/a_(b)')
+    assert.equal(open.children[5].markup, 'linkify')
+    legacy.finish()
+    assert.deepEqual(legacy.snapshot()[0].children[1], open)
+
+    native.append(text)
+    native.finish()
+    const link = native.snapshot()[0].children[1].children[1]
+    assert.equal(link.type, 'link')
+    assert.equal(link.markup, '')
+    assert.equal(link.children.at(-1).type, 'math_inline')
+  }
+  finally {
+    legacy.dispose()
+    native.dispose()
+  }
+})
+
+test('legacy escaped code stays typed after its paragraph closes', () => {
+  const session = createSession()
+  try {
+    session.append('Text \\`sample\\`.\n\n# Next')
+    const code = session.snapshot()[0].children[1]
+    assert.deepEqual(code, { type: 'inline_code', code: 'sample', raw: 'sample' })
+    session.finish()
+    assert.deepEqual(session.snapshot()[0].children[1], code)
+  }
+  finally {
+    session.dispose()
+  }
+})
+
 test('legacy unmatched multi-backticks fold later code while retaining the paragraph source', () => {
   const legacy = createSession()
   const standard = createSession({ parseOptions: { markstream: false } })

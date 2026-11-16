@@ -11,6 +11,7 @@ const MARKDOWN_FILENAME = /(^|[\s([,"'“‘])([A-Z0-9](?:[A-Z0-9-]*[A-Z0-9])?)\
 const PENDING_BADGE_ALT = /^\[!\[([^\[\]\\<>*&`\r\n]*)(?:\])?$/u
 const legacyLinkify = new LinkifyIt({ fuzzyLink: true })
 const draftCodeSource = new WeakMap()
+const mathLabelCodeSource = new WeakMap()
 
 export function projectBlocks(nodes, roots, context) {
   const blocks = projectChildren(nodes, roots, context)
@@ -455,6 +456,8 @@ function legacyDelimitedText(children) {
       return ''
     if (child.type === 'image')
       return child.raw
+    if (child.type === 'inline_code')
+      return mathLabelCodeSource.get(child) ?? child.code
     return child.content ?? child.code ?? (
       child.children ? legacyDelimitedText(child.children) : child.raw
     )
@@ -670,7 +673,8 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false, insideL
     const { kind, span, data } = inlines[index]
     const raw = normalize(context.read(span))
     if (kind === 'text' || kind === 'softbreak') {
-      if (kind === 'text' && context.markstream && context.final && !insideLinkLabel && raw.startsWith('\\`')) {
+      if (kind === 'text' && context.markstream && (context.final || context.settledInline)
+        && !insideLinkLabel && raw.startsWith('\\`')) {
         const pair = escapedBacktickPair(inlines, index, context)
         if (pair) {
           const previous = nodes.at(-1)
@@ -820,6 +824,32 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false, insideL
       const title = data.title === null ? null : readText(data.title, context) || null
       const children = projectInlineNodes(data.children, context, kind === 'link' && data.loading, true)
       const allowed = allowsLink(href, context, kind)
+      if (context.markstream && kind === 'link' && allowed && !data.loading && title === null
+        && children.at(-1)?.type === 'math_inline' && !children.at(-1).loading
+        && Array.isArray(data.destination) && /^(?:https?|ftp):\/\//iu.test(destination)
+        && context.read([span[0], data.children[0].span[0]]) === '['
+        && context.read([data.children.at(-1).span[1], data.destination[0]]) === ']('
+        && context.read([data.destination[1], span[1]]) === ')') {
+        // The legacy math rule splits the Markdown label at the confirmed formula.
+        const codeSources = data.children.filter(child => child.kind === 'code')
+        let codeIndex = 0
+        mergeText(nodes, textNode('['))
+        for (const child of children) {
+          if (child.type === 'inline_code') {
+            const source = codeSources[codeIndex++]
+            if (source && readText(source.data, context) === child.code)
+              mathLabelCodeSource.set(child, normalize(context.read(source.span)))
+            if (nodes.at(-1)?.type === 'text')
+              delete nodes.at(-1).center
+          }
+          mergeText(nodes, child)
+        }
+        nodes.push(textNode(']('))
+        const link = linkNode(href, '', [textNode(destination, false)], 'linkify')
+        delete link.attrs
+        nodes.push(link, textNode(')'))
+        continue
+      }
       const simpleMarkdownLink = context.markstream && kind === 'link' && raw.startsWith('[')
         && children.length === 1 && children[0].type === 'text'
       if (kind === 'link' && data.loading) {
@@ -1419,7 +1449,9 @@ function projectBlock(block, nodes, context) {
         }
       }
       const inlines = block.previewInlines ?? data
-      const children = projectInlines(inlines, context)
+      const children = projectInlines(inlines, open || block.previewInlines
+        ? context
+        : { ...context, settledInline: true })
       if (open) {
         projectDraftHttpHost(children, projectedRaw, context)
         if (context.markstream && !context.final) {
