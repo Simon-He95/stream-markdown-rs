@@ -284,8 +284,10 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false) {
       }
       const literalCodeMarker = kind === 'text' && context.markstream && raw.includes('``')
         && (/(?<!\\)(?:\\\\)*(`+)/u.exec(raw)?.[1].length ?? 0) > 1
+      const literalAsterisk = kind === 'text' && context.markstream && context.final
+        && raw.includes('*') && /[^*]/u.test(raw) && /(?<!\\)(?:\\\\)*\*/u.test(raw)
       mergeText(nodes, textNode(kind === 'softbreak' ? '\n' : readText(data, context),
-        kind !== 'softbreak' && !literalCodeMarker))
+        kind !== 'softbreak' && !literalCodeMarker && !literalAsterisk))
       if (literalCodeMarker && nodes.at(-1)?.type === 'text')
         delete nodes.at(-1).center
     }

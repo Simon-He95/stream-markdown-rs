@@ -107,6 +107,25 @@ test('native candidate keeps a long raw HTML line live while its closer is arriv
   }
 })
 
+test('native candidate ignores apparent HTML closers inside a split comment', () => {
+  const session = createSession()
+  try {
+    const source = '<div>before<!-- </div> -->after</div>'
+    for (const chunk of ['<div>before<!', '-- </div> -', '-', '>after</di']) {
+      session.append(chunk)
+      assert.equal(session.snapshot()[0].loading, true)
+    }
+    session.append('v>')
+    assert.equal(session.snapshot()[0].loading, false)
+    assert.equal(session.snapshot()[0].raw, source)
+    session.finish()
+    assert.equal(session.snapshot()[0].raw, source)
+  }
+  finally {
+    session.dispose()
+  }
+})
+
 test('native candidate exposes complete attributes from a multiline registered opening', () => {
   const session = createSession({ factoryOptions: { customHtmlTags: ['tool-call'] } })
   try {
@@ -708,6 +727,34 @@ test('complete unregistered self-closing components keep their literal text boun
     legacy.dispose()
     standard.dispose()
     escaped.dispose()
+  }
+})
+
+test('final literal asterisks in prose retain their spelling and legacy metadata', () => {
+  const source = '- use rounded-* ([change](https://example.org/c))\n\n'
+    + '**bold***\n\nplain \\* and &#42;'
+  const legacy = createSession()
+  const standard = createSession({ parseOptions: { markstream: false } })
+  try {
+    for (const session of [legacy, standard]) {
+      session.append(source)
+      session.finish()
+    }
+    const [list, bold, escaped] = legacy.snapshot()
+    assert.equal(list.items[0].raw, 'use rounded-* ([change](https://example.org/c))')
+    assert.deepEqual(list.items[0].children[0].children[0], {
+      type: 'text', content: 'use rounded-* (', raw: 'use rounded-* (',
+    })
+    assert.equal(bold.children[0].type, 'strong')
+    assert.deepEqual(bold.children[1], { type: 'text', content: '*', raw: '*', center: false })
+    assert.deepEqual(escaped.children[0], {
+      type: 'text', content: 'plain * and *', raw: 'plain * and *', center: false,
+    })
+    assert.equal(standard.snapshot()[0].items[0].children[0].children[0].center, false)
+  }
+  finally {
+    legacy.dispose()
+    standard.dispose()
   }
 })
 

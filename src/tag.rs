@@ -199,6 +199,7 @@ pub(crate) struct BodyScanner {
 enum BodyToken {
     Opening(OpeningProbe),
     Closing { start: usize, checked: usize },
+    Comment { start: usize, checked: usize },
 }
 
 fn same_name<const IGNORE_CASE: bool>(left: &[u8], right: &[u8]) -> bool {
@@ -214,7 +215,7 @@ impl BodyScanner {
         Self { at, token: None }
     }
 
-    pub fn advance<const IGNORE_CASE: bool>(
+    pub fn advance<const HTML: bool>(
         &mut self,
         source: &str,
         end: usize,
@@ -229,10 +230,7 @@ impl BodyScanner {
                     if let Some(stop) = probe.update(source, end) {
                         if let Some(inner) = opening(source, probe.start, stop) {
                             if !inner.self_closing
-                                && same_name::<IGNORE_CASE>(
-                                    inner.tag.tag_name(source).as_bytes(),
-                                    name,
-                                )
+                                && same_name::<HTML>(inner.tag.tag_name(source).as_bytes(), name)
                             {
                                 *depth += 1;
                             }
@@ -266,6 +264,17 @@ impl BodyScanner {
                         self.at = checked;
                     }
                 }
+                Some(BodyToken::Comment { start, checked }) => {
+                    let from = checked.saturating_sub(2).max(start + 4);
+                    let Some(relative) = memchr::memmem::find(&bytes[from..end], b"-->") else {
+                        self.token = Some(BodyToken::Comment {
+                            start,
+                            checked: end,
+                        });
+                        return (start, None);
+                    };
+                    self.at = from + relative + 3;
+                }
                 None => {
                     let Some(relative) = memchr::memchr(b'<', &bytes[self.at..end]) else {
                         self.at = end;
@@ -280,7 +289,7 @@ impl BodyScanner {
                     if first == b'/' {
                         let after = &tail[1..];
                         let common = name.len().min(after.len());
-                        if same_name::<IGNORE_CASE>(&after[..common], &name[..common]) {
+                        if same_name::<HTML>(&after[..common], &name[..common]) {
                             if after.len() < name.len() {
                                 return (start, None);
                             }
@@ -289,6 +298,17 @@ impl BodyScanner {
                         } else {
                             self.at += 1;
                         }
+                    } else if HTML
+                        && first == b'!'
+                        && b"!--".starts_with(&tail[..tail.len().min(3)])
+                    {
+                        if tail.len() < 3 {
+                            return (start, None);
+                        }
+                        self.token = Some(BodyToken::Comment {
+                            start,
+                            checked: start + 4,
+                        });
                     } else if first.is_ascii_alphabetic() {
                         self.token = Some(BodyToken::Opening(OpeningProbe::new(start, start + 1)));
                     } else {
