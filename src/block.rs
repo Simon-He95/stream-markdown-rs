@@ -534,8 +534,8 @@ pub(crate) struct Engine {
     html_progress: details::HtmlProgress,
     refs: References,
     footnotes: Option<Box<footnotes::Index>>,
-    waiting: HashMap<String, Vec<Dependency>>,
-    batch_parts: HashMap<BlockId, Arc<[Span]>>,
+    waiting: Option<HashMap<String, Vec<Dependency>>>,
+    batch_parts: Option<HashMap<BlockId, Arc<[Span]>>>,
     plugins: Vec<Registered>,
     block_triggers: u128,
     running: Option<PluginMatch>,
@@ -572,8 +572,8 @@ impl Engine {
             html_progress: details::HtmlProgress::Scanning(0),
             refs: References::default(),
             footnotes,
-            waiting: HashMap::new(),
-            batch_parts: HashMap::new(),
+            waiting: None,
+            batch_parts: None,
             plugins: Vec::new(),
             block_triggers: 0,
             running: None,
@@ -3200,7 +3200,10 @@ impl Engine {
         let label = inline::normalize_label(label);
         if self.refs.insert(label.clone(), reference)
             && !self.batch
-            && let Some(waiters) = self.waiting.remove(label.as_ref())
+            && let Some(waiters) = self
+                .waiting
+                .as_mut()
+                .and_then(|waiting| waiting.remove(label.as_ref()))
         {
             let mut previous = None;
             for dependent in waiters {
@@ -3239,7 +3242,9 @@ impl Engine {
         self.clear_footnote_unresolved();
         let mut content = match &leaf.parts {
             Some(parts) if self.batch => {
-                self.batch_parts.insert(leaf.id, parts.clone());
+                self.batch_parts
+                    .get_or_insert_with(HashMap::new)
+                    .insert(leaf.id, parts.clone());
                 InlineContent::Plain(leaf.content)
             }
             Some(parts) => self.parse_parts(source, parts, true)?,
@@ -3309,7 +3314,11 @@ impl Engine {
         self.unresolved.sort_unstable();
         self.unresolved.dedup();
         for label in self.unresolved.drain(..) {
-            let waiters = self.waiting.entry(label).or_default();
+            let waiters = self
+                .waiting
+                .get_or_insert_with(HashMap::new)
+                .entry(label)
+                .or_default();
             if let Err(index) = waiters.binary_search_by_key(&key, Dependency::key) {
                 waiters.insert(index, dependency.clone());
             }
@@ -3448,7 +3457,11 @@ impl Engine {
                     content: InlineContent::Plain(span),
                     ..
                 } => {
-                    let mut content = match self.batch_parts.remove(&block.id) {
+                    let mut content = match self
+                        .batch_parts
+                        .as_mut()
+                        .and_then(|parts| parts.remove(&block.id))
+                    {
                         Some(parts) => self.parse_parts(source, &parts, false)?,
                         None => self.parse_inline(source, *span, false)?,
                     };

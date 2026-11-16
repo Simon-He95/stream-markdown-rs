@@ -359,7 +359,9 @@ impl Engine {
         self.clear_footnote_unresolved();
         let content = if let Some(parts) = &body.parts {
             if self.batch {
-                self.batch_parts.insert(body.id, parts.clone());
+                self.batch_parts
+                    .get_or_insert_with(std::collections::HashMap::new)
+                    .insert(body.id, parts.clone());
                 InlineContent::Plain(body.content)
             } else {
                 self.parse_parts(source, parts, true)?

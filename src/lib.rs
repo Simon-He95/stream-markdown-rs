@@ -357,21 +357,24 @@ pub(crate) struct Reference {
 }
 
 #[derive(Default)]
-pub(crate) struct References(HashMap<String, Reference>);
+pub(crate) struct References(Option<HashMap<String, Reference>>);
 
 impl References {
     pub(crate) fn get(&self, label: &str) -> Option<&Reference> {
-        self.0.get(label)
+        self.0.as_ref()?.get(label)
     }
 
     fn remove(&mut self, label: &str) {
-        self.0.remove(label);
+        if let Some(references) = &mut self.0 {
+            references.remove(label);
+        }
     }
 
     fn insert(&mut self, label: Cow<'_, str>, reference: Reference) -> bool {
         use std::collections::hash_map::Entry;
 
-        match self.0.entry(label.into_owned()) {
+        let references = self.0.get_or_insert_with(HashMap::new);
+        match references.entry(label.into_owned()) {
             Entry::Occupied(_) => false,
             Entry::Vacant(entry) => {
                 entry.insert(reference);

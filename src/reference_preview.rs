@@ -51,7 +51,11 @@ impl Engine {
         if self.refs.get(label.as_ref()).is_some() {
             return;
         }
-        let Some(waiters) = self.waiting.get(label.as_ref()) else {
+        let Some(waiters) = self
+            .waiting
+            .as_ref()
+            .and_then(|waiting| waiting.get(label.as_ref()))
+        else {
             return;
         };
         let mut budget = LIMIT;
