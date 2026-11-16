@@ -567,7 +567,7 @@ pub(crate) fn needs_markup(text: &str, syntax: Syntax) -> bool {
 
 pub(crate) fn needs_markstream_markup(text: &str) -> bool {
     memchr::memchr2(b'^', b'~', text.as_bytes()).is_some()
-        || ["==", "++", "\"", "'", ".."]
+        || ["==", "++", "\"", "'", "..", "--"]
             .iter()
             .any(|needle| text.contains(needle))
         || text
@@ -3102,7 +3102,7 @@ mod tests {
     }
 
     #[test]
-    fn markstream_ellipsis_changes_display_text_and_preserves_raw_spans() {
+    fn markstream_punctuation_changes_display_text_and_preserves_raw_spans() {
         let options = Options {
             markstream: true,
             ..Options::default()
@@ -3112,6 +3112,11 @@ mod tests {
             ("If you want to...", "If you want to…"),
             ("如果你现在想做的是...", "如果你现在想做的是…"),
             ("\"Wait...\"", "“Wait…”"),
+            ("radius = var(--ms-radius)", "radius = var(–ms-radius)"),
+            (
+                "A---B A -- B A-- B A --B A----B",
+                "A—B A – B A-- B A --B A----B",
+            ),
             (
                 "A..B ...! Wait?... Woah!... !…",
                 "A…B …! Wait?.. Woah!.. !…",
@@ -3121,7 +3126,7 @@ mod tests {
             let InlineContent::Parsed(finalized) =
                 parse_content(source, input, &options, &refs, None)
             else {
-                panic!("expected parsed ellipsis: {source}");
+                panic!("expected parsed punctuation: {source}");
             };
             for nodes in [finalized, parse_preview(source, input, &options, &refs)] {
                 assert_eq!(
@@ -3196,6 +3201,33 @@ mod tests {
             })
             .collect();
         assert_eq!(display, "x .… y .. z .. end");
+
+        let source = r"`code--raw` [label--value](/a--b) <https://example.com/a--b> \--raw";
+        let nodes = parse(source, span(0, source.len()), &options, &refs);
+        assert!(
+            matches!(&nodes[0].kind, InlineKind::Code(text) if text.as_str(source) == "code--raw")
+        );
+        let InlineKind::Link(link) = &nodes[2].kind else {
+            panic!("expected explicit link");
+        };
+        assert_eq!(link.destination.as_str(source), "/a--b");
+        assert!(
+            matches!(&link.children[0].kind, InlineKind::Text(text) if text.as_str(source) == "label–value")
+        );
+        let InlineKind::Link(auto) = &nodes[4].kind else {
+            panic!("expected autolink");
+        };
+        assert!(
+            matches!(&auto.children[0].kind, InlineKind::Text(text) if text.as_str(source) == "https://example.com/a--b")
+        );
+        let escaped: String = nodes[5..]
+            .iter()
+            .map(|node| match &node.kind {
+                InlineKind::Text(text) => text.as_str(source),
+                _ => panic!("expected literal escaped text"),
+            })
+            .collect();
+        assert_eq!(escaped, " --raw");
     }
 
     #[test]

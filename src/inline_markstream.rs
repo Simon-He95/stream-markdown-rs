@@ -245,7 +245,7 @@ enum Part<'a> {
     Text {
         text: &'a mut Text,
         escaped_first: bool,
-        ellipsis: bool,
+        punctuation: bool,
     },
     Opaque(&'a Text),
     Raw(Span),
@@ -269,7 +269,7 @@ fn collect_parts<'a>(
     source: &str,
     nodes: &'a mut [super::Inline],
     level: usize,
-    ellipsis: bool,
+    punctuation: bool,
     parts: &mut Vec<(usize, Part<'a>)>,
 ) {
     use super::InlineKind;
@@ -285,7 +285,7 @@ fn collect_parts<'a>(
                 Part::Text {
                     text,
                     escaped_first,
-                    ellipsis,
+                    punctuation,
                 }
             }
             InlineKind::Code(text)
@@ -299,7 +299,7 @@ fn collect_parts<'a>(
             | InlineKind::Strikethrough(children)
             | InlineKind::Highlight(children)
             | InlineKind::Insert(children) => {
-                collect_parts(source, children, level + 1, ellipsis, parts);
+                collect_parts(source, children, level + 1, punctuation, parts);
                 Part::Boundary
             }
             InlineKind::Link(link) | InlineKind::LinkPreview(link) => {
@@ -309,7 +309,7 @@ fn collect_parts<'a>(
                     source,
                     &mut link.children,
                     level + 1,
-                    ellipsis && !autolink,
+                    punctuation && !autolink,
                     parts,
                 );
                 Part::Boundary
@@ -322,21 +322,22 @@ fn collect_parts<'a>(
 
 pub(super) fn typography(source: &str, input: Span, nodes: &mut [super::Inline]) {
     let raw = &source[input.start..input.end];
-    let ellipsis = memchr::memmem::find(raw.as_bytes(), b"..").is_some();
+    let punctuation = memchr::memmem::find(raw.as_bytes(), b"..").is_some()
+        || memchr::memmem::find(raw.as_bytes(), b"--").is_some();
     let quotes = memchr::memchr2(b'\'', b'"', raw.as_bytes()).is_some();
-    if !ellipsis && !quotes {
+    if !punctuation && !quotes {
         return;
     }
     let mut parts = Vec::new();
-    collect_parts(source, nodes, 0, ellipsis, &mut parts);
-    if ellipsis {
+    collect_parts(source, nodes, 0, punctuation, &mut parts);
+    if punctuation {
         for (_, part) in &mut parts {
             if let Part::Text {
                 text,
                 escaped_first,
-                ellipsis: true,
+                punctuation: true,
             } = part
-                && let Some(rewritten) = replace_ellipsis(text.as_str(source), *escaped_first)
+                && let Some(rewritten) = replace_punctuation(text.as_str(source), *escaped_first)
             {
                 **text = Text::Decoded(rewritten.into_boxed_str());
             }
@@ -347,29 +348,45 @@ pub(super) fn typography(source: &str, input: Span, nodes: &mut [super::Inline])
     }
 }
 
-fn replace_ellipsis(original: &str, escaped_first: bool) -> Option<String> {
+fn replace_punctuation(original: &str, escaped_first: bool) -> Option<String> {
     let start = usize::from(escaped_first);
     let bytes = original.as_bytes();
-    memchr::memmem::find(&bytes[start..], b"..")?;
-    let mut rewritten = String::with_capacity(original.len() + 1);
+    let mut rewritten = None::<String>;
     let mut cursor = 0;
-    for pos in memchr::memchr_iter(b'.', &bytes[start..]).map(|pos| pos + start) {
-        if pos < cursor || bytes.get(pos + 1) != Some(&b'.') {
+    let mut run_end = start;
+    for pos in memchr::memchr2_iter(b'.', b'-', &bytes[start..]).map(|pos| pos + start) {
+        if pos < run_end || bytes.get(pos + 1) != Some(&bytes[pos]) {
             continue;
         }
-        rewritten.push_str(&original[cursor..pos]);
-        rewritten.push_str(if pos > start && matches!(bytes[pos - 1], b'?' | b'!') {
-            ".."
-        } else {
-            "…"
-        });
-        cursor = pos + 2;
-        while bytes.get(cursor) == Some(&b'.') {
-            cursor += 1;
+        run_end = pos + 2;
+        while bytes.get(run_end) == Some(&bytes[pos]) {
+            run_end += 1;
         }
+        let replacement = match (bytes[pos], run_end - pos) {
+            (b'.', _) if pos > start && matches!(bytes[pos - 1], b'?' | b'!') => "..",
+            (b'.', _) => "…",
+            (b'-', 3) => "—",
+            (b'-', 2) => {
+                let before = original[start..pos].chars().next_back();
+                let after = original[run_end..].chars().next();
+                if let (Some(before), Some(after)) = (before, after)
+                    && before.is_whitespace() != after.is_whitespace()
+                {
+                    continue;
+                }
+                "–"
+            }
+            _ => continue,
+        };
+        let result = rewritten.get_or_insert_with(|| String::with_capacity(original.len() + 1));
+        result.push_str(&original[cursor..pos]);
+        result.push_str(replacement);
+        cursor = run_end;
     }
-    rewritten.push_str(&original[cursor..]);
-    Some(rewritten)
+    rewritten.map(|mut result| {
+        result.push_str(&original[cursor..]);
+        result
+    })
 }
 
 fn smart_quotes(source: &str, parts: Vec<(usize, Part<'_>)>) {
