@@ -1144,6 +1144,64 @@ test('legacy escaped code stays typed after its paragraph closes', () => {
   }
 })
 
+test('legacy pending text keeps the escape and shows evidenced strikethrough', () => {
+  const session = createSession()
+  try {
+    session.append('prefix \\')
+    assert.deepEqual(session.snapshot()[0].children, [
+      { type: 'text', content: 'prefix ', raw: 'prefix \\', center: false },
+    ])
+    session.append('* text ~~removed')
+    const [prefix, strike] = session.snapshot()[0].children
+    assert.equal(prefix.content, 'prefix * text ')
+    assert.equal(strike.type, 'strikethrough')
+    assert.equal(strike.children[0].content, 'removed')
+    session.finish()
+    assert.equal(session.snapshot()[0].children[0].content, 'prefix * text ~~removed')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('legacy open strong math labels separate the formula from an incomplete destination', () => {
+  const session = createSession({ parseOptions: { requireClosingStrong: true } })
+  try {
+    session.append('Prefix **strong [label `code` and $x$](htt')
+    const [prefix, before, math, tail] = session.snapshot()[0].children
+    assert.equal(prefix.content, 'Prefix ')
+    assert.equal(before.raw, '**strong [label `code` and **')
+    assert.equal(math.children[0].type, 'math_inline')
+    assert.equal(tail.content, '](htt')
+    session.append('ps://example.com/path) suffix**')
+    const strong = session.snapshot()[0].children[1]
+    assert.equal(strong.type, 'strong')
+    assert.equal(strong.children.filter(child => child.type === 'math_inline').length, 1)
+    assert.equal(strong.children.find(child => child.type === 'link').href, 'https://example.com/path')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('legacy draft links retain the code and escape evidence ahead of the URL', () => {
+  const session = createSession({ parseOptions: { requireClosingStrong: true } })
+  try {
+    session.append('Prefix **[label \\*literal\\* and `code`](https://example.com/path')
+    const [prefix, code, suffix, link] = session.snapshot()[0].children
+    assert.equal(prefix.content, 'Prefix **[label *literal* and ')
+    assert.deepEqual(code, { type: 'inline_code', code: 'code', raw: 'code' })
+    assert.equal(suffix.content, '](')
+    assert.equal(link.href, 'https://example.com/path')
+    assert.equal(link.text, link.href)
+    assert.equal(link.markup, 'linkify')
+    assert.equal(link.loading, true)
+  }
+  finally {
+    session.dispose()
+  }
+})
+
 test('legacy unmatched multi-backticks fold later code while retaining the paragraph source', () => {
   const legacy = createSession()
   const standard = createSession({ parseOptions: { markstream: false } })

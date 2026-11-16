@@ -305,6 +305,26 @@ function projectDraftHttpHost(children, source, context) {
   children.push(linkNode(match.url, null, [textNode(host[0])], 'linkify'))
 }
 
+function projectDraftTextTail(children, source) {
+  const tail = children.at(-1)
+  if (tail?.type !== 'text' || tail.content !== tail.raw)
+    return
+  const escapes = /\\+$/u.exec(source)?.[0].length ?? 0
+  if (escapes % 2 && tail.content.endsWith('\\'.repeat(escapes >> 1))) {
+    if (escapes > 1)
+      tail.content += '\\'
+    tail.raw += '\\'
+    return
+  }
+  const strike = /(?<![\\~])~~([^\s~][^~\r\n]*)$/u.exec(tail.content)
+  if (!strike || !source.endsWith(strike[0]))
+    return
+  children.pop()
+  if (strike.index)
+    children.push(textNode(tail.content.slice(0, strike.index), false))
+  children.push({ type: 'strikethrough', children: [textNode(strike[1])], raw: strike[0] + '~~' })
+}
+
 function pendingBadgeLink(image) {
   return {
     type: 'link', href: '', title: null, text: image.alt, children: [image],
@@ -506,6 +526,49 @@ function projectStrongBeforeMath(inlines, index, nodes, context) {
   return true
 }
 
+function projectOpenStrongMathLabel(inlines, index, nodes, children, context) {
+  const link = inlines[index]
+  const previous = inlines[index - 1]
+  const text = nodes.at(-1)
+  if (context.final || !context.parseOptions.requireClosingStrong || previous?.kind !== 'text'
+    || text?.type !== 'text' || previous.span[1] !== link.span[0])
+    return false
+  const strong = /(?<![\\*])\*\*(?![\s*])([^*\r\n]*)$/u.exec(text.content)
+  const label = link.data.children
+  if (!strong || !context.read(previous.span).endsWith(strong[0])
+    || context.read([link.span[0], label[0].span[0]]) !== '[')
+    return false
+  const afterMath = readText([label.at(-1).span[1], link.span[1]], context)
+  if (!afterMath.startsWith('](') || /[\r\n]/u.test(afterMath))
+    return false
+  text.content = text.raw = text.content.slice(0, strong.index)
+  if (text.content)
+    text.center = false
+  else
+    nodes.pop()
+  const body = [textNode(strong[1] + '[', false)]
+  for (const child of children.slice(0, -1))
+    mergeText(body, child)
+  const first = label.at(-1).span[0]
+  const math = children.at(-1)
+  nodes.push(
+    { type: 'strong', children: body, raw: '**' + strong[1] + readText([link.span[0], first], context) + '**' },
+    { type: 'strong', children: [math], raw: '**' + math.content + '**' },
+  )
+  const url = /(?:https?|ftp):\/\//iu.test(afterMath) ? legacyLinkify.match(afterMath)?.[0] : undefined
+  if (!url || !allowsLink(url.url, context)) {
+    nodes.push(textNode(afterMath))
+    return true
+  }
+  nodes.push(textNode(afterMath.slice(0, url.index)))
+  const bare = linkNode(url.url, '', [textNode(url.raw, false)], 'linkify')
+  delete bare.attrs
+  nodes.push(bare)
+  if (url.lastIndex < afterMath.length)
+    nodes.push(textNode(afterMath.slice(url.lastIndex)))
+  return true
+}
+
 function legacyDelimitedText(children) {
   return children.map((child) => {
     if (child.type === 'link')
@@ -629,32 +692,43 @@ function projectRelativeDraftLink(inlines, index, nodes, children, destination, 
 }
 
 function projectCodeAdjacentDraftLink(inlines, index, nodes, children, href, context) {
-  if (children.length !== 1 || !/^https?:\/\//iu.test(href))
+  if (!/^https?:\/\//iu.test(href))
     return false
-  const { span } = inlines[index]
-  const label = explicitDraftLabel(inlines[index], context)
-  if (!label)
-    return false
+  const { span, data } = inlines[index]
   const previous = inlines[index - 1]
   const precedingText = nodes.at(-1)
-  const codeLabel = label.kind === 'code' && context.read([label.span[0], label.span[0] + 1]) === '`'
+  const labelCode = data.children.at(-1)
+  const escapedLabel = children.length === 2 && children[0].type === 'text'
+    && children[1].type === 'inline_code' && labelCode?.kind === 'code'
+    && previous?.kind === 'text' && previous.span[1] === span[0]
+    && precedingText?.type === 'text' && precedingText.content.endsWith('**')
+    && context.read([span[0], labelCode.span[0]]).includes('\\*')
+    && Array.isArray(data.destination)
+    && context.read([labelCode.span[1], data.destination[0]]) === ']('
+  const label = children.length === 1 ? explicitDraftLabel(inlines[index], context) : undefined
+  const codeLabel = label?.kind === 'code' && context.read([label.span[0], label.span[0] + 1]) === '`'
     && previous?.kind === 'text' && previous.span[1] === span[0]
     && precedingText?.type === 'text' && precedingText.raw === precedingText.content
   const line = lineAt(context.lineStarts, span[0])
-  const afterCode = label.kind === 'text' && context.read(label.span) === children[0].content
+  const afterCode = label?.kind === 'text' && context.read(label.span) === children[0].content
     && inlines.some((node, at) => at < index && node.kind === 'code'
       && context.read([node.span[0], node.span[0] + 1]) === '`'
       && lineAt(context.lineStarts, node.span[0]) === line)
-  if (!codeLabel && !afterCode)
+  if (!escapedLabel && !codeLabel && !afterCode)
     return false
   const [match] = legacyLinkify.match(href) ?? []
   if (match?.index !== 0 || match.lastIndex !== href.length)
     return false
-  if (codeLabel) {
+  if (escapedLabel) {
+    mergeText(nodes, textNode('[' + children[0].content, false))
+    nodes.push(children[1], textNode(']('))
+  }
+  else if (codeLabel) {
     mergeText(nodes, textNode('['))
     nodes.push(children[0], textNode(']('))
   }
-  const link = linkNode(href, null, [textNode(codeLabel ? href : children[0].content, codeLabel)], 'linkify')
+  const urlAsLabel = escapedLabel || codeLabel
+  const link = linkNode(href, null, [textNode(urlAsLabel ? href : children[0].content, urlAsLabel)], 'linkify')
   link.loading = true
   nodes.push(link)
   return true
@@ -815,7 +889,9 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false, insideL
     }
     else if (kind === 'code' || kind === 'code_preview') {
       const previous = nodes.at(-1)
-      if (kind === 'code_preview' && previous?.type === 'text')
+      const escapedDraft = context.markstream && !context.final
+        && raw.startsWith('\\`') && !raw.endsWith('\\`')
+      if ((kind === 'code_preview' || escapedDraft) && previous?.type === 'text')
         delete previous.center
       let code = readText(data, context)
       const draft = kind === 'code_preview' && context.markstream && !context.final
@@ -883,6 +959,10 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false, insideL
       const title = data.title === null ? null : readText(data.title, context) || null
       const children = projectInlineNodes(data.children, context, kind === 'link' && data.loading, true)
       const allowed = allowsLink(href, context, kind)
+      if (context.markstream && kind === 'link' && allowed && title === null
+        && children.at(-1)?.type === 'math_inline' && !children.at(-1).loading
+        && projectOpenStrongMathLabel(inlines, index, nodes, children, context))
+        continue
       if (context.markstream && kind === 'link' && allowed && projectUnclosedDestination(inlines, index, nodes, context))
         break
       if (context.markstream && kind === 'link' && allowed && !data.loading && title === null
@@ -1516,6 +1596,7 @@ function projectBlock(block, nodes, context) {
       if (open) {
         projectDraftHttpHost(children, projectedRaw, context)
         if (context.markstream && !context.final) {
+          projectDraftTextTail(children, projectedRaw)
           const badgeTail = withheldHtml ?? (block.parent === null && span[1] < context.length
             ? context.read([span[1], context.length])
             : undefined)
