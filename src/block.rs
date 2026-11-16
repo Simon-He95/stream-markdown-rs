@@ -725,8 +725,17 @@ impl Engine {
                     || byte == b'|'
                     || self.options.markstream
                         && self.options.preview == Preview::Ai
-                        && byte.is_ascii_digit()
-                        && numeric_text_prefix(&source[self.line_start..self.scan]))
+                        && self.running.is_none()
+                        && !self.has_block_plugin(byte)
+                        && {
+                            let tail = &source[self.line_start..self.scan];
+                            match byte {
+                                b'#' => atx(tail, self.line_start).is_some(),
+                                b'*' | b'_' | b'`' => partial_inline_start(tail, false),
+                                b'0'..=b'9' => numeric_text_prefix(tail),
+                                _ => false,
+                            }
+                        })
             {
                 let limit = self
                     .containers

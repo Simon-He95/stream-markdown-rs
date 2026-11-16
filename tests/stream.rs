@@ -1509,6 +1509,63 @@ fn a_numeric_prefix_is_visible_once_it_cannot_be_an_ordered_list_marker() {
 }
 
 #[test]
+fn a_heading_or_inline_starter_after_a_list_is_previewed_at_the_root() {
+    let options = Options {
+        markstream: true,
+        preview: Preview::Ai,
+        ..Options::default()
+    };
+    let prefix = "- earlier\n\n";
+    for (starter, content) in [
+        ("## ", "Heading"),
+        ("`", "code` draft"),
+        ("**", "strong** draft"),
+    ] {
+        let mut parser = Parser::new(options.clone());
+        let mut changes = Vec::new();
+        let mut view = View::default();
+        parser.append(prefix, &mut changes).unwrap();
+        view.apply(&mut changes);
+        parser.append(starter, &mut changes).unwrap();
+        assert!(
+            !changes
+                .iter()
+                .any(|change| matches!(change, Change::Insert { .. }))
+        );
+        view.apply(&mut changes);
+        parser.append(content, &mut changes).unwrap();
+        let block = changes
+            .iter()
+            .find_map(|change| match change {
+                Change::Insert {
+                    parent: None,
+                    block,
+                } => Some(block),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("expected a root draft for {starter}{content}: {changes:?}"));
+        let id = block.id;
+        assert_eq!(block.span.start, prefix.len());
+        assert_eq!(block.status, BlockStatus::Open);
+        assert_eq!(
+            matches!(block.data, BlockData::Heading { .. }),
+            starter.starts_with('#')
+        );
+        view.apply(&mut changes);
+        parser.append("\n\n", &mut changes).unwrap();
+        view.apply(&mut changes);
+        parser.finish(&mut changes).unwrap();
+        view.apply(&mut changes);
+        let expected = parse(parser.source_text(), &options).unwrap();
+        assert_eq!(expected.parent(id), None);
+        assert_eq!(
+            view.blocks.into_values().collect::<Vec<_>>(),
+            expected.nodes
+        );
+    }
+}
+
+#[test]
 fn markstream_fence_previews_the_info_and_keeps_the_id_at_the_newline() {
     let options = Options {
         markstream: true,
