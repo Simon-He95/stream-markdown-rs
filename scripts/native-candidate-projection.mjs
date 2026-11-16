@@ -565,13 +565,26 @@ function displayFence(block, context) {
 }
 
 function projectTableRow(values, alignments, header, context) {
-  const cells = values.map((cell, column) => ({
-    type: 'table_cell', header, children: projectInlines(cell, context),
-    raw: inlineRaw(cell, '', context).replace(/(\\+)\|/g, (source, escapes) => (
+  const cells = values.map((cell, column) => {
+    const raw = inlineRaw(cell, '', context).replace(/(\\+)\|/g, (source, escapes) => (
       escapes.length % 2 ? `${escapes.slice(1)}|` : source
-    )),
-    align: alignments[column],
-  }))
+    ))
+    const children = projectInlines(cell, context)
+    const tail = children.at(-1)
+    if (context.markstream && tail?.type === 'text' && tail.content.endsWith('`')) {
+      const marker = /(?<!\\)(?:\\\\)*(`+)/u.exec(tail.content)
+      if (marker?.[1] === '`' && marker.index + marker[0].length === tail.content.length) {
+        // The legacy cell view styles a single opening backtick before any code arrives.
+        const prefix = tail.content.slice(0, -1)
+        children.pop()
+        if (prefix)
+          children.push(textNode(prefix, false))
+        if (prefix || context.final || raw.endsWith('\\`'))
+          children.push({ type: 'inline_code', code: '', raw: '' })
+      }
+    }
+    return { type: 'table_cell', header, children, raw, align: alignments[column] }
+  })
   return { type: 'table_row', cells, raw: cells.map(cell => cell.raw).join('|') }
 }
 

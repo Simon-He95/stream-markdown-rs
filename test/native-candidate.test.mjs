@@ -194,7 +194,14 @@ test('native candidate projects pending and confirmed table code at the same row
   try {
     session.append('| Key | Value |\n| --- | --- |\n| ')
     assert.equal(session.snapshot()[0].rows[0].raw, '|')
-    session.append('x | Use `cmd')
+    session.append('x | Use `')
+    assert.deepEqual(session.snapshot()[0].rows[0].cells[1], {
+      type: 'table_cell', header: false, align: 'left', raw: 'Use `', children: [
+        { type: 'text', content: 'Use ', raw: 'Use ' },
+        { type: 'inline_code', code: '', raw: '' },
+      ],
+    })
+    session.append('cmd')
     const pending = session.snapshot()[0].rows[0].cells[1].children
     assert.deepEqual(pending, [
       { type: 'text', content: 'Use ', raw: 'Use ' },
@@ -207,6 +214,24 @@ test('native candidate projects pending and confirmed table code at the same row
     assert.deepEqual(rows[0].cells[1].children, [
       { type: 'text', content: 'Use ', raw: 'Use ', center: false },
       pending[1],
+    ])
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('legacy table projection keeps a trailing single backtick distinct from a longer run', () => {
+  const session = createSession()
+  try {
+    session.append('| A | B |\n| - | - |\n| ` | text `` |\n')
+    const [single, multiple] = session.snapshot()[0].rows[0].cells
+    assert.equal(single.raw, '`')
+    assert.deepEqual(single.children, [])
+    assert.deepEqual(multiple.children, [{ type: 'text', content: 'text ``', raw: 'text ``' }])
+    session.finish()
+    assert.deepEqual(session.snapshot()[0].rows[0].cells[0].children, [
+      { type: 'inline_code', code: '', raw: '' },
     ])
   }
   finally {
