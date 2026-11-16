@@ -670,8 +670,7 @@ impl Engine {
                     .containers
                     .iter()
                     .rposition(|frame| {
-                        frame.kind.is_colon_container()
-                            || matches!(frame.kind, Kind::Details { .. })
+                        frame.kind.is_colon_container() || matches!(frame.kind, Kind::Html { .. })
                     })
                     .map_or(0, |index| index + 1);
                 self.close_containers(limit, &mut output);
@@ -942,7 +941,7 @@ impl Engine {
                 Kind::List { .. }
                 | Kind::Vmr { .. }
                 | Kind::Admonition { quoted: false, .. }
-                | Kind::Details { .. } => continue,
+                | Kind::Html { .. } => continue,
                 Kind::Item { indent, .. } => {
                     let prefix =
                         container::whitespace(raw.as_bytes(), line.column, line.padding, indent);
@@ -1320,7 +1319,7 @@ impl Engine {
             for frame in &mut self.containers {
                 if frame.end < self.scan {
                     frame.end = self.scan;
-                    if !matches!(frame.kind, Kind::Details { .. }) {
+                    if !matches!(frame.kind, Kind::Html { .. }) {
                         output.update(Change::SetStatus {
                             id: frame.id,
                             status: BlockStatus::Open,
@@ -1345,7 +1344,7 @@ impl Engine {
             .containers
             .iter()
             .take_while(|frame| {
-                frame.kind.is_colon_container() || matches!(frame.kind, Kind::Details { .. })
+                frame.kind.is_colon_container() || matches!(frame.kind, Kind::Html { .. })
             })
             .count();
         let previous_blank = match &self.containers[depth..] {
@@ -1400,7 +1399,7 @@ impl Engine {
         }
         for frame in &mut self.containers[..depth] {
             frame.end = self.scan;
-            if !matches!(frame.kind, Kind::Details { .. }) {
+            if !matches!(frame.kind, Kind::Html { .. }) {
                 output.update(Change::SetStatus {
                     id: frame.id,
                     status: BlockStatus::Open,
@@ -1475,7 +1474,7 @@ impl Engine {
             || start >= end
             || (self.partial_list.is_none()
                 && self.containers.iter().any(|frame| {
-                    !(frame.kind.is_colon_container() || matches!(frame.kind, Kind::Details { .. }))
+                    !(frame.kind.is_colon_container() || matches!(frame.kind, Kind::Html { .. }))
                 }))
         {
             return;
@@ -1679,10 +1678,10 @@ impl Engine {
                 Kind::Quote | Kind::Admonition { quoted: true, .. } => {
                     container::quote_at(remaining, line.column, line.padding)
                 }
-                Kind::Details { .. } => {
-                    details_close = self
-                        .details_closer(source, line, *frame)
-                        .map(|end| (matched, line, end));
+                Kind::Html { .. } => {
+                    if let Some(end) = self.details_closer(source, line, *frame) {
+                        details_close = Some((matched, line, end));
+                    }
                     Some(container::Prefix {
                         bytes: 0,
                         columns: 0,
@@ -2023,7 +2022,7 @@ impl Engine {
                 || self
                     .containers
                     .iter()
-                    .any(|frame| matches!(frame.kind, Kind::Details { .. })))
+                    .any(|frame| matches!(frame.kind, Kind::Html { .. })))
             && self.open_details_line(source, line, output)?
         {
             return Ok(());
@@ -2145,6 +2144,13 @@ impl Engine {
             Some(Active::Html(mut html)) => {
                 let line_end = html.end.closes(raw);
                 let break_blank = line_end && matches!(html.end, HtmlEnd::Blank);
+                if break_blank
+                    && self.options.markstream
+                    && self.containers.is_empty()
+                    && self.promote_html_wrapper(source, &html, line, output)?
+                {
+                    return Ok(());
+                }
                 if !break_blank {
                     if let Some(lines) = &mut html.lines {
                         let body = line.raw();
@@ -3722,14 +3728,15 @@ fn container_block(frame: Frame, mut status: BlockStatus) -> Block {
                 quoted,
             })
         }
-        Kind::Details {
+        Kind::Html {
             opening_end,
             closed,
+            tag,
         } => {
             if status == BlockStatus::Closed && !closed {
                 status = BlockStatus::Incomplete;
             }
-            BlockData::Details(details::HtmlOpening {
+            tag.data(details::HtmlOpening {
                 span: Span::new(frame.start, opening_end),
             })
         }

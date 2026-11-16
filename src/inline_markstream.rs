@@ -2,6 +2,49 @@ use unicode_general_category::{GeneralCategory, get_general_category};
 
 use crate::{Span, Text};
 
+// The inline `://` rule reads the preceding ASCII scheme, allowing a link
+// to follow prose in scripts that do not put spaces between adjacent words.
+pub(super) fn embedded_web_url(text: &str) -> Option<(usize, usize)> {
+    let bytes = text.as_bytes();
+    for pos in memchr::memchr_iter(b':', bytes) {
+        if !bytes[pos + 1..].starts_with(b"//") {
+            continue;
+        }
+        let (offset, length) = if super::scheme_suffix::<true, 5>(&bytes[..pos], b"https") {
+            (pos - 5, 8)
+        } else if super::scheme_suffix::<true, 4>(&bytes[..pos], b"http") {
+            (pos - 4, 7)
+        } else {
+            continue;
+        };
+        if !bytes[..offset]
+            .last()
+            .is_some_and(|ch| ch.is_ascii_alphanumeric() || *ch == b'+')
+        {
+            return Some((offset, length));
+        }
+    }
+    None
+}
+
+pub(super) fn unicode_url_separator(ch: char) -> bool {
+    !ch.is_ascii()
+        && (ch == '｜'
+            || matches!(
+                get_general_category(ch),
+                GeneralCategory::SpaceSeparator
+                    | GeneralCategory::LineSeparator
+                    | GeneralCategory::ParagraphSeparator
+                    | GeneralCategory::ClosePunctuation
+                    | GeneralCategory::ConnectorPunctuation
+                    | GeneralCategory::DashPunctuation
+                    | GeneralCategory::FinalPunctuation
+                    | GeneralCategory::InitialPunctuation
+                    | GeneralCategory::OpenPunctuation
+                    | GeneralCategory::OtherPunctuation
+            ))
+}
+
 // Non-ambiguous CJK bases from the pinned markdown-it-cjk-friendly width and
 // emoji rules. Ambiguous quotation marks with variation selectors are handled separately.
 const CJK: &[(u32, u32)] = &[

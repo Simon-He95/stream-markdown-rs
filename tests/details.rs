@@ -10,6 +10,75 @@ fn options() -> Options {
 }
 
 #[test]
+fn div_promotes_at_a_blank_line_and_keeps_typed_children_and_original_attributes() {
+    let source = "<DIV role=note>\r\n**bold**\r\n\r\n- item\r\n\r\n</div>\r\n# outside\r\n";
+    let document = parse(source, &options()).unwrap();
+    let wrapper = &document.nodes[0];
+    let BlockData::HtmlWrapper(opening) = wrapper.data else {
+        panic!("{wrapper:?}");
+    };
+    assert_eq!(wrapper.status, BlockStatus::Closed);
+    assert_eq!(
+        opening.tag(source).attrs(source).next().unwrap().value,
+        Some("note")
+    );
+    let children: Vec<_> = document
+        .nodes
+        .iter()
+        .filter(|node| document.parent(node.id) == Some(wrapper.id))
+        .collect();
+    assert!(
+        matches!(&children[0].data, BlockData::Paragraph(InlineContent::Parsed(nodes))
+        if matches!(nodes[0].kind, InlineKind::Strong(_)))
+    );
+    assert!(matches!(children[1].data, BlockData::List { .. }));
+    let outside = document.nodes.last().unwrap();
+    assert!(matches!(outside.data, BlockData::Heading { .. }));
+    assert_eq!(document.parent(outside.id), None);
+    assert!(matches!(
+        parse(source, &Options::default()).unwrap().nodes[0].data,
+        BlockData::Html
+    ));
+
+    let compact = "<div>\n**literal**\n</div>\n\n";
+    let document = parse(compact, &options()).unwrap();
+    assert!(matches!(document.nodes[0].data, BlockData::Html));
+}
+
+#[test]
+fn streaming_wrappers_keep_the_original_id_and_hold_a_split_closer() {
+    let mut parser = Parser::new(options());
+    let mut changes = Vec::new();
+    parser.append("<section>\nintro\n", &mut changes).unwrap();
+    let [Change::Insert { block, .. }, ..] = changes.as_slice() else {
+        panic!("expected raw HTML: {changes:?}");
+    };
+    assert!(matches!(block.data, BlockData::Html));
+    let id = block.id;
+    changes.clear();
+    parser.append("\n- item\n\n</sec", &mut changes).unwrap();
+    assert!(changes.iter().any(|change| matches!(change, Change::Replace(block)
+        if block.id == id && block.status == BlockStatus::Open && matches!(block.data, BlockData::HtmlWrapper(_)))));
+    assert!(
+        !changes
+            .iter()
+            .any(|change| matches!(change, Change::Replace(block)
+        if block.id == id && block.status == BlockStatus::Closed))
+    );
+    changes.clear();
+    parser.append("tion>outside", &mut changes).unwrap();
+    assert!(
+        changes
+            .iter()
+            .any(|change| matches!(change, Change::Replace(block)
+        if block.id == id && block.status == BlockStatus::Closed))
+    );
+    parser.finish(&mut changes).unwrap();
+    assert!(changes.iter().any(|change| matches!(change, Change::Insert { block, parent: None }
+        if matches!(block.data, BlockData::Paragraph(InlineContent::Plain(span)) if parser.source(span) == "outside"))));
+}
+
+#[test]
 fn details_groups_native_children_and_preserves_attributes_and_closing_newline() {
     let source = "<details open style=\"color: gray\">\nlead\n<summary>**sum** _x_</summary>\ntext\n<div>inner</div>\n\npara\n</details>\n\n# Next\n";
     let document = parse(source, &options()).unwrap();

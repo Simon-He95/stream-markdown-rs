@@ -179,6 +179,7 @@ pub enum BlockData {
     Vmr(Vmr),
     Admonition(Admonition),
     Details(HtmlOpening),
+    HtmlWrapper(HtmlOpening),
     Summary {
         opening: HtmlOpening,
         content: InlineContent,
@@ -392,7 +393,7 @@ impl Parser {
             self.engine = None;
             return Err(error);
         }
-        engine.publish_details_progress(previous_end, out);
+        engine.publish_html_container_progress(previous_end, out);
         Ok(())
     }
 

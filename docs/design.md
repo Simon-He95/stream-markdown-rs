@@ -88,6 +88,8 @@ enum BlockStatus {
 
 开标签的校验和闭合匹配遵循注册规则选择的语法。规范模式的原始 HTML 可以继续作为原文交付，已注册标签由扩展显式开启。 [XML 起始标签、结束标签和空元素标签](https://www.w3.org/TR/xml/#sec-starttags)
 
+启用 Markstream 后，顶层独立的 `<div>` 或 `<section>` 先按原始 HTML 交付。空行到达且开标签仍未闭合时，解析器复用块 ID，升格为 `HtmlWrapper`。空行前的正文只回读一次并交付为 Markdown 子块，后续正文按行增量解析。
+
 ### 三种块状态与暂定预览
 
 | 持久状态 | 需要区分的行为 |

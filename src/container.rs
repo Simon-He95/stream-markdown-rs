@@ -31,9 +31,10 @@ pub(crate) enum Kind {
         closed: bool,
         preview_closed: bool,
     },
-    Details {
+    Html {
         opening_end: usize,
         closed: bool,
+        tag: crate::block::details::Name,
     },
     Vmr {
         header_end: usize,

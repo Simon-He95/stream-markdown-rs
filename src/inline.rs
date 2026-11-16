@@ -274,7 +274,7 @@ pub(crate) fn parse_content(
     let (first, gfm_autolink) =
         markup_probe::<false, false>(content(source, input), options.syntax);
     let Some(first) = first else {
-        return plain_or_autolink(source, input, gfm_autolink);
+        return plain_or_autolink::<false>(source, input, gfm_autolink);
     };
     let lex = LexStart {
         span: input,
@@ -492,6 +492,7 @@ pub(crate) fn needs_markstream_markup(text: &str) -> bool {
         || text
             .trim_end_matches([' ', '\t', '\r', '\n'])
             .ends_with('(')
+        || linkify_trigger::<true>(text)
 }
 
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
@@ -696,15 +697,19 @@ fn markup_probe<const MATH: bool, const MARKSTREAM: bool>(
     let gfm = syntax == Syntax::Gfm;
     (
         first_special_mode::<MATH, MARKSTREAM>(text.as_bytes(), gfm),
-        gfm && has_gfm_trigger(text),
+        gfm && linkify_trigger::<MARKSTREAM>(text),
     )
 }
 
 #[inline]
-fn plain_or_autolink(source: &str, input: Span, gfm_autolink: bool) -> InlineContent {
+fn plain_or_autolink<const MARKSTREAM: bool>(
+    source: &str,
+    input: Span,
+    gfm_autolink: bool,
+) -> InlineContent {
     if gfm_autolink {
         let mut output = Vec::new();
-        append_gfm_text(source, input.start, input.end, &mut output);
+        append_gfm_text::<MARKSTREAM>(source, input.start, input.end, &mut output);
         InlineContent::Parsed(output)
     } else {
         InlineContent::Plain(input)
@@ -727,7 +732,7 @@ fn parse_with<S: Storage, const MATH: bool, const MARKSTREAM: bool>(
         markup_probe::<MATH, MARKSTREAM>(&source[start..end], options.syntax);
     let span = span(start, end);
     let Some(first) = first else {
-        return plain_or_autolink(source, span, gfm_autolink);
+        return plain_or_autolink::<MARKSTREAM>(source, span, gfm_autolink);
     };
     let lex = LexStart {
         span,
@@ -1460,7 +1465,7 @@ fn finish_tokens<S: Storage, const MARKSTREAM: bool>(
     }
     tokens.truncate(start);
     if gfm_autolink {
-        return gfm_linkify(source, output);
+        return gfm_linkify::<MARKSTREAM>(source, output);
     }
     output
 }
@@ -2060,33 +2065,48 @@ fn skip_html_space(bytes: &[u8], mut i: usize, end: usize) -> usize {
 }
 
 fn has_gfm_trigger(text: &str) -> bool {
+    linkify_trigger::<false>(text)
+}
+
+fn linkify_trigger<const MARKSTREAM: bool>(text: &str) -> bool {
     let bytes = text.as_bytes();
     memchr::memchr3_iter(b':', b'@', b'.', bytes).any(|pos| match bytes[pos] {
         b'@' => true,
-        b'.' => bytes[..pos].ends_with(b"www"),
+        b'.' => scheme_suffix::<MARKSTREAM, 3>(&bytes[..pos], b"www"),
         _ => {
             bytes[pos + 1..].starts_with(b"//")
-                && (bytes[..pos].ends_with(b"http")
-                    || bytes[..pos].ends_with(b"https")
-                    || bytes[..pos].ends_with(b"ftp"))
+                && (scheme_suffix::<MARKSTREAM, 4>(&bytes[..pos], b"http")
+                    || scheme_suffix::<MARKSTREAM, 5>(&bytes[..pos], b"https")
+                    || scheme_suffix::<MARKSTREAM, 3>(&bytes[..pos], b"ftp"))
         }
     })
 }
 
-fn gfm_linkify(source: &str, nodes: Vec<Inline>) -> Vec<Inline> {
+#[inline]
+fn scheme_suffix<const MARKSTREAM: bool, const N: usize>(bytes: &[u8], scheme: &[u8; N]) -> bool {
+    bytes.last_chunk::<N>().is_some_and(|tail| {
+        if MARKSTREAM {
+            tail.eq_ignore_ascii_case(scheme)
+        } else {
+            tail == scheme
+        }
+    })
+}
+
+fn gfm_linkify<const MARKSTREAM: bool>(source: &str, nodes: Vec<Inline>) -> Vec<Inline> {
     let mut nodes = nodes;
     let mut needs_linkification = false;
     for node in &mut nodes {
         match &mut node.kind {
             InlineKind::Text(Text::Source(s)) if node.span == *s => {
-                needs_linkification |= has_gfm_trigger(content(source, *s));
+                needs_linkification |= linkify_trigger::<MARKSTREAM>(content(source, *s));
             }
             InlineKind::Emphasis(children)
             | InlineKind::Strong(children)
             | InlineKind::Strikethrough(children)
             | InlineKind::Highlight(children)
             | InlineKind::Insert(children) => {
-                *children = gfm_linkify(source, std::mem::take(children));
+                *children = gfm_linkify::<MARKSTREAM>(source, std::mem::take(children));
             }
             _ => {}
         }
@@ -2100,7 +2120,7 @@ fn gfm_linkify(source: &str, nodes: Vec<Inline>) -> Vec<Inline> {
         if let InlineKind::Text(Text::Source(s)) = node.kind
             && node.span == s
         {
-            append_gfm_text(source, s.start, s.end, &mut output);
+            append_gfm_text::<MARKSTREAM>(source, s.start, s.end, &mut output);
         } else {
             output.push(node);
         }
@@ -2108,9 +2128,14 @@ fn gfm_linkify(source: &str, nodes: Vec<Inline>) -> Vec<Inline> {
     output
 }
 
-fn append_gfm_text(source: &str, start: usize, end: usize, output: &mut Vec<Inline>) {
+fn append_gfm_text<const MARKSTREAM: bool>(
+    source: &str,
+    start: usize,
+    end: usize,
+    output: &mut Vec<Inline>,
+) {
     let raw = &source[start..end];
-    if !has_gfm_trigger(raw) {
+    if !linkify_trigger::<MARKSTREAM>(raw) {
         push_inline(output, original(start, end));
         return;
     }
@@ -2118,30 +2143,68 @@ fn append_gfm_text(source: &str, start: usize, end: usize, output: &mut Vec<Inli
     let mut cursor = start;
     let mut unlinked = start;
     while cursor < end {
-        let word = cursor;
+        let mut word = cursor;
+        let mut separator_width = 1;
         while cursor < end
             && !matches!(
                 bytes[cursor],
                 b' ' | b'\n' | b'\r' | b'\t' | b'(' | b'<' | b'>' | b'\'' | b'"' | b',' | b';'
             )
         {
+            if MARKSTREAM && !bytes[cursor].is_ascii() {
+                let ch = source[cursor..end].chars().next().unwrap();
+                if markstream::unicode_url_separator(ch) {
+                    separator_width = ch.len_utf8();
+                    break;
+                }
+                cursor += ch.len_utf8();
+                continue;
+            }
             cursor += 1;
         }
         let mut word_end = cursor;
-        cursor += usize::from(cursor < end);
+        cursor += usize::from(cursor < end) * separator_width;
         if word == word_end {
             continue;
         }
         let value = &source[word..word_end];
         let scheme_len = ["http://", "https://", "ftp://", "www."]
             .into_iter()
-            .find(|scheme| value.starts_with(scheme))
-            .map(str::len);
+            .find(|scheme| {
+                if MARKSTREAM {
+                    value
+                        .as_bytes()
+                        .get(..scheme.len())
+                        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(scheme.as_bytes()))
+                } else {
+                    value.starts_with(scheme)
+                }
+            })
+            .map(str::len)
+            .or_else(|| {
+                if MARKSTREAM && let Some((offset, length)) = markstream::embedded_web_url(value) {
+                    word += offset;
+                    Some(length)
+                } else {
+                    None
+                }
+            });
         let prefix = if let Some(scheme_len) = scheme_len {
-            let link_tail = bytes[word_end..end]
-                .iter()
-                .position(|b| b.is_ascii_whitespace() || matches!(b, b'<' | b'>'))
-                .map_or(end, |offset| word_end + offset);
+            let tail_offset = if MARKSTREAM {
+                source[word_end..end]
+                    .char_indices()
+                    .find_map(|(offset, ch)| {
+                        (ch.is_ascii_whitespace()
+                            || matches!(ch, '<' | '>')
+                            || markstream::unicode_url_separator(ch))
+                        .then_some(offset)
+                    })
+            } else {
+                bytes[word_end..end]
+                    .iter()
+                    .position(|b| b.is_ascii_whitespace() || matches!(b, b'<' | b'>'))
+            };
+            let link_tail = tail_offset.map_or(end, |offset| word_end + offset);
             word_end = autolink_url_end(source, word, link_tail);
             cursor = cursor.max(word_end);
             let Some(domain) = bytes.get(word + scheme_len..word_end) else {
@@ -2160,6 +2223,15 @@ fn append_gfm_text(source: &str, start: usize, end: usize, output: &mut Vec<Inli
             let scheme = ["mailto:", "xmpp:"]
                 .into_iter()
                 .find(|scheme| value.starts_with(scheme));
+            if MARKSTREAM
+                && scheme.is_none()
+                && source[start..word]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|before| !before.is_ascii() && !before.is_whitespace())
+            {
+                continue;
+            }
             let address_start = word + scheme.map_or(0, str::len);
             let Some(finish) =
                 trailing_email_end(source, address_start, word_end, scheme == Some("xmpp:"))
@@ -2475,6 +2547,88 @@ mod tests {
         };
         assert_eq!(link.destination.as_str(source), "ftp://foo.bar.baz");
         assert_eq!(content(source, nodes[2].span), ".");
+    }
+
+    #[test]
+    fn markstream_web_autolinks_preserve_unicode_prose_boundaries() {
+        let options = Options {
+            markstream: true,
+            ..Options::default()
+        };
+        let refs = References::default();
+        for (source, prefix, expected, suffix) in [
+            (
+                "Discussions：https://github.com/Simon-He95/markstream-vue/discussions",
+                "Discussions：",
+                "https://github.com/Simon-He95/markstream-vue/discussions",
+                "",
+            ),
+            (
+                "反馈HTTPS://example.org/指南？详情",
+                "反馈",
+                "HTTPS://example.org/指南",
+                "？详情",
+            ),
+            (
+                "العنوان،www.example.org/path details",
+                "العنوان،",
+                "www.example.org/path",
+                " details",
+            ),
+            (
+                "结果🧪https://example.org/x🧪y",
+                "结果🧪",
+                "https://example.org/x🧪y",
+                "",
+            ),
+        ] {
+            let input = span(0, source.len());
+            let InlineContent::Parsed(parsed) = parse_content(source, input, &options, &refs, None)
+            else {
+                panic!("expected link: {source}");
+            };
+            assert_eq!(parsed, parse_preview(source, input, &options, &refs));
+            assert_eq!(content(source, parsed[0].span), prefix, "{source}");
+            let InlineKind::Link(link) = &parsed[1].kind else {
+                panic!("expected link: {parsed:?}");
+            };
+            assert_eq!(content(source, parsed[1].span), expected, "{source}");
+            assert_eq!(content(source, link.children[0].span), expected, "{source}");
+            if expected.starts_with("www.") {
+                assert_eq!(
+                    link.destination.as_str(source),
+                    format!("http://{expected}")
+                );
+            } else {
+                assert_eq!(link.destination, Text::Source(parsed[1].span));
+            }
+            assert_eq!(parsed.len(), 2 + usize::from(!suffix.is_empty()));
+            if !suffix.is_empty() {
+                assert_eq!(content(source, parsed[2].span), suffix, "{source}");
+            }
+            assert_eq!(
+                parse(source, input, &Options::default(), &refs),
+                [original(0, source.len())],
+                "{source}"
+            );
+        }
+        let source = "https://example.org/x。https://example.net/y";
+        let parsed = parse(source, span(0, source.len()), &options, &refs);
+        assert!(matches!(parsed[0].kind, InlineKind::Link(_)));
+        assert_eq!(content(source, parsed[1].span), "。");
+        assert!(matches!(parsed[2].kind, InlineKind::Link(_)));
+        for source in [
+            "反馈：https://",
+            "反馈：foo@example.org",
+            "myhttps://example.org",
+        ] {
+            let input = span(0, source.len());
+            assert_eq!(
+                parse_preview(source, input, &options, &refs),
+                [original(0, source.len())],
+                "{source}"
+            );
+        }
     }
 
     #[test]

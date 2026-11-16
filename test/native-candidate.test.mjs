@@ -398,7 +398,8 @@ test('native candidate projects typed details and summary hierarchy separately f
   try {
     const first = '<details open>\n<summary title="a > b">**sum**</summary>\n\n'
     session.append(first)
-    session.append('- one\n- two\n\n```js\nconst value = 1\n```\n</details>\n')
+    session.append('- one\n- two\n\n```js\nconst value = 1\n```\n</details>')
+    session.append('\n')
     session.finish()
     const details = session.snapshot()[0]
     assert.equal(details.tag, 'details')

@@ -194,6 +194,7 @@ fn block(value: &Block, source: &str) -> Value {
             json!({ "lines": lines.iter().copied().map(raw_line).collect::<Vec<_>>() }),
         ),
         BlockData::Details(opening) => ("details", html_opening_value(*opening, source)),
+        BlockData::HtmlWrapper(opening) => ("html_wrapper", html_opening_value(*opening, source)),
         BlockData::Summary {
             opening,
             content: value,
@@ -276,9 +277,11 @@ fn custom_value(tag: Tag, body: Span, children: &[Inline], source: &str) -> Valu
 }
 
 fn html_opening_value(opening: HtmlOpening, source: &str) -> Value {
+    let tag = opening.tag(source);
     json!({
         "opening": span(opening.span),
-        "attrs": opening.tag(source).attrs(source)
+        "tag": tag.tag_name(source),
+        "attrs": tag.attrs(source)
             .map(|attr| (attr.name, attr.value.unwrap_or_default()))
             .collect::<Vec<_>>(),
     })

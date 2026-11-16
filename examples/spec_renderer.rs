@@ -307,6 +307,7 @@ impl Renderer<'_> {
                     }
                 }
             }
+            BlockData::HtmlWrapper(_) => self.raw_html(&self.source[Range::from(block.span)]),
             BlockData::Summary { opening, content } => {
                 let raw = &self.source[Range::from(opening.span)];
                 self.raw_html(raw);

@@ -1,4 +1,4 @@
-use super::{Active, Dependency, Engine, Line, Output, container, tag};
+use super::{Active, Dependency, Engine, Html, Line, Output, container, tag};
 use crate::{Block, BlockData, BlockId, BlockStatus, Change, InlineContent, ParseError, Span, Tag};
 use std::sync::Arc;
 
@@ -16,9 +16,11 @@ impl HtmlOpening {
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-enum Name {
+pub(crate) enum Name {
     Details,
     Summary,
+    Div,
+    Section,
 }
 
 impl Name {
@@ -26,6 +28,8 @@ impl Name {
         match self {
             Self::Details => b"<details",
             Self::Summary => b"<summary",
+            Self::Div => b"<div",
+            Self::Section => b"<section",
         }
     }
 
@@ -33,6 +37,16 @@ impl Name {
         match self {
             Self::Details => b"</details",
             Self::Summary => b"</summary",
+            Self::Div => b"</div",
+            Self::Section => b"</section",
+        }
+    }
+
+    pub(super) fn data(self, opening: HtmlOpening) -> BlockData {
+        if self == Self::Details {
+            BlockData::Details(opening)
+        } else {
+            BlockData::HtmlWrapper(opening)
         }
     }
 }
@@ -68,14 +82,11 @@ fn find_end(
     source: &str,
     mut start: usize,
     end: usize,
-    summary: bool,
+    names: &[Name],
 ) -> (usize, Option<(Name, Span)>) {
     while let Some(relative) = memchr::memchr(b'<', &source.as_bytes()[start..end]) {
         let position = start + relative;
-        for name in [Name::Details, Name::Summary] {
-            if !summary && name == Name::Summary {
-                break;
-            }
+        for &name in names {
             match match_end(source, position, end, name) {
                 EndTag::Complete(stop) => {
                     return (position, Some((name, Span::new(position, stop))));
@@ -122,6 +133,51 @@ fn start_name(source: &str, start: usize, end: usize, in_details: bool) -> Optio
     })
 }
 
+fn wrapper_remains_open(source: &str, mut at: usize, end: usize, name: Name) -> bool {
+    let bytes = source.as_bytes();
+    let mut depth = 1usize;
+    while let Some(relative) = memchr::memchr(b'<', &bytes[at..end]) {
+        let position = at + relative;
+        if let Some(comment) = source[position..end].strip_prefix("<!--") {
+            let Some(close) = comment.find("-->") else {
+                return false;
+            };
+            at = position + 4 + close + 3;
+        } else if let EndTag::Complete(close) = match_end(source, position, end, name) {
+            depth -= 1;
+            if depth == 0 {
+                return false;
+            }
+            at = close;
+        } else if let Some(opener) = tag::opening(source, position, end) {
+            let inner = opener.tag.tag_name(source).as_bytes();
+            depth += usize::from(
+                !opener.self_closing && inner.eq_ignore_ascii_case(&name.opening()[1..]),
+            );
+            at = opener.end;
+            if let Some((_, closer)) = [
+                (b"script".as_slice(), b"</script>".as_slice()),
+                (b"style", b"</style>"),
+                (b"textarea", b"</textarea>"),
+            ]
+            .into_iter()
+            .find(|(tag, _)| inner.eq_ignore_ascii_case(tag))
+            {
+                let Some(close) = bytes[at..end]
+                    .windows(closer.len())
+                    .position(|part| part.eq_ignore_ascii_case(closer))
+                else {
+                    return false;
+                };
+                at += close + closer.len();
+            }
+        } else {
+            at = position + 1;
+        }
+    }
+    true
+}
+
 #[derive(Clone)]
 pub(super) struct SummaryBody {
     pub(super) id: BlockId,
@@ -142,10 +198,14 @@ pub(super) struct Summary {
 
 impl Engine {
     #[inline]
-    pub(crate) fn publish_details_progress(&self, previous_end: usize, out: &mut Vec<Change>) {
+    pub(crate) fn publish_html_container_progress(
+        &self,
+        previous_end: usize,
+        out: &mut Vec<Change>,
+    ) {
         if self.options.markstream {
             for frame in &self.containers {
-                if let container::Kind::Details { opening_end, .. } = frame.kind
+                if let container::Kind::Html { opening_end, .. } = frame.kind
                     && frame.end > previous_end.max(opening_end)
                 {
                     out.push(Change::SetStatus {
@@ -159,9 +219,87 @@ impl Engine {
     }
 
     fn details_index(&self) -> Option<usize> {
+        self.containers.iter().rposition(|frame| {
+            matches!(
+                frame.kind,
+                container::Kind::Html {
+                    tag: Name::Details,
+                    ..
+                }
+            )
+        })
+    }
+
+    fn html_container(&self) -> Option<(usize, Name)> {
         self.containers
             .iter()
-            .rposition(|frame| matches!(frame.kind, container::Kind::Details { .. }))
+            .enumerate()
+            .rev()
+            .find_map(|(index, frame)| match frame.kind {
+                container::Kind::Html { tag, .. } => Some((index, tag)),
+                _ => None,
+            })
+    }
+
+    pub(super) fn promote_html_wrapper(
+        &mut self,
+        source: &str,
+        html: &Html,
+        blank: Line,
+        output: &mut Output<'_>,
+    ) -> Result<bool, ParseError> {
+        let bytes = source.as_bytes();
+        let Some(relative) = memchr::memchr2(b'\r', b'\n', &bytes[html.span.start..html.span.end])
+        else {
+            return Ok(false);
+        };
+        let end = html.span.start + relative;
+        let mut next = super::line_break(bytes, end, html.span.end).unwrap();
+        let start = super::unindent(&source[html.span.start..end]);
+        let start = end - start.len();
+        let Some(opener) = tag::opening(source, start, end).filter(|open| {
+            !open.self_closing && source[open.end..end].trim_matches([' ', '\t']).is_empty()
+        }) else {
+            return Ok(false);
+        };
+        let name = opener.tag.tag_name(source).as_bytes();
+        let Some(tag) = [Name::Div, Name::Section]
+            .into_iter()
+            .find(|tag| name.eq_ignore_ascii_case(&tag.opening()[1..]))
+        else {
+            return Ok(false);
+        };
+        if !wrapper_remains_open(source, next, html.span.end, tag) {
+            return Ok(false);
+        }
+        let frame = container::Frame {
+            id: html.id,
+            batch_index: output.batch_index(),
+            start,
+            end: html.span.end,
+            kind: container::Kind::Html {
+                opening_end: opener.end,
+                closed: false,
+                tag,
+            },
+        };
+        output.done(
+            super::container_block(frame, BlockStatus::Open),
+            !self.batch,
+            self.parent(),
+        );
+        self.containers.push(frame);
+        // The first blank line confirms a wrapper. Parse its buffered body once as Markdown.
+        self.metrics.scanned_bytes += html.span.end - next;
+        while next < html.span.end {
+            let end = memchr::memchr2(b'\r', b'\n', &bytes[next..html.span.end])
+                .map_or(html.span.end, |relative| next + relative);
+            let after = super::line_break(bytes, end, html.span.end).unwrap_or(end);
+            self.container_line(source, Line::new(next, end, after), output)?;
+            next = after;
+        }
+        self.container_line(source, blank, output)?;
+        Ok(true)
     }
 
     pub(super) fn details_opener(&self, source: &str, line: Line) -> bool {
@@ -177,10 +315,13 @@ impl Engine {
         line: Line,
         frame: container::Frame,
     ) -> Option<usize> {
-        if line.lazy || !matches!(frame.kind, container::Kind::Details { .. }) {
+        let container::Kind::Html { tag, .. } = frame.kind else {
+            return None;
+        };
+        if line.lazy {
             return None;
         }
-        match match_end(source, tag_start(source, line)?, line.end, Name::Details) {
+        match match_end(source, tag_start(source, line)?, line.end, tag) {
             EndTag::Complete(end) => Some(end),
             EndTag::Pending | EndTag::Absent => None,
         }
@@ -208,7 +349,7 @@ impl Engine {
             .is_empty();
         let end = if tail { close_end } else { line.next };
         let frame = &mut self.containers[index];
-        if let container::Kind::Details { closed, .. } = &mut frame.kind {
+        if let container::Kind::Html { closed, .. } = &mut frame.kind {
             *closed = true;
         }
         frame.end = end;
@@ -256,9 +397,10 @@ impl Engine {
 
             if !tag.self_closing && name == Name::Details {
                 self.open_container(
-                    container::Kind::Details {
+                    container::Kind::Html {
                         opening_end: tag.end,
                         closed: false,
+                        tag: Name::Details,
                     },
                     start,
                     tag.end,
@@ -324,8 +466,8 @@ impl Engine {
             return Ok(true);
         }
 
-        if current.is_some()
-            && let (_, Some((Name::Details, close))) = find_end(source, line.start, line.end, false)
+        if let Some((index, tag)) = self.html_container()
+            && let (_, Some((_, close))) = find_end(source, line.start, line.end, &[tag])
         {
             if !source[line.start..close.start]
                 .trim_matches([' ', '\t'])
@@ -341,10 +483,8 @@ impl Engine {
                     output,
                 )?;
             }
-            if let Some(index) = self.details_index() {
-                self.close_details(source, line, index, close.end, output)?;
-                return Ok(true);
-            }
+            self.close_details(source, line, index, close.end, output)?;
+            return Ok(true);
         }
         Ok(false)
     }
@@ -356,7 +496,12 @@ impl Engine {
         line: Line,
         output: &mut Output<'_>,
     ) -> Result<(), ParseError> {
-        let (_, close) = find_end(source, summary.checked.max(line.start), line.end, true);
+        let (_, close) = find_end(
+            source,
+            summary.checked.max(line.start),
+            line.end,
+            &[Name::Details, Name::Summary],
+        );
         if let Some((name, close)) = close {
             self.update_summary(&mut summary, line.start, close.start, output);
             let end = if name == Name::Summary {
@@ -402,14 +547,36 @@ impl Engine {
         source: &str,
         output: &mut Output<'_>,
     ) -> Result<bool, ParseError> {
-        if self.details_leaf_protected()
-            || self.containers.iter().any(|frame| {
-                !matches!(
-                    frame.kind,
-                    container::Kind::Details { .. } | container::Kind::Vmr { .. }
-                )
-            })
-        {
+        if self.details_leaf_protected() {
+            return Ok(false);
+        }
+        let transparent = |frame: &container::Frame| {
+            matches!(
+                frame.kind,
+                container::Kind::Html { .. } | container::Kind::Vmr { .. }
+            )
+        };
+        if !self.containers.iter().all(transparent) {
+            let Some((index, tag)) = self.html_container() else {
+                return Ok(false);
+            };
+            if !self.containers[..index].iter().all(transparent)
+                || !self.containers[index + 1..].iter().all(|frame| {
+                    matches!(
+                        frame.kind,
+                        container::Kind::List { .. } | container::Kind::Item { .. }
+                    )
+                })
+            {
+                return Ok(false);
+            }
+            let line = Line::new(self.line_start, self.scan, self.scan);
+            if let Some(start) = tag_start(source, line)
+                && let EndTag::Complete(end) = match_end(source, start, line.end, tag)
+            {
+                self.container_line(source, Line::new(self.line_start, end, end), output)?;
+                self.line_start = end;
+            }
             return Ok(false);
         }
 
@@ -419,8 +586,12 @@ impl Engine {
                 let Some(Active::Summary(mut summary)) = self.active.take() else {
                     unreachable!();
                 };
-                let (through, close) =
-                    find_end(source, summary.checked.max(line.start), line.end, true);
+                let (through, close) = find_end(
+                    source,
+                    summary.checked.max(line.start),
+                    line.end,
+                    &[Name::Details, Name::Summary],
+                );
                 self.update_summary(&mut summary, line.start, through, output);
                 if let Some((name, close)) = close {
                     let end = if name == Name::Summary {
@@ -470,11 +641,11 @@ impl Engine {
                 self.tag_probe = None;
                 self.line(source, Line::new(self.line_start, end, end), output)?;
                 self.line_start = end;
-            } else if in_details {
+            } else if let Some((_, tag)) = self.html_container() {
                 let from = self.details_checked.max(line.start).min(line.end);
-                let (through, close) = find_end(source, from, line.end, false);
+                let (through, close) = find_end(source, from, line.end, &[tag]);
                 self.details_checked = through;
-                let Some((Name::Details, close)) = close else {
+                let Some((_, close)) = close else {
                     return Ok(false);
                 };
                 self.line(
