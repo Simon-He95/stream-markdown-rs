@@ -360,10 +360,10 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false) {
       else {
         const markup = raw.startsWith('<') ? 'autolink' : raw.startsWith('[') ? '' : 'linkify'
         const compact =
-          (markup && /^<?https?:\/\//i.test(raw))
-          || (context.markstream && !markup && raw.includes('](')
-            && children.length === 1 && children[0].type === 'text'
-            && sameLineInlineSuffix(inlines, index, context))
+          ((markup && /^<?https?:\/\//i.test(raw))
+           || (context.markstream && !markup && raw.includes('](')
+             && children.length === 1 && children[0].type === 'text'))
+          && sameLineInlineSuffix(inlines, index, context)
         if (compact) {
           const text = legacyLinkText(children)
           nodes.push({
@@ -383,6 +383,10 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false) {
       const header = htmlHeader(raw)
       if (header?.tag === 'br') {
         nodes.push({ type: 'hardbreak', raw })
+        continue
+      }
+      if (context.markstream && header?.tag === 'img' && !context.customTags.includes('img')) {
+        nodes.push({ type: 'html_inline', tag: 'img', content: raw, children: [], raw, loading: false })
         continue
       }
       let end = index

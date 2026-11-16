@@ -724,3 +724,31 @@ test('an image-link preview recognizes only the unescaped bracket after typed te
     unconfirmed.dispose()
   }
 })
+
+test('confirmed HTML image under an anchor preserves raw markup and the parent link attributes', () => {
+  const image = '<img src="/badge.svg" alt="badge" width="250" />'
+  const anchor = `<a href="/docs" target="_blank">${image}</a>`
+  const legacy = createSession()
+  const ordinary = createSession({ factoryOptions: { markstream: false } })
+  try {
+    for (const session of [legacy, ordinary]) {
+      session.append('badge ' + anchor)
+      session.finish()
+    }
+    const link = legacy.snapshot()[0].children[1]
+    assert.equal(link.type, 'link')
+    assert.equal(link.text, image)
+    assert.equal(link.raw, anchor)
+    assert.deepEqual(link.attrs, [['href', '/docs'], ['target', '_blank']])
+    assert.deepEqual(link.children, [{
+      type: 'html_inline', tag: 'img', content: image, children: [], raw: image, loading: false,
+    }])
+    assert.deepEqual(ordinary.snapshot()[0].children[1].children[0].attrs, [
+      ['src', '/badge.svg'], ['alt', 'badge'], ['width', '250'],
+    ])
+  }
+  finally {
+    legacy.dispose()
+    ordinary.dispose()
+  }
+})
