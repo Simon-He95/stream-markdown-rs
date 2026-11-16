@@ -478,6 +478,38 @@ fn finish_closes_fences_once_and_preserves_the_body() {
 }
 
 #[test]
+fn a_large_fence_append_keeps_a_partial_closer_out_of_its_body() {
+    let options = Options::default();
+    let body = format!("{}    ```\r\n", "text ``` inside\r\n".repeat(280));
+    let prefix = format!("```\r\n{body}   ````\r");
+    assert!(prefix.len() >= 4096);
+    let suffix = "\n\r\n# Next\r\n";
+
+    let mut parser = Parser::new(options.clone());
+    let mut changes = Vec::new();
+    let mut view = View::default();
+    parser.append(&prefix, &mut changes).unwrap();
+    view.apply(&mut changes);
+    let (&id, code) = view.blocks.first_key_value().unwrap();
+    let BlockData::CodeBlock { body: span, .. } = code.data else {
+        panic!("expected a code block");
+    };
+    assert_eq!(code.status, BlockStatus::Open);
+    assert_eq!(parser.source(span), body);
+
+    parser.append(suffix, &mut changes).unwrap();
+    view.apply(&mut changes);
+    assert_eq!(view.blocks[&id].status, BlockStatus::Closed);
+    parser.finish(&mut changes).unwrap();
+    view.apply(&mut changes);
+    let document = parse(parser.source_text(), &options).unwrap();
+    assert_eq!(
+        view.blocks.into_values().collect::<Vec<_>>(),
+        document.nodes
+    );
+}
+
+#[test]
 fn registered_tag_attributes_borrow_the_original_source() {
     let options = Options {
         custom_tags: vec!["tool-call".into()],

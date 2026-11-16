@@ -647,7 +647,41 @@ impl Engine {
             && !self.options.require_closing_strong
             && self.options.custom_tags.is_empty()
             && self.plugins.is_empty();
+        let complete_end = if direct_fence_lines {
+            let end = bytes.len() - usize::from(bytes.last() == Some(&b'\r'));
+            memchr::memrchr2(b'\n', b'\r', &bytes[self.scan..end])
+                .map_or(self.scan, |at| self.scan + at + 1)
+        } else {
+            0
+        };
         while self.scan < source.len() {
+            if self.scan < complete_end
+                && self.scan == self.line_start
+                && self.containers.is_empty()
+                && matches!(self.active, Some(Active::Fence(Fence { lines: None, .. })))
+            {
+                let Some(Active::Fence(mut fence)) = self.active.take() else {
+                    unreachable!()
+                };
+                let close = find_fence_closer(
+                    &source[..complete_end],
+                    self.scan,
+                    fence.marker,
+                    fence.count,
+                );
+                let body_end = close.map_or(complete_end, |line| line.start);
+                let end = close.map_or(complete_end, |line| line.next);
+                emit_append(&mut output, fence.id, &mut fence.body.end, body_end);
+                self.metrics.scanned_bytes += end - self.scan;
+                self.scan = end;
+                self.line_start = end;
+                if close.is_some() {
+                    self.close_code(fence, end, BlockStatus::Closed, &mut output);
+                } else {
+                    self.active = Some(Active::Fence(fence));
+                }
+                continue;
+            }
             if self.batch
                 && self.containers.is_empty()
                 && matches!(
@@ -658,7 +692,7 @@ impl Engine {
                 let Some(Active::Fence(mut fence)) = self.active.take() else {
                     unreachable!()
                 };
-                let close = batch_fence_close(source, self.scan, fence.marker, fence.count);
+                let close = find_fence_closer(source, self.scan, fence.marker, fence.count);
                 fence.body.end = close.map_or(source.len(), |line| line.start);
                 let end = close.map_or(source.len(), |line| line.next);
                 let status = if close.is_some() {
@@ -4506,7 +4540,7 @@ fn closing_fence(text: &str, marker: u8, width: usize) -> bool {
     count >= width && blank(&text[count..])
 }
 
-fn batch_fence_close(source: &str, start: usize, marker: u8, width: usize) -> Option<Line> {
+fn find_fence_closer(source: &str, start: usize, marker: u8, width: usize) -> Option<Line> {
     let bytes = source.as_bytes();
     let mut skip = start;
     for relative in memchr::memchr_iter(marker, &bytes[start..]) {
