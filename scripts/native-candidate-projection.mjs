@@ -8,6 +8,14 @@ const HTML_ATTRIBUTE = /([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?
 
 export function projectBlocks(nodes, roots, context) {
   const blocks = projectChildren(nodes, roots, context)
+  if (context.markstream && !context.final) {
+    const start = context.lineStarts.at(-1)
+    const last = nodes.get(roots.at(-1))
+    if (start < context.length && (!last || (last.status !== 'open' && last.span[1] <= start))
+      && /^ {0,3}<\/?[ \t]*$/u.test(context.read([start, context.length]))) {
+      blocks.push({ type: 'paragraph', raw: '', children: [], ...sourceMap([start, context.length], context) })
+    }
+  }
   const definitions = new Map()
   for (const node of blocks) {
     if (node.type === 'footnote' && !definitions.has(node.id))
@@ -814,10 +822,13 @@ function detailNode(block, nodes, raw, map, context) {
   const openerLine = lineAt(context.lineStarts, data.opening[0])
   const openerLineEnd = context.lineStarts[openerLine + 1]
   const last = nodes.get(block.children.at(-1))
-  if (context.markstream && open && last?.kind === 'summary' && last.status === 'open') {
-    const surfaceSpan = [block.span[0], context.length]
-    raw = normalize(context.read(surfaceSpan))
-    map = sourceMap(surfaceSpan, context)
+  if (context.markstream && open && last?.kind === 'summary') {
+    const end = last.status === 'open' ? context.length : last.span[1]
+    if (end > block.span[1]) {
+      const surfaceSpan = [block.span[0], end]
+      raw = normalize(context.read(surfaceSpan))
+      map = sourceMap(surfaceSpan, context)
+    }
   }
   if (open && !children.length && openerLineEnd > block.span[1]
     && !context.read([data.opening[1], openerLineEnd]).trim()) {
@@ -834,6 +845,29 @@ function detailNode(block, nodes, raw, map, context) {
     type: 'html_block', tag: 'details', attrs, children, raw,
     content: opening + body + (closing ?? '</details>'),
     loading: open && !context.final, ...map,
+  }
+}
+
+function heldWrapperRaw(block, nodes, children, tail, context) {
+  if (children.length !== block.children.length)
+    return
+  const last = nodes.get(block.children.at(-1))
+  const starts = context.lineStarts
+  for (let line = lineAt(starts, block.data.opening[1] - 1) + 1; starts[line + 1] <= last.span[0]; line++) {
+    const start = starts[line]
+    const end = starts[line + 1]
+    if (!/^[ \t]*(?:\r\n?|\n)$/u.test(context.read([start, end])))
+      continue
+
+    // While the closer is held, the legacy wrapper keeps its first HTML block
+    // and rejoins the parsed siblings from the next block onward.
+    const from = block.children.findIndex(id => nodes.get(id).span[0] >= end)
+    if (from === -1)
+      return
+    const parts = children.slice(from).map(child => child.raw)
+    if (parts.every(part => typeof part === 'string') && parts.at(-1).endsWith(tail))
+      return readText([block.span[0], start], context) + '\n' + parts.join('\n')
+    return
   }
 }
 
@@ -982,8 +1016,10 @@ function projectBlock(block, nodes, context) {
       return detailNode(block, nodes, raw, map, context)
     case 'html_wrapper': {
       const tag = data.tag.toLowerCase()
+      const children = projectChildren(nodes, block.children, context)
       let visibleEnd = span[1]
       let rawEnd = visibleEnd
+      let held = ''
       if (context.markstream && open && !context.final) {
         const last = nodes.get(block.children.at(-1))
         if (last?.kind === 'paragraph' && last.status === 'open') {
@@ -993,24 +1029,32 @@ function projectBlock(block, nodes, context) {
         }
         if (last?.kind === 'details' && last.status === 'open') {
           const summary = nodes.get(last.children.at(-1))
+          if (summary?.kind === 'summary' && summary.span[1] > visibleEnd) {
+            visibleEnd = summary.span[1]
+            rawEnd = visibleEnd
+          }
           const close = '</summary'
           const remaining = context.length - rawEnd
           if (summary?.kind === 'summary' && summary.status === 'open' && summary.span[1] === rawEnd
             && remaining >= 2 && remaining <= close.length) {
-            const tail = context.read([rawEnd, context.length]).toLowerCase()
-            if (tail.startsWith('</') && close.startsWith(tail))
+            const tail = context.read([rawEnd, context.length])
+            if (tail.startsWith('</') && close.startsWith(tail.toLowerCase())) {
               rawEnd = context.length
+              held = tail
+            }
           }
         }
       }
-      const visible = visibleEnd === span[1] ? raw : readText([span[0], visibleEnd], context)
-      const wrapperRaw = rawEnd === visibleEnd ? visible : readText([span[0], rawEnd], context)
+      const merged = held ? heldWrapperRaw(block, nodes, children, held, context) : undefined
+      const visible = merged ? merged.slice(0, -held.length)
+        : visibleEnd === span[1] ? raw : readText([span[0], visibleEnd], context)
+      const wrapperRaw = merged ?? (rawEnd === visibleEnd ? visible : readText([span[0], rawEnd], context))
       return {
         type: 'html_block', tag, raw: wrapperRaw,
         content: status === 'closed' ? visible : visible + `\n</${tag}>`,
         ...(data.attrs.length && { attrs: data.attrs }),
         loading: open && !context.final,
-        children: projectChildren(nodes, block.children, context),
+        children,
         ...(rawEnd === span[1] ? map : sourceMap([span[0], rawEnd], context)),
       }
     }

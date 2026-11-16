@@ -581,6 +581,51 @@ test('open HTML wrapper includes the current child source and keeps a held summa
   }
 })
 
+test('legacy HTML wrapper joins held child source after its first blank line', () => {
+  const session = createSession()
+  try {
+    const prefix = '<div>\nx\n\n\ny\n\n\n<details>\n<summary>S'
+    session.append(prefix)
+    session.append('</summ')
+    const merged = '<div>\nx\n\ny\n<details>\n<summary>S'
+    const [pending] = session.snapshot()
+    assert.equal(pending.raw, merged + '</summ')
+    assert.equal(pending.content, merged + '\n</div>')
+    assert.equal(pending.children.at(-1).children[0].content, '<summary>S</summ')
+
+    session.append('ary>')
+    const [confirmed] = session.snapshot()
+    assert.equal(confirmed.raw, prefix + '</summary>')
+    assert.equal(confirmed.content, confirmed.raw + '\n</div>')
+    assert.equal(confirmed.children.at(-1).raw, '<details>\n<summary>S</summary>')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('legacy projection keeps a bare root HTML delimiter as an empty draft', () => {
+  const session = createSession({ parseOptions: { includeSourceMap: true } })
+  const code = createSession()
+  try {
+    session.append('# title\n\n  <')
+    const draft = { type: 'paragraph', raw: '', children: [], sourceMap: { startLine: 2, endLine: 3 } }
+    assert.deepEqual(session.snapshot().at(-1), draft)
+    session.append('/')
+    assert.deepEqual(session.snapshot().at(-1), draft)
+    session.append('div')
+    assert.equal(session.snapshot().length, 1)
+
+    code.append('```txt\n<')
+    assert.equal(code.snapshot().length, 1)
+    assert.equal(code.snapshot()[0].code, '<')
+  }
+  finally {
+    session.dispose()
+    code.dispose()
+  }
+})
+
 test('native candidate retains typed custom tag children alongside the source payload', () => {
   const session = createSession({ parseOptions: { customHtmlTags: ['widget'] } })
   try {
