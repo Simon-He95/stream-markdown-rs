@@ -1363,6 +1363,35 @@ test('confirmed HTML image under an anchor preserves raw markup and the parent l
   }
 })
 
+test('multiline HTML anchor previews close at the matching tag and exclude following blank lines', () => {
+  const session = createSession()
+  const commented = createSession()
+  try {
+    const markup = '<a href="/gallery">\n  <picture>\n'
+      + '    <source media="a > b" srcset="/dark.svg">\n'
+      + '    <img src="/light.svg" alt="Example 图">\n  </picture>\n</a>'
+    session.append(markup.slice(0, -1))
+    assert.equal(session.snapshot()[0].loading, true)
+    session.append('>')
+    const expected = {
+      type: 'html_block', tag: 'a', attrs: [['href', '/gallery']],
+      content: markup, raw: markup, loading: false,
+    }
+    assert.deepEqual(session.snapshot()[0], expected)
+    session.append('\n\n# Next\n')
+    session.finish()
+    assert.deepEqual(session.snapshot()[0], expected)
+    assert.equal(session.snapshot()[1].type, 'heading')
+
+    commented.append('<a href="/gallery">\n  <!-- not a closer\n</a>')
+    assert.equal(commented.snapshot()[0].loading, true)
+  }
+  finally {
+    session.dispose()
+    commented.dispose()
+  }
+})
+
 test('a line-leading HTML anchor waits for its withheld image child in the legacy view', () => {
   const opening = '<a href="/docs" target="_blank">'
   const session = createSession()

@@ -137,6 +137,37 @@ function htmlHeader(raw) {
   return { tag: tag.toLowerCase(), attrs, closed: markup.endsWith('/>') || VOID.has(tag.toLowerCase()) }
 }
 
+function terminalHtmlAnchor(raw) {
+  if (!/<\/a[ \t\n]*>[ \t\n]*$/iu.test(raw))
+    return
+
+  let depth = 0
+  let offset = 0
+  while ((offset = raw.indexOf('<', offset)) !== -1) {
+    const tail = raw.slice(offset)
+    if (tail.startsWith('<!--')) {
+      const end = raw.indexOf('-->', offset + 4)
+      if (end === -1)
+        return
+      offset = end + 3
+      continue
+    }
+    const closer = /^<\/([a-z][\w:.-]*)[ \t\n]*>/iu.exec(tail)
+    if (closer) {
+      offset += closer[0].length
+      if (closer[1].toLowerCase() === 'a' && --depth === 0)
+        return raw.slice(offset).trim() ? undefined : raw.slice(0, offset)
+      continue
+    }
+    const opener = HTML_START.exec(tail)
+    if (!opener || /^(?:iframe|noembed|noframes|noscript|plaintext|script|style|textarea|title|xmp)$/iu.test(opener[1]))
+      return
+    if (opener[1].toLowerCase() === 'a' && !opener[0].endsWith('/>'))
+      depth++
+    offset += opener[0].length
+  }
+}
+
 function displayText(nodes) {
   return nodes.map(node => (node.type === 'math_inline' ? node.raw : node.content) ?? node.code ?? node.alt ?? (
     node.children ? displayText(node.children) : node.raw
@@ -1061,15 +1092,19 @@ function projectBlock(block, nodes, context) {
     case 'html_block': {
       const content = data.lines ? rawLines(data.lines, context) : raw
       const header = htmlHeader(content.trimStart())
-      const loading = status === 'open' && !context.final && Boolean(header) && !header.closed
-      const visible = block.preview?.kind === 'html_content'
+      // A complete anchor can end before the CommonMark HTML source block does.
+      const anchor = context.markstream && block.parent === null && header?.tag === 'a' && !header.closed
+        ? terminalHtmlAnchor(content)
+        : undefined
+      const loading = !anchor && status === 'open' && !context.final && Boolean(header) && !header.closed
+      const visible = anchor ?? (block.preview?.kind === 'html_content'
         ? readText(block.preview.span, context)
-        : content
+        : content)
       const display = context.markstream && loading
         ? visible + `\n</${header.tag}>`
         : visible
       return {
-        type: kind, content: display, raw: content, tag: header?.tag ?? '',
+        type: kind, content: display, raw: anchor ?? content, tag: header?.tag ?? '',
         ...(header?.attrs.length && { attrs: header.attrs }),
         loading,
         ...map,
