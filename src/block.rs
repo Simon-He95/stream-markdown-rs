@@ -2291,7 +2291,7 @@ impl Engine {
                     };
                     if self.options.markstream
                         && !element.promoted
-                        && !source[element.start..close.end].contains(['\r', '\n'])
+                        && !source[element.body.start..close.end].contains(['\r', '\n'])
                     {
                         self.draft_inline_element(element.id, element.start, line.end, output);
                         self.start_paragraph(

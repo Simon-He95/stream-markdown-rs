@@ -84,7 +84,7 @@ enum BlockStatus {
 
 ### HTML/XML 风格的自定义标签
 
-已注册的标签规则可产出结构化的块或行内节点，向 TUI 提供 `tag_name()` 和 `attrs()`。标签元数据只存标签名和属性区域的源码区间。属性视图按需迭代键值对，保留原始拼写并区分缺失值与空字符串。读取原值时直接借用源码；需要实体解码时再生成解码后的值。标签正文按规则作为源码或 Markdown 子节点提供。
+在 `Options::custom_tags` 注册的标签可以成为 `BlockData::CustomTag` 或 `InlineKind::CustomTag`。块和行内节点都通过 `element.tag.tag_name(source)` 和 `element.tag.attrs(source)` 向 TUI 提供名称和属性。标签元数据只存标签名和属性区域的源码区间。迭代属性时直接借用原文，保留原始拼写、实体引用和属性顺序，并用 `None` 和 `Some("")` 区分缺失值与空字符串。正文由源码区间和解析出的 Markdown 子节点提供。
 
 例如依次收到 `<tool-call name="search" title="a >` 和 ` b">`。预扫描跨 chunk 保留当前引号状态，引号内的 `>` 是属性值的一部分。等引号外的 `>` 到齐，再发出已确认的 `tool-call` 节点及属性。块级配对标签在正文到达期间是 `Open`，收到匹配的结束标签后变为 `Closed`。自闭合写法 `<tool-call name="search" />` 首次交付即为 `Closed`。若开标签已确认但结束标签在 EOF 前缺失，块变为 `Incomplete`。行内标签的暂定样式和更新由所属块管理。
 
@@ -92,7 +92,7 @@ enum BlockStatus {
 
 注册标签正文中的 `<!-- ... -->` 和 `<![CDATA[ ... ]]>` 保留原文。两者内部的同名闭标签不会结束正文，结束标记到达后从当前游标继续扫描。
 
-开标签的校验和闭合匹配遵循注册规则选择的语法。规范模式的原始 HTML 可以继续作为原文交付，已注册标签由扩展显式开启。 [XML 起始标签、结束标签和空元素标签](https://www.w3.org/TR/xml/#sec-starttags)
+注册标签使用 ASCII 名称并按大小写匹配。名称中的冒号作为原始字符保留。CommonMark/GFM 识别的原始 HTML 通过其源码区间交付。 [XML 起始标签、结束标签和空元素标签](https://www.w3.org/TR/xml/#sec-starttags)
 
 启用 Markstream 后，顶层独立的 `<div>` 或 `<section>` 先按原始 HTML 交付。空行到达且开标签仍未闭合时，解析器复用块 ID，升格为 `HtmlWrapper`。空行前的正文只回读一次并交付为 Markdown 子块，后续正文按行增量解析。
 

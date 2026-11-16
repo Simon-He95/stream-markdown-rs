@@ -511,34 +511,41 @@ fn multiline_opening_attributes_do_not_make_a_same_line_custom_body_block_level(
         custom_tags: vec!["tool-call".into()],
         ..Options::default()
     };
-    let source = "<tool-call\r\n name=\"lookup\">正文</tool-call>后续内容";
-    let expected = parse(source, &options).unwrap().nodes;
-    let BlockData::Paragraph(InlineContent::Parsed(nodes)) = &expected[0].data else {
-        panic!("expected a paragraph with an inline custom tag");
-    };
-    assert!(matches!(&nodes[0].kind, InlineKind::CustomTag(element)
-        if element.tag.attrs(source).next().unwrap().value == Some("lookup")));
-    assert!(matches!(&nodes[1].kind, InlineKind::Text(text) if text.as_str(source) == "后续内容"));
-
-    for split in source
-        .char_indices()
-        .map(|(offset, _)| offset)
-        .chain([source.len()])
-    {
-        let mut parser = Parser::new(options.clone());
-        let mut changes = Vec::new();
-        let mut view = View::default();
-        for chunk in [&source[..split], &source[split..]] {
-            parser.append(chunk, &mut changes).unwrap();
-            view.apply(&mut changes);
-        }
-        parser.finish(&mut changes).unwrap();
-        view.apply(&mut changes);
-        assert_eq!(
-            view.blocks.into_values().collect::<Vec<_>>(),
-            expected,
-            "split {split}"
+    for source in [
+        "<tool-call\r\n name=\"lookup\">正文</tool-call>后续内容",
+        "<tool-call\r\n name=\"lookup\">正文</tool-call>后续内容\n",
+    ] {
+        let expected = parse(source, &options).unwrap().nodes;
+        let BlockData::Paragraph(InlineContent::Parsed(nodes)) = &expected[0].data else {
+            panic!("expected a paragraph with an inline custom tag");
+        };
+        assert!(matches!(&nodes[0].kind, InlineKind::CustomTag(element)
+            if element.tag.tag_name(source) == "tool-call"
+                && element.tag.attrs(source).next().unwrap().value == Some("lookup")));
+        assert!(
+            matches!(&nodes[1].kind, InlineKind::Text(text) if text.as_str(source) == "后续内容")
         );
+
+        for split in source
+            .char_indices()
+            .map(|(offset, _)| offset)
+            .chain([source.len()])
+        {
+            let mut parser = Parser::new(options.clone());
+            let mut changes = Vec::new();
+            let mut view = View::default();
+            for chunk in [&source[..split], &source[split..]] {
+                parser.append(chunk, &mut changes).unwrap();
+                view.apply(&mut changes);
+            }
+            parser.finish(&mut changes).unwrap();
+            view.apply(&mut changes);
+            assert_eq!(
+                view.blocks.into_values().collect::<Vec<_>>(),
+                expected,
+                "split {split}"
+            );
+        }
     }
 }
 
