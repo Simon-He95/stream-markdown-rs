@@ -1336,7 +1336,9 @@ impl Engine {
         if self.options.markstream
             && self.promoted_tag != Some(start)
             && !opener.self_closing
-            && tag::close(source, end, self.scan, opener.tag, &mut 1).is_some()
+            && tag::close(source, end, self.scan, opener.tag, &mut 1)
+                .found()
+                .is_some()
         {
             self.tag_probe = None;
             return Ok(false);
@@ -2249,18 +2251,26 @@ impl Engine {
                 let close = match &mut element.scanner {
                     Some(scanner) => scanner.finish_line(
                         source,
+                        line.start,
                         line.end,
                         line.next,
                         element.tag,
                         &mut element.depth,
                     ),
-                    None => tag::close(
+                    None => match tag::close(
                         source,
                         line.start,
                         line.end,
                         element.tag,
                         &mut element.depth,
-                    ),
+                    ) {
+                        tag::ClosingSearch::Comment(start) => {
+                            element.scanner =
+                                Some(Box::new(tag::BodyScanner::in_comment(start, line.end)));
+                            None
+                        }
+                        search => search.found(),
+                    },
                 };
                 if let Some(close) = close {
                     let committed_body = if close.start == line.start && !self.containers.is_empty()
@@ -2633,11 +2643,11 @@ impl Engine {
             let promoted = self.promoted_tag == Some(start);
             let mut depth = 1;
             let matched_end = if opener.self_closing {
-                None
+                tag::ClosingSearch::Absent
             } else {
                 tag::close(source, opener.end, line.end, opener.tag, &mut depth)
             };
-            if self.options.markstream && !promoted && matched_end.is_some() {
+            if self.options.markstream && !promoted && matched_end.found().is_some() {
                 self.start_paragraph(head, start, line, output);
                 return Ok(());
             }
@@ -2673,7 +2683,7 @@ impl Engine {
                         output,
                     )?;
                 }
-            } else if let Some(close) = matched_end {
+            } else if let Some(close) = matched_end.found() {
                 element.body.end = close.start;
                 self.emit_element(
                     source,
@@ -2695,7 +2705,9 @@ impl Engine {
                 }
             } else {
                 element.body.end = line.next;
-                if !self.batch && self.containers.is_empty() {
+                if let tag::ClosingSearch::Comment(start) = matched_end {
+                    element.scanner = Some(Box::new(tag::BodyScanner::in_comment(start, line.end)));
+                } else if !self.batch && self.containers.is_empty() {
                     element.scanner = Some(Box::new(tag::BodyScanner::new(line.next)));
                 }
                 if !self.batch {

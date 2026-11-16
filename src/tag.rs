@@ -267,6 +267,13 @@ impl BodyScanner {
         Self { at, token: None }
     }
 
+    pub fn in_comment(start: usize, checked: usize) -> Self {
+        Self {
+            at: start,
+            token: Some(BodyToken::Comment { start, checked }),
+        }
+    }
+
     pub fn advance<const HTML: bool>(
         &mut self,
         source: &str,
@@ -374,10 +381,7 @@ impl BodyScanner {
                         } else {
                             self.at += 1;
                         }
-                    } else if HTML
-                        && first == b'!'
-                        && b"!--".starts_with(&tail[..tail.len().min(3)])
-                    {
+                    } else if first == b'!' && b"!--".starts_with(&tail[..tail.len().min(3)]) {
                         if tail.len() < 3 {
                             return (start, None);
                         }
@@ -398,16 +402,39 @@ impl BodyScanner {
     pub fn finish_line(
         &mut self,
         source: &str,
+        start: usize,
         end: usize,
         next: usize,
         tag: Tag,
         depth: &mut usize,
     ) -> Option<Span> {
+        if self.token.is_none() {
+            self.at = self.at.max(start);
+        }
         let (pending, found) = self.advance::<false>(source, end, tag, depth);
-        let close = found.or_else(|| close(source, pending, end, tag, depth));
+        if matches!(self.token, Some(BodyToken::Comment { .. })) {
+            return None;
+        }
+        let close = found.or_else(|| close(source, pending, end, tag, depth).found());
         self.at = next;
         self.token = None;
         close
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ClosingSearch {
+    Found(Span),
+    Comment(usize),
+    Absent,
+}
+
+impl ClosingSearch {
+    pub fn found(self) -> Option<Span> {
+        match self {
+            Self::Found(span) => Some(span),
+            _ => None,
+        }
     }
 }
 
@@ -417,12 +444,19 @@ pub(crate) fn close(
     end: usize,
     tag: Tag,
     depth: &mut usize,
-) -> Option<Span> {
+) -> ClosingSearch {
     let name = tag.tag_name(source);
     let mut offset = start;
     while let Some(index) = memchr::memchr(b'<', &source.as_bytes()[offset..end]) {
         offset += index;
         let rest = &source[offset..end];
+        if let Some(comment) = rest.strip_prefix("<!--") {
+            let Some(after) = comment.find("-->") else {
+                return ClosingSearch::Comment(offset);
+            };
+            offset += 4 + after + 3;
+            continue;
+        }
         if let Some(after) = rest
             .strip_prefix("</")
             .and_then(|rest| rest.strip_prefix(name))
@@ -430,7 +464,7 @@ pub(crate) fn close(
             if let Some(after) = after.trim_start_matches([' ', '\t']).strip_prefix('>') {
                 *depth -= 1;
                 if *depth == 0 {
-                    return Some(Span::new(offset, end - after.len()));
+                    return ClosingSearch::Found(Span::new(offset, end - after.len()));
                 }
                 offset = end - after.len();
                 continue;
@@ -444,5 +478,5 @@ pub(crate) fn close(
         }
         offset += 1;
     }
-    None
+    ClosingSearch::Absent
 }

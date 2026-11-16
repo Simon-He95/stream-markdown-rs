@@ -459,6 +459,48 @@ fn multiline_registered_openers_keep_original_attributes_at_every_split() {
 }
 
 #[test]
+fn registered_tag_comments_do_not_close_the_body_in_batch_or_streaming() {
+    for body in [
+        "\r\n<!-- fake </tool-call>\r\n还在注释中 -->\r\nactual body\r\n",
+        "<!-- fake </tool-call>\ncontinued -->actual body",
+        "<!-- fake </tool-call> -->actual body",
+    ] {
+        let source = format!("<tool-call>{body}</tool-call>\n\n# Next");
+        let options = Options {
+            custom_tags: vec!["tool-call".into()],
+            ..Options::default()
+        };
+        let expected = parse(&source, &options).unwrap().nodes;
+        assert_eq!(expected.len(), 2, "{expected:?}");
+        let BlockData::CustomTag(element) = &expected[0].data else {
+            panic!("expected a registered block");
+        };
+        assert_eq!(&source[element.body.start..element.body.end], body);
+
+        for split in source
+            .char_indices()
+            .map(|(offset, _)| offset)
+            .chain([source.len()])
+        {
+            let mut parser = Parser::new(options.clone());
+            let mut changes = Vec::new();
+            let mut view = View::default();
+            for chunk in [&source[..split], &source[split..]] {
+                parser.append(chunk, &mut changes).unwrap();
+                view.apply(&mut changes);
+            }
+            parser.finish(&mut changes).unwrap();
+            view.apply(&mut changes);
+            assert_eq!(
+                view.blocks.into_values().collect::<Vec<_>>(),
+                expected,
+                "split {split}"
+            );
+        }
+    }
+}
+
+#[test]
 fn multiline_opening_attributes_do_not_make_a_same_line_custom_body_block_level() {
     let options = Options {
         markstream: true,
