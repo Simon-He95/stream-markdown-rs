@@ -39,7 +39,7 @@ The host copies only the current input window into the reserved buffer. Guest co
 | --- | ---: | --- |
 | Probe | 0 | Candidate starts at the configured trigger. Begin fresh rule state. |
 | Advance | 1 | Input continues at the previous unconsumed source offset. |
-| Finish | 2 | EOF has been reached. The window may be empty. |
+| Finish | 2 | The document or the rule's containing block scope ends. The window may be empty. |
 
 | Disposition | Code | Consumed count |
 | --- | ---: | --- |
@@ -48,6 +48,10 @@ The host copies only the current input window into the reserved buffer. Guest co
 | Accept | 2 | Bytes consumed from this window through the match. Probe must consume at least one byte. Advance and Finish may consume zero if a prior call already advanced the rule. |
 
 All counts are relative to the current window and must land on UTF-8 character boundaries. A rule can accept a prefix and leave the rest for the Markdown core. Compiling the same rule for static and incremental input should produce the same accepted source with different chunk boundaries.
+
+Block rules run on complete Markdown lines, including the last line at EOF. A rule that asks for more input owns its candidate until it accepts, rejects, or receives Finish. The parser emits an extension when the rule accepts. If the rule rejects after Advance or still needs more input at Finish, the parser replays the buffered candidate with ordinary Markdown block rules.
+
+Losing the enclosing quote or list prefix finishes a pending block rule before the next out-of-scope line. The accepted extension keeps its original parent, and the next line goes through native block parsing. Inline rules process the source-backed text windows that Markdown assigns to them.
 
 ## Guest ABI version 2
 

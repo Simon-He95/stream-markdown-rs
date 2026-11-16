@@ -266,6 +266,14 @@ pub fn verify(mode: Mode, source: &str, ends: &[usize]) -> Result<Value, String>
         "scope": "final-semantic-trace",
         "difference": difference,
         "stream_work": counters,
+        "native_layout_bytes": {
+            "span": std::mem::size_of::<Span>(),
+            "block": std::mem::size_of::<Block>(),
+            "stream_block_slot": std::mem::size_of::<Option<Block>>(),
+            "change": std::mem::size_of::<Change>(),
+            "inline_content": std::mem::size_of::<InlineContent>(),
+            "pulldown_event": std::mem::size_of::<pulldown_cmark::Event<'static>>(),
+        },
     }))
 }
 

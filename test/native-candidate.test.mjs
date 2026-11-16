@@ -110,6 +110,19 @@ test('native candidate projects resolved link and image metadata from typed span
   }
 })
 
+test('native candidate keeps full link metadata on a line containing inline code', () => {
+  const session = createSession()
+  try {
+    session.append('- Update `code` ([#811](https://example.com/811))\n')
+    const link = session.snapshot()[0].items[0].children[0].children.find(node => node.type === 'link')
+    assert.equal(link.title, null)
+    assert.deepEqual(link.attrs, [['href', 'https://example.com/811']])
+  }
+  finally {
+    session.dispose()
+  }
+})
+
 test('native candidate exposes inline and block math and accepts both feature settings', () => {
   const enabled = createSession()
   const disabled = createSession({ factoryOptions: { enableMath: false } })
@@ -569,6 +582,48 @@ test('legacy math map extends only for typed open Markstream blocks', () => {
     ;[block] = session.snapshot()
     assert.equal(block.loading, false)
     assert.deepEqual(block.sourceMap, { startLine: 0, endLine: 3 })
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('standalone link preview waits for a known destination while image links retain the typed prefix', () => {
+  const standalone = createSession()
+  const image = createSession()
+  try {
+    standalone.append('[链接](http')
+    assert.deepEqual(standalone.snapshot()[0].children[0], {
+      type: 'link', href: '', title: null, text: '链接',
+      children: [{ type: 'text', content: '链接', raw: '链接' }],
+      loading: true, markup: '',
+    })
+    standalone.append('s://example.com)')
+    assert.equal(standalone.snapshot()[0].children[0].href, 'https://example.com')
+    assert.equal(standalone.snapshot()[0].children[0].loading, false)
+
+    image.append('[![alt](https://images.example/icon.png)](https:')
+    assert.equal(image.snapshot()[0].children[0].href, 'https:')
+    assert.equal(image.snapshot()[0].children[0].loading, true)
+  }
+  finally {
+    standalone.dispose()
+    image.dispose()
+  }
+})
+
+test('link projection normalizes Unicode hostnames without changing userinfo, port or path', () => {
+  const checked = new Set()
+  const session = createSession({ parseOptions: { validateLink: href => {
+    checked.add(href)
+    return true
+  } } })
+  try {
+    session.append('[链接](https://user:pass@例子.测试:8443/路径?x=1)')
+    session.finish()
+    const href = 'https://user:pass@xn--fsqu00a.xn--0zwm56d:8443/%E8%B7%AF%E5%BE%84?x=1'
+    assert.equal(session.snapshot()[0].children[0].href, href)
+    assert.ok(checked.has(href))
   }
   finally {
     session.dispose()

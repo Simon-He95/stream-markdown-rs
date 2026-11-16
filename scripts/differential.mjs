@@ -205,6 +205,22 @@ const checkingCandidate = Boolean(process.env.PARSER_CANDIDATE)
 const { createSession } = checkingCandidate ? await loadCandidate() : reference
 const requested = process.argv[2]
 
+function firstDifference(expected, actual, path) {
+  const settings = { depth: 2, maxArrayLength: 4, maxStringLength: 160 }
+  if (expected && actual && typeof expected === 'object' && typeof actual === 'object') {
+    for (const key of new Set([...Object.keys(expected), ...Object.keys(actual)])) {
+      const next = Array.isArray(expected) ? `${path}[${key}]` : `${path}.${key}`
+      const inExpected = Object.hasOwn(expected, key)
+      const inActual = Object.hasOwn(actual, key)
+      if (inExpected !== inActual)
+        return `${next}: expected ${inExpected ? inspect(expected[key], settings) : '(absent)'}, actual ${inActual ? inspect(actual[key], settings) : '(absent)'}`
+      if (!isDeepStrictEqual(expected[key], actual[key]))
+        return firstDifference(expected[key], actual[key], next)
+    }
+  }
+  return `${path}: expected ${inspect(expected, settings)}, actual ${inspect(actual, settings)}`
+}
+
 function verify(id, options, actions, corpus = false) {
   const config = {
     id,
@@ -248,6 +264,7 @@ function verify(id, options, actions, corpus = false) {
         throw new Error([
           `${id}, commit ${index}, ${action.kind}, final=${action.final}`,
           `input length: ${source.length}, last 200 chars: ${JSON.stringify(source.slice(-200))}`,
+          `first difference ${firstDifference(expected[node], actual[node], `node[${node}]`)}`,
           `expected node[${node}]: ${inspect(expected[node], settings)}`,
           `actual node[${node}]: ${inspect(actual[node], settings)}`,
         ].join('\n'))

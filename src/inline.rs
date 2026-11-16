@@ -933,7 +933,7 @@ fn parse_scanned<S: Storage, const MATH: bool, const MARKSTREAM: bool>(
                     && (bracket.image || bracket.link_generation == link_generation)
                 {
                     let open = tokens[bracket.token].span;
-                    if let Some(target) = link_target(
+                    if let Some(target) = link_target::<MARKSTREAM>(
                         source,
                         span(open.end, begin),
                         i,
@@ -1671,17 +1671,8 @@ pub(crate) fn link_destination(source: &str, mut i: usize, end: usize) -> Option
         return None;
     }
     if bytes[i] == b'<' {
-        i += 1;
-        let start = i;
-        while i < end {
-            match bytes[i] {
-                b'<' | b'\n' | b'\r' => return None,
-                b'>' => return Some((span(start, i), i + 1)),
-                b'\\' if i + 1 < end && bytes[i + 1].is_ascii_punctuation() => i += 2,
-                _ => i += 1,
-            }
-        }
-        return None;
+        let (destination, consumed) = angle_destination(bytes, i, end)?;
+        return (destination.end < consumed).then_some((destination, consumed));
     }
 
     let start = i;
@@ -1702,6 +1693,20 @@ pub(crate) fn link_destination(source: &str, mut i: usize, end: usize) -> Option
     } else {
         None
     }
+}
+
+fn angle_destination(bytes: &[u8], opening: usize, end: usize) -> Option<(Span, usize)> {
+    let start = opening + 1;
+    let mut i = start;
+    while i < end {
+        match bytes[i] {
+            b'<' | b'\n' | b'\r' => return None,
+            b'>' => return Some((span(start, i), i + 1)),
+            b'\\' if i + 1 < end && bytes[i + 1].is_ascii_punctuation() => i += 2,
+            _ => i += 1,
+        }
+    }
+    Some((span(start, end), end))
 }
 
 pub(crate) fn link_title(source: &str, i: usize, end: usize) -> Option<(Span, usize)> {
@@ -1781,7 +1786,7 @@ struct Target {
     loading: bool,
 }
 
-fn link_target(
+fn link_target<const MARKSTREAM: bool>(
     source: &str,
     label: Span,
     next: usize,
@@ -1801,7 +1806,8 @@ fn link_target(
                 loading: false,
             });
         }
-        if preview_destination && let Some(destination) = pending_destination(source, next + 1, end)
+        if preview_destination
+            && let Some(destination) = pending_destination::<MARKSTREAM>(source, next + 1, end)
         {
             return Some(Target {
                 end,
@@ -1846,11 +1852,25 @@ fn link_target(
     }
 }
 
-fn pending_destination(source: &str, start: usize, end: usize) -> Option<Span> {
+fn pending_destination<const MARKSTREAM: bool>(
+    source: &str,
+    start: usize,
+    end: usize,
+) -> Option<Span> {
     let bytes = source.as_bytes();
     let start = skip_link_space(bytes, start, end)?;
     if start == end {
         return Some(span(start, end));
+    }
+    if MARKSTREAM && bytes[start] == b'<' {
+        let (destination, consumed) = angle_destination(bytes, start, end)?;
+        // The opening delimiter establishes a draft link, but its destination
+        // stays unavailable until the closing angle bracket actually arrives.
+        return (consumed == end).then_some(if destination.end == consumed {
+            span(destination.start, destination.start)
+        } else {
+            destination
+        });
     }
     if let Some((destination, consumed)) = link_destination(source, start, end) {
         return (consumed == end && destination.start != destination.end).then_some(destination);
@@ -3318,5 +3338,47 @@ mod tests {
             parse_content(source, span(0, source.len()), &options, &refs, None),
             InlineContent::Parsed(parse(source, span(0, source.len()), &options, &refs)),
         );
+    }
+    #[test]
+    fn markstream_previews_angle_destinations_only_after_the_link_label_boundary() {
+        let options = Options {
+            syntax: Syntax::CommonMark,
+            markstream: true,
+            ..Options::default()
+        };
+        let refs = References::default();
+        for (source, expected) in [
+            ("[label](<https://example.com", ""),
+            ("[label](<https://example.com>", "https://example.com"),
+            ("[label](<foo  bar", ""),
+        ] {
+            let nodes = parse_preview(source, span(0, source.len()), &options, &refs);
+            let [
+                Inline {
+                    kind: InlineKind::LinkPreview(link),
+                    ..
+                },
+            ] = nodes.as_slice()
+            else {
+                panic!("expected a provisional link for {source}");
+            };
+            assert_eq!(link.destination.as_str(source), expected);
+        }
+        let source = "[label](<https://example.com";
+        let nodes = parse(source, span(0, source.len()), &options, &refs);
+        assert!(
+            !nodes
+                .iter()
+                .any(|node| matches!(node.kind, InlineKind::Link(_) | InlineKind::LinkPreview(_)))
+        );
+        let source = "[label](<https://example.com>)";
+        let nodes = parse(source, span(0, source.len()), &options, &refs);
+        assert!(matches!(
+            nodes.as_slice(),
+            [Inline {
+                kind: InlineKind::Link(_),
+                ..
+            }]
+        ));
     }
 }

@@ -224,3 +224,152 @@ fn a_rule_cannot_keep_an_unconsumed_stream_window_open_forever() {
         Err(ParseError::Plugin(error)) if error.message.contains("bounded window")
     ));
 }
+
+#[test]
+fn delayed_wasm_rejection_replays_native_block_boundaries() {
+    use stream_markdown_rs::parse;
+
+    let wasm = wat::parse_str(
+        r#"(module
+            (memory (export "memory") 1)
+            (func (export "ms_abi_version") (result i32) (i32.const 1))
+            (func (export "ms_reserve_input") (param i32) (result i32) (i32.const 0))
+            (func (export "ms_step") (param $phase i32) (param i32) (param $len i32) (result i64)
+                (if (result i64) (i32.eqz (local.get $phase))
+                    (then (i64.or (i64.const 4294967296) (i64.extend_i32_u (local.get $len))))
+                    (else (i64.const 0)))))"#,
+    )
+    .unwrap();
+    let module = WasmPlugin::load(
+        &wasm,
+        Rule {
+            trigger: b'@',
+            scope: Scope::Block,
+            kind: 7,
+        },
+        Limits::default(),
+    )
+    .unwrap();
+    let options = Options::default();
+    let source = "@intro\r\n# Heading\r\n\r\nTail.";
+    let expected = parse(source, &options).unwrap();
+    let actual = parse_with_plugins(
+        source,
+        &options,
+        vec![Box::new(module.instantiate().unwrap())],
+    )
+    .unwrap();
+    assert_eq!(actual.nodes, expected.nodes);
+
+    let mut parser = Parser::new(options);
+    parser.add_plugin(module.instantiate().unwrap()).unwrap();
+    let mut changes = Vec::new();
+    parser.append("@intro\r", &mut changes).unwrap();
+    parser.append("\n# Heading\r", &mut changes).unwrap();
+    assert!(changes.is_empty());
+    parser.append("\n\r\nTail.", &mut changes).unwrap();
+    parser.finish(&mut changes).unwrap();
+    let blocks = changes
+        .iter()
+        .filter_map(|change| match change {
+            Change::Insert { block, .. } | Change::Replace(block)
+                if block.status == BlockStatus::Closed =>
+            {
+                Some(block)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(blocks, expected.nodes.iter().collect::<Vec<_>>());
+}
+
+#[test]
+fn finish_calls_the_wasm_eof_phase_and_commits_consumed_input() {
+    let wasm = wat::parse_str(
+        r#"(module
+            (memory (export "memory") 1)
+            (func (export "ms_abi_version") (result i32) (i32.const 1))
+            (func (export "ms_reserve_input") (param i32) (result i32) (i32.const 0))
+            (func (export "ms_step") (param $phase i32) (param i32) (param $len i32) (result i64)
+                (i64.or (i64.extend_i32_u (local.get $len))
+                    (if (result i64) (i32.eq (local.get $phase) (i32.const 2))
+                        (then (i64.const 8589934592))
+                        (else (i64.const 4294967296))))))"#,
+    )
+    .unwrap();
+    let module = WasmPlugin::load(
+        &wasm,
+        Rule {
+            trigger: b'@',
+            scope: Scope::Block,
+            kind: 7,
+        },
+        Limits::default(),
+    )
+    .unwrap();
+    let options = Options::default();
+    let source = "@首行\r\n尾部";
+    let document = parse_with_plugins(
+        source,
+        &options,
+        vec![Box::new(module.instantiate().unwrap())],
+    )
+    .unwrap();
+    assert_eq!(document.nodes.len(), 1);
+    assert_eq!(document.nodes[0].status, BlockStatus::Closed);
+    assert!(matches!(
+        document.nodes[0].data,
+        BlockData::Extension { kind: 7 }
+    ));
+    assert_eq!(document.nodes[0].span.end, source.len());
+
+    let mut parser = Parser::new(options);
+    parser.add_plugin(module.instantiate().unwrap()).unwrap();
+    let mut changes = Vec::new();
+    for chunk in ["@首行\r", "\n", "尾", "部"] {
+        parser.append(chunk, &mut changes).unwrap();
+    }
+    assert!(changes.is_empty());
+    parser.finish(&mut changes).unwrap();
+    assert!(
+        matches!(&changes[..], [Change::Insert { block, parent: None }] if *block == document.nodes[0])
+    );
+
+    let quoted = "> @first\n> continued\n\n# Outside\n";
+    let document = parse_with_plugins(
+        quoted,
+        &Options::default(),
+        vec![Box::new(module.instantiate().unwrap())],
+    )
+    .unwrap();
+    assert_eq!(document.nodes.len(), 3);
+    let [quote, extension, heading] = &document.nodes[..] else {
+        unreachable!()
+    };
+    assert!(matches!(quote.data, BlockData::Quote));
+    assert!(matches!(extension.data, BlockData::Extension { kind: 7 }));
+    assert_eq!(document.parent(extension.id), Some(quote.id));
+    assert_eq!(
+        &quoted[extension.span.start..extension.span.end],
+        "@first\n> continued\n"
+    );
+    assert!(matches!(heading.data, BlockData::Heading { level: 1, .. }));
+
+    let mut parser = Parser::new(Options::default());
+    parser.add_plugin(module.instantiate().unwrap()).unwrap();
+    let mut changes = Vec::new();
+    parser
+        .append("> @first\n> continued\n", &mut changes)
+        .unwrap();
+    assert!(!changes.iter().any(|change| matches!(change,
+        Change::Insert { block, .. } if matches!(block.data, BlockData::Extension { .. })
+    )));
+    parser.append("\n# Outside\n", &mut changes).unwrap();
+    assert!(changes.iter().any(|change| matches!(change,
+        Change::Insert { block, parent: Some(parent) } if block == extension && *parent == quote.id
+    )));
+    parser.finish(&mut changes).unwrap();
+    assert!(changes.iter().any(|change| matches!(change,
+        Change::Insert { block, parent: None } if block == heading
+    )));
+}

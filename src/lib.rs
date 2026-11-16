@@ -384,6 +384,7 @@ impl Parser {
             return Ok(());
         }
         let start = out.len();
+        let previous_end = self.source.len();
         self.source.push_str(chunk);
         if let Err(error) = engine.consume(&self.source, false, block::Output::Stream(out, start)) {
             out.truncate(start);
@@ -391,6 +392,7 @@ impl Parser {
             self.engine = None;
             return Err(error);
         }
+        engine.publish_details_progress(previous_end, out);
         Ok(())
     }
 

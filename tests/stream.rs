@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use stream_markdown_rs::{
-    Block, BlockData, BlockId, BlockStatus, Change, InlineContent, InlineKind, Options, ParseError,
-    Parser, Preview, PreviewHint, parse,
+    Block, BlockData, BlockId, BlockStatus, Change, Inline, InlineContent, InlineKind, Options,
+    ParseError, Parser, Preview, PreviewHint, Text, parse,
 };
 
 #[derive(Default)]
@@ -829,6 +829,40 @@ fn an_incomplete_table_row_is_previewed_then_committed_once() {
     parser.append("2 |\n", &mut changes).unwrap();
     assert!(matches!(changes.as_slice(),
         [Change::Preview { id: cleared, hint: None }, Change::AddRow { id: committed, .. }] if *cleared == id && *committed == id));
+}
+
+#[test]
+fn markstream_previews_inline_code_in_an_incomplete_table_row() {
+    let mut parser = Parser::new(Options {
+        markstream: true,
+        preview: Preview::Ai,
+        ..Options::default()
+    });
+    let mut changes = Vec::new();
+    parser
+        .append("| A | B |\n| --- | --- |\n", &mut changes)
+        .unwrap();
+    changes.clear();
+    parser.append("| `a\\|b", &mut changes).unwrap();
+    let [
+        Change::Preview {
+            id,
+            hint: Some(PreviewHint::TableRow(cells)),
+        },
+    ] = changes.as_slice()
+    else {
+        panic!("expected a provisional row")
+    };
+    let id = *id;
+    assert!(matches!(&cells[0], InlineContent::Parsed(nodes)
+        if matches!(nodes.as_slice(), [Inline { kind: InlineKind::Code(Text::Decoded(text)), .. }] if text.as_ref() == "a|b")));
+    changes.clear();
+    parser.append("` | done |\n", &mut changes).unwrap();
+    assert!(
+        matches!(changes.as_slice(), [Change::Preview { id: cleared, hint: None }, Change::AddRow { id: committed, cells, .. }]
+        if *cleared == id && *committed == id && matches!(&cells[0], InlineContent::Parsed(nodes)
+            if matches!(nodes.as_slice(), [Inline { kind: InlineKind::Code(Text::Decoded(text)), .. }] if text.as_ref() == "a|b")))
+    );
 }
 
 #[test]

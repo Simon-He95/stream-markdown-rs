@@ -109,6 +109,7 @@ struct Line {
     column: usize,
     padding: usize,
     lazy: bool,
+    skip_block_plugins: bool,
 }
 
 impl Line {
@@ -120,6 +121,7 @@ impl Line {
             column: 0,
             padding: 0,
             lazy: false,
+            skip_block_plugins: false,
         }
     }
 
@@ -1019,11 +1021,7 @@ impl Engine {
             if self.inline_preview == Some((id, body.end)) {
                 return;
             }
-            let text = &source[Range::from(body)];
-            if inline::needs_markup(text, self.options.syntax)
-                || self.options.math && text.as_bytes().contains(&b'$')
-                || self.options.markstream && inline::needs_markstream_markup(text)
-            {
+            if self.inline_preview_candidate(&source[Range::from(body)]) {
                 let mut nodes = inline::parse_preview(source, body, &self.options, &self.refs);
                 if self.options.footnotes {
                     self.resolve_footnote_nodes(source, &mut nodes, false);
@@ -1046,6 +1044,12 @@ impl Engine {
             }
         }
         self.clear_inline_preview(id, output);
+    }
+
+    fn inline_preview_candidate(&self, text: &str) -> bool {
+        inline::needs_markup(text, self.options.syntax)
+            || self.options.math && text.as_bytes().contains(&b'$')
+            || self.options.markstream && inline::needs_markstream_markup(text)
     }
 
     fn stream_fence_text(&mut self, bytes: &[u8], output: &mut Output<'_>) -> bool {
@@ -1316,11 +1320,13 @@ impl Engine {
             for frame in &mut self.containers {
                 if frame.end < self.scan {
                     frame.end = self.scan;
-                    output.update(Change::SetStatus {
-                        id: frame.id,
-                        status: BlockStatus::Open,
-                        end: self.scan,
-                    });
+                    if !matches!(frame.kind, Kind::Details { .. }) {
+                        output.update(Change::SetStatus {
+                            id: frame.id,
+                            status: BlockStatus::Open,
+                            end: self.scan,
+                        });
+                    }
                 }
             }
             return Ok(());
@@ -1335,7 +1341,14 @@ impl Engine {
         let Some((marker, prefix)) = container::list_at(raw, 0, 0) else {
             return Ok(());
         };
-        let previous_blank = match self.containers.as_slice() {
+        let depth = self
+            .containers
+            .iter()
+            .take_while(|frame| {
+                frame.kind.is_colon_container() || matches!(frame.kind, Kind::Details { .. })
+            })
+            .count();
+        let previous_blank = match &self.containers[depth..] {
             [] if self.active.is_none() || marker.interrupts(raw) => None,
             [
                 Frame {
@@ -1364,8 +1377,8 @@ impl Engine {
         }
         self.stop_leaf(source, output)?;
         if let Some(previous_blank) = previous_blank {
-            self.close_containers(1, output);
-            let frame = &mut self.containers[0];
+            self.close_containers(depth + 1, output);
+            let frame = &mut self.containers[depth];
             if let Kind::List { tight, .. } = &mut frame.kind
                 && previous_blank
             {
@@ -1384,6 +1397,16 @@ impl Engine {
                 self.scan,
                 output,
             );
+        }
+        for frame in &mut self.containers[..depth] {
+            frame.end = self.scan;
+            if !matches!(frame.kind, Kind::Details { .. }) {
+                output.update(Change::SetStatus {
+                    id: frame.id,
+                    status: BlockStatus::Open,
+                    end: self.scan,
+                });
+            }
         }
         self.open_container(
             Kind::Item {
@@ -1418,7 +1441,24 @@ impl Engine {
         let cells = cell_spans(source, span)
             .chain(std::iter::repeat(Span::new(span.end, span.end)))
             .take(columns)
-            .map(InlineContent::Plain)
+            .map(|cell| {
+                if !self.inline_preview_candidate(&source[Range::from(cell)]) {
+                    return InlineContent::Plain(cell);
+                }
+                let parts = table_cell_parts(source, cell);
+                let mut nodes = if parts.is_empty() {
+                    inline::parse_preview(source, cell, &self.options, &self.refs)
+                } else {
+                    inline::parse_fragments_preview(source, &parts, &self.options, &self.refs)
+                };
+                if self.options.footnotes {
+                    self.resolve_footnote_nodes(source, &mut nodes, false);
+                }
+                if !self.options.custom_tags.is_empty() {
+                    nodes = custom_inline::group(source, nodes, cell.end, &self.options, true);
+                }
+                InlineContent::Parsed(nodes)
+            })
             .collect();
         self.preview = Some(id);
         self.row_preview_end = span.end;
@@ -1613,6 +1653,7 @@ impl Engine {
         mut line: Line,
         output: &mut Output<'_>,
     ) -> Result<(), ParseError> {
+        let physical = line;
         if let Some(prefix) = self.partial_list.take() {
             line.advance(prefix);
             self.extend_containers(line.next);
@@ -1694,6 +1735,13 @@ impl Engine {
             };
             matched += 1;
             line.advance(prefix);
+        }
+
+        if matched < self.containers.len()
+            && let Some(running) = self.running.take()
+        {
+            self.resume_plugin(source, running, physical.start, Phase::Finish, output)?;
+            return self.container_line(source, physical, output);
         }
 
         if let Some((index, close, end)) = details_close
@@ -2544,6 +2592,7 @@ impl Engine {
         }
         if let Some(byte) = head.as_bytes().first().filter(|byte| byte.is_ascii())
             && self.has_block_plugin(*byte)
+            && !line.skip_block_plugins
             && self.start_plugin(source, start, line.next, *byte, output)?
         {
             return Ok(());
@@ -3170,24 +3219,10 @@ impl Engine {
         span: Span,
         track: bool,
     ) -> Result<InlineContent, ParseError> {
-        let mut start = span.start;
-        let mut parts = Vec::new();
-        for at in memchr::memchr_iter(b'|', &source.as_bytes()[span.start..span.end]) {
-            let pipe = span.start + at;
-            let escapes = source.as_bytes()[start..pipe]
-                .iter()
-                .rev()
-                .take_while(|&&byte| byte == b'\\')
-                .count();
-            if escapes % 2 == 1 {
-                parts.push(Span::new(start, pipe - 1));
-                start = pipe;
-            }
-        }
+        let parts = table_cell_parts(source, span);
         if parts.is_empty() {
             return self.parse_inline(source, span, track);
         }
-        parts.push(Span::new(start, span.end));
         self.parse_parts(source, &parts, track)
     }
 
@@ -3336,24 +3371,47 @@ impl Engine {
                     }
                 }
                 RuleResult::Reject | RuleResult::NeedMore { .. } => {
-                    let id = self.id();
-                    let span = Span::new(running.start, end);
-                    self.finish_leaf(
-                        source,
-                        Dependent {
-                            id,
-                            span,
-                            content: span,
-                            heading: None,
-                            parts: None,
-                        },
-                        false,
-                        output,
-                    )?;
+                    self.replay_rejected_plugin(source, running.start, end, output)?;
                     return Ok(true);
                 }
             }
         }
+    }
+
+    fn replay_rejected_plugin(
+        &mut self,
+        source: &str,
+        start: usize,
+        end: usize,
+        output: &mut Output<'_>,
+    ) -> Result<(), ParseError> {
+        self.metrics.scanned_bytes += end - start;
+        let bytes = source.as_bytes();
+        let mut at = start;
+        while at < end {
+            let stop = memchr::memchr2(b'\r', b'\n', &bytes[at..end])
+                .map_or(end, |relative| at + relative);
+            let next = if stop == end {
+                end
+            } else {
+                stop + 1
+                    + usize::from(
+                        bytes[stop] == b'\r' && stop + 1 < end && bytes[stop + 1] == b'\n',
+                    )
+            };
+            let line = Line {
+                skip_block_plugins: true,
+                ..Line::new(at, stop, next)
+            };
+            if at == start {
+                // The first line begins after its already opened container prefixes.
+                self.line(source, line, output)?;
+            } else {
+                self.container_line(source, line, output)?;
+            }
+            at = next;
+        }
+        Ok(())
     }
 
     fn emit_extension(&mut self, data: BlockData, span: Span, output: &mut Output<'_>) {
@@ -4059,6 +4117,27 @@ fn line_break(bytes: &[u8], start: usize, end: usize) -> Option<usize> {
         b'\r' => Some(start + 1 + usize::from(start + 1 < end && bytes[start + 1] == b'\n')),
         _ => None,
     }
+}
+
+fn table_cell_parts(source: &str, span: Span) -> smallvec::SmallVec<[Span; 4]> {
+    let mut start = span.start;
+    let mut parts = smallvec::SmallVec::new();
+    for at in memchr::memchr_iter(b'|', &source.as_bytes()[span.start..span.end]) {
+        let pipe = span.start + at;
+        let escapes = source.as_bytes()[start..pipe]
+            .iter()
+            .rev()
+            .take_while(|&&byte| byte == b'\\')
+            .count();
+        if escapes % 2 == 1 {
+            parts.push(Span::new(start, pipe - 1));
+            start = pipe;
+        }
+    }
+    if !parts.is_empty() {
+        parts.push(Span::new(start, span.end));
+    }
+    parts
 }
 
 fn cell_spans(source: &str, span: Span) -> impl Iterator<Item = Span> + Clone + '_ {

@@ -1,5 +1,5 @@
 use stream_markdown_rs::{
-    BlockData, BlockStatus, Change, InlineContent, InlineKind, Options, Parser, parse,
+    BlockData, BlockStatus, Change, InlineContent, InlineKind, Options, Parser, Preview, parse,
 };
 
 fn options() -> Options {
@@ -196,6 +196,52 @@ fn late_reference_only_updates_the_summary_waiting_on_its_definition() {
             .any(|node| matches!(node.kind, InlineKind::Link(_)))
     );
     assert_eq!(parser.metrics().invalidated_blocks, 1);
+}
+
+#[test]
+fn streamed_details_exposes_list_items_before_their_newlines() {
+    let mut parser = Parser::new(Options {
+        preview: Preview::Ai,
+        ..options()
+    });
+    let mut changes = Vec::new();
+    parser
+        .append("<details>\n<summary>Summary</summary>\n\n", &mut changes)
+        .unwrap();
+    let Change::Insert { block: outer, .. } = &changes[0] else {
+        panic!("expected details")
+    };
+    let outer = outer.id;
+    changes.clear();
+    parser.append("- fi", &mut changes).unwrap();
+    assert!(changes.iter().any(|change| matches!(change,
+        Change::SetStatus { id, status: BlockStatus::Open, end }
+            if *id == outer && *end == parser.source_text().len())));
+    let list = changes
+        .iter()
+        .find_map(|change| match change {
+            Change::Insert { parent, block }
+                if *parent == Some(outer) && matches!(block.data, BlockData::List { .. }) =>
+            {
+                Some(block.id)
+            }
+            _ => None,
+        })
+        .expect("expected the list inside details");
+    changes.clear();
+    parser.append("rst\n- se", &mut changes).unwrap();
+    assert!(changes.iter().any(|change| matches!(change,
+        Change::Insert { parent, block } if *parent == Some(list)
+            && matches!(block.data, BlockData::ListItem { .. }))));
+    assert!(changes.iter().any(|change| matches!(change,
+        Change::Insert { block, .. }
+            if matches!(block.data, BlockData::Paragraph(InlineContent::Plain(span)) if parser.source(span) == "se"))));
+    let confirmed_end = parser.source_text().len() + "cond\n\n".len();
+    changes.clear();
+    parser.append("cond\n\n</det", &mut changes).unwrap();
+    assert!(changes.iter().any(|change| matches!(change,
+        Change::SetStatus { id, status: BlockStatus::Open, end }
+            if *id == outer && *end == confirmed_end)));
 }
 
 #[test]

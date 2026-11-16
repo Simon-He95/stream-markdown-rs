@@ -1,5 +1,7 @@
 // Converts the native delta view to the legacy ParsedNode test contract.
 // This module never tokenizes Markdown or calls the reference parser.
+import { domainToASCII } from 'node:url'
+
 const VOID = new Set('area base br col embed hr img input link meta param source track wbr'.split(' '))
 const HTML_START = /^<([A-Z][\w:.-]*)(\s(?:[^"'<>]|"[^"]*"|'[^']*')*)?\s*\/?>/i
 const HTML_ATTRIBUTE = /([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g
@@ -163,7 +165,28 @@ function legacyLinkText(children) {
 }
 
 function markdownHref(href) {
+  const url = /^((?:https?|ftp):\/\/)([^/?#]*)/iu.exec(href)
+  if (url && /[^\x00-\x7f]/u.test(url[2])) {
+    const [, scheme, authority] = url
+    const hostStart = authority.lastIndexOf('@') + 1
+    const hostAndPort = /^([^:]+)(:\d+)?$/u.exec(authority.slice(hostStart))
+    if (hostAndPort) {
+      const [, hostname, port = ''] = hostAndPort
+      const ascii = domainToASCII(hostname)
+      if (ascii)
+        href = scheme + authority.slice(0, hostStart) + ascii + port + href.slice(url[0].length)
+    }
+  }
   return href.replace(/%(?![0-9a-fA-F]{2})|[^!-~]|[<>"`{}|\\^]/gu, encodeURIComponent)
+}
+
+function pendingLinkDestination(destination) {
+  if (/^(?:https?|ftp):\/\/(?:\[[0-9a-f:.]+\]|[\p{L}\p{N}])/iu.test(destination)
+    || /^(?:mailto|xmpp):[^@\s]+@[^@\s]/iu.test(destination))
+    return destination
+  if (/^www\.[^./?#\s]+\.[^./?#\s]+/iu.test(destination))
+    return 'http://' + destination
+  return ''
 }
 
 function linkNode(href, title, children, markup, raw, attrs) {
@@ -232,6 +255,8 @@ function customInlineNode(data, status, raw, context) {
 
 function sameLineInlineSuffix(inlines, index, context) {
   const line = lineAt(context.lineStarts, inlines[index].span[1])
+  if (inlines.some(node => node.kind === 'code' && lineAt(context.lineStarts, node.span[0]) === line))
+    return false
   for (let i = index + 1; i < inlines.length; i++) {
     const node = inlines[i]
     if (node.kind === 'softbreak' || node.kind === 'hardbreak'
@@ -284,17 +309,32 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false) {
       nodes.push({ type: kind, id: context.read(data.label), raw })
     }
     else if (kind === 'link' || kind === 'image') {
-      const href = markdownHref(readText(data.destination, context))
+      const destination = readText(data.destination, context)
+      const href = markdownHref(destination)
       const title = data.title === null ? null : readText(data.title, context) || null
       const children = projectInlineNodes(data.children, context, kind === 'link' && data.loading)
       const allowed = allowsLink(href, context, kind)
       if (kind === 'link' && data.loading) {
         const text = legacyLinkText(children)
-        const visibleHref = allowed ? href : ''
+        const hasImage = children.some(child => child.type === 'image')
+        const ready = context.markstream && !hasImage ? pendingLinkDestination(destination) : destination
+        const preparedHref = ready === destination ? href : markdownHref(ready)
+        const visibleHref = allowed && (preparedHref === href || !preparedHref || allowsLink(preparedHref, context, kind))
+          ? preparedHref
+          : ''
+        const linkified = Boolean(visibleHref && context.markstream && ready !== destination)
         const visibleChildren = children.map(child => child.type === 'text' ? textNode(child.content, false) : child)
+        const waitingForHref = context.markstream && !hasImage && !ready
         nodes.push({
-          type: kind, href: visibleHref, title: title ?? (children.some(child => child.type === 'image') ? null : ''), text, children: visibleChildren,
-          raw: `[${text}](${visibleHref})`, loading: true, markup: '',
+          type: kind,
+          href: visibleHref,
+          title: title ?? (waitingForHref || linkified || hasImage ? null : ''),
+          text,
+          children: visibleChildren,
+          ...(linkified ? { attrs: [['href', visibleHref]] } : {}),
+          ...(waitingForHref ? {} : { raw: `[${text}](${visibleHref})` }),
+          loading: true,
+          markup: linkified ? 'linkify' : '',
         })
       }
       else if (!allowed) {
@@ -458,7 +498,10 @@ function displayFence(block, context) {
 function projectTableRow(values, alignments, header, context) {
   const cells = values.map((cell, column) => ({
     type: 'table_cell', header, children: projectInlines(cell, context),
-    raw: inlineRaw(cell, '', context), align: alignments[column],
+    raw: inlineRaw(cell, '', context).replace(/(\\+)\|/g, (source, escapes) => (
+      escapes.length % 2 ? `${escapes.slice(1)}|` : source
+    )),
+    align: alignments[column],
   }))
   return { type: 'table_row', cells, raw: cells.map(cell => cell.raw).join('|') }
 }
@@ -602,7 +645,7 @@ function detailNode(block, nodes, raw, map, context) {
     const content = raw.trimEnd()
     return {
       type: 'html_block', tag: 'summary', content, raw: content,
-      ...(attrs.length && { attrs }),
+      attrs: attrs.length ? attrs : undefined,
       loading: open && !context.final, children: projectInlines(data.content, context), ...map,
     }
   }

@@ -141,6 +141,23 @@ pub(super) struct Summary {
 }
 
 impl Engine {
+    #[inline]
+    pub(crate) fn publish_details_progress(&self, previous_end: usize, out: &mut Vec<Change>) {
+        if self.options.markstream {
+            for frame in &self.containers {
+                if let container::Kind::Details { opening_end, .. } = frame.kind
+                    && frame.end > previous_end.max(opening_end)
+                {
+                    out.push(Change::SetStatus {
+                        id: frame.id,
+                        status: BlockStatus::Open,
+                        end: frame.end,
+                    });
+                }
+            }
+        }
+    }
+
     fn details_index(&self) -> Option<usize> {
         self.containers
             .iter()
