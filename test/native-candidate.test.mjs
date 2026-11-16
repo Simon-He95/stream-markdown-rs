@@ -617,6 +617,40 @@ test('native provisional fence uses the existing code block output', () => {
   }
 })
 
+test('literal unmatched multi-backticks keep their text and legacy metadata', () => {
+  const body = ' pauses at unclosed ``` fences and each fence stays atomic.'
+  const legacy = createSession()
+  const standard = createSession({ parseOptions: { markstream: false } })
+  try {
+    for (const session of [legacy, standard]) {
+      session.append('The **streaming code-fence atomicity**' + body)
+      session.finish()
+    }
+    assert.deepEqual(legacy.snapshot()[0].children[2], { type: 'text', content: body, raw: body })
+    assert.deepEqual(standard.snapshot()[0].children[2], {
+      type: 'text', content: body, raw: body, center: false,
+    })
+  }
+  finally {
+    legacy.dispose()
+    standard.dispose()
+  }
+
+  const matched = createSession()
+  try {
+    matched.append('Show ``` the marker ``` here')
+    matched.finish()
+    assert.deepEqual(matched.snapshot()[0].children, [
+      { type: 'text', content: 'Show ', raw: 'Show ', center: false },
+      { type: 'inline_code', code: 'the marker', raw: 'the marker' },
+      { type: 'text', content: ' here', raw: ' here', center: false },
+    ])
+  }
+  finally {
+    matched.dispose()
+  }
+})
+
 test('legacy simple link metadata remains compact only with same-line inline content after it', () => {
   const session = createSession()
   try {

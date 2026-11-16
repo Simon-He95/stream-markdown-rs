@@ -275,7 +275,12 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false) {
     const { kind, span, data } = inlines[index]
     const raw = normalize(context.read(span))
     if (kind === 'text' || kind === 'softbreak') {
-      mergeText(nodes, textNode(kind === 'softbreak' ? '\n' : readText(data, context), kind !== 'softbreak'))
+      const literalCodeMarker = kind === 'text' && context.markstream && raw.includes('``')
+        && (/(?<!\\)(?:\\\\)*(`+)/u.exec(raw)?.[1].length ?? 0) > 1
+      mergeText(nodes, textNode(kind === 'softbreak' ? '\n' : readText(data, context),
+        kind !== 'softbreak' && !literalCodeMarker))
+      if (literalCodeMarker && nodes.at(-1)?.type === 'text')
+        delete nodes.at(-1).center
     }
     else if (kind === 'hardbreak') {
       nodes.push({ type: 'hardbreak', raw: '\\\n' })

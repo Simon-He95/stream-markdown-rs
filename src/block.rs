@@ -1165,32 +1165,35 @@ impl Engine {
         next: usize,
         output: &mut Output<'_>,
     ) -> Result<bool, ParseError> {
-        if self.running.is_some()
-            || !self.containers.is_empty()
-            || !matches!(self.active, None | Some(Active::Paragraph(_)))
-        {
-            return Ok(false);
-        }
-        let probe = if self.tag_probe.as_ref().is_some_and(|probe| probe.buffered) {
-            self.tag_probe.as_mut().unwrap()
-        } else if let Some(probe) = self.registered_tag_probe(source, next) {
-            probe
-        } else {
-            return Ok(false);
-        };
-        let buffered = probe.buffered;
-        let complete = probe
-            .update(source, next)
-            .map(|stop| tag::opening(source, probe.start, stop).is_some());
-        if complete.is_none() && !probe.rejected() {
-            probe.buffered = true;
-            return Ok(true);
-        }
-        self.tag_probe = None;
-        if buffered && complete != Some(true) {
+        loop {
+            if self.running.is_some()
+                || !self.containers.is_empty()
+                || !matches!(self.active, None | Some(Active::Paragraph(_)))
+            {
+                return Ok(false);
+            }
+            let probe = if self.tag_probe.as_ref().is_some_and(|probe| probe.buffered) {
+                self.tag_probe.as_mut().unwrap()
+            } else if let Some(probe) = self.registered_tag_probe(source, next) {
+                probe
+            } else {
+                return Ok(false);
+            };
+            let buffered = probe.buffered;
+            let complete = probe
+                .update(source, next)
+                .map(|stop| tag::opening(source, probe.start, stop).is_some());
+            if complete.is_none() && !probe.rejected() {
+                probe.buffered = true;
+                return Ok(true);
+            }
+            self.tag_probe = None;
+            if !buffered || complete == Some(true) {
+                return Ok(false);
+            }
+            // The rejecting line can be the start of another registered opener.
             self.replay_buffered_tag_lines(source, end, output)?;
         }
-        Ok(false)
     }
 
     fn resume_buffered_tag(

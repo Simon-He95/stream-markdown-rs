@@ -487,6 +487,47 @@ fn rejected_or_incomplete_multiline_openers_replay_the_buffer_once() {
 }
 
 #[test]
+fn rejected_multiline_opener_does_not_consume_the_next_registered_start() {
+    let options = Options {
+        custom_tags: vec!["tool-call".into()],
+        ..Options::default()
+    };
+    let source =
+        "<tool-call malformed==\n<tool-call\r\n  name=\"lookup\">内容</tool-call>\n\n# Next";
+    let expected = parse(source, &options).unwrap().nodes;
+    assert_eq!(expected.len(), 3);
+    let BlockData::CustomTag(element) = &expected[1].data else {
+        panic!("expected the second opener to start a typed block: {expected:?}");
+    };
+    assert_eq!(
+        element.tag.attrs(source).next().unwrap().value,
+        Some("lookup")
+    );
+
+    for split in source
+        .char_indices()
+        .map(|(offset, _)| offset)
+        .chain([source.len()])
+    {
+        let mut parser = Parser::new(options.clone());
+        let mut changes = Vec::new();
+        let mut view = View::default();
+        for chunk in [&source[..split], &source[split..]] {
+            parser.append(chunk, &mut changes).unwrap();
+            view.apply(&mut changes);
+        }
+        parser.finish(&mut changes).unwrap();
+        view.apply(&mut changes);
+        assert_eq!(
+            view.blocks.into_values().collect::<Vec<_>>(),
+            expected,
+            "split {split}"
+        );
+        assert!(parser.metrics().scanned_bytes <= 2 * source.len());
+    }
+}
+
+#[test]
 fn streaming_fence_does_not_publish_a_partial_indented_closer() {
     let mut parser = Parser::new(Options::default());
     let mut changes = Vec::new();
