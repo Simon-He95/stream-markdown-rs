@@ -172,6 +172,30 @@ test('native candidate exposes complete attributes from a multiline registered o
   }
 })
 
+test('legacy ordered lists leave the default start implicit in nodes and details HTML', () => {
+  const legacy = createSession()
+  const standard = createSession({ parseOptions: { markstream: false } })
+  try {
+    const source = '01. first\n\n---\n\n3. third\n\n'
+    for (const session of [legacy, standard])
+      session.append(source)
+    assert.equal(legacy.snapshot()[0].start, undefined)
+    assert.equal(standard.snapshot()[0].start, 1)
+    legacy.append('<details>\n<summary>List</summary>\n\n1. inside\n\n</details>')
+    legacy.finish()
+    const [first, , third, details] = legacy.snapshot()
+    assert.ok(Object.hasOwn(first, 'start'))
+    assert.equal(first.start, undefined)
+    assert.equal(third.start, 3)
+    assert.equal(details.children[1].start, undefined)
+    assert.match(details.content, /<ol>\n<li>inside<\/li>/)
+  }
+  finally {
+    legacy.dispose()
+    standard.dispose()
+  }
+})
+
 test('native candidate addresses a backpatched table cell by its flat wire index', () => {
   const session = createSession()
   try {
@@ -814,6 +838,33 @@ test('literal unmatched multi-backticks keep their text and legacy metadata', ()
   }
   finally {
     matched.dispose()
+  }
+})
+
+test('legacy unmatched multi-backticks fold later code while retaining the paragraph source', () => {
+  const legacy = createSession()
+  const standard = createSession({ parseOptions: { markstream: false } })
+  const source = '``prefix &amp; ` one `\nnext ```two``` tail'
+  const expected = [{
+    type: 'text', content: '``prefix & one`next two``` tail', raw: '``prefix & one`next two``` tail',
+  }]
+  try {
+    for (const session of [legacy, standard]) {
+      session.append('``prefix &amp; ` one `\n')
+      session.append('next ```two``` tail')
+    }
+    assert.deepEqual(legacy.snapshot()[0].children, expected)
+    legacy.finish()
+    standard.finish()
+    assert.deepEqual(legacy.snapshot()[0], { type: 'paragraph', raw: source, children: expected })
+    assert.deepEqual(
+      standard.snapshot()[0].children.filter(node => node.type === 'inline_code').map(node => node.code),
+      ['one', 'two'],
+    )
+  }
+  finally {
+    legacy.dispose()
+    standard.dispose()
   }
 })
 

@@ -303,6 +303,35 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false) {
       }
       const literalCodeMarker = kind === 'text' && context.markstream && raw.includes('``')
         && (/(?<!\\)(?:\\\\)*(`+)/u.exec(raw)?.[1].length ?? 0) > 1
+      if (literalCodeMarker && index + 1 < inlines.length) {
+        let content = readText(data, context)
+        let hasCode = false
+        let next = index + 1
+        for (; next < inlines.length; next++) {
+          const tail = inlines[next]
+          if (tail.kind === 'softbreak')
+            continue
+          if (tail.kind === 'text') {
+            content += readText(tail.data, context)
+          }
+          else if (tail.kind === 'code') {
+            const delimiter = /^`+/u.exec(context.read(tail.span))?.[0]
+            if (!delimiter)
+              break
+            // The legacy fallback keeps the code text and one copy of its delimiter.
+            hasCode = true
+            content += readText(tail.data, context) + delimiter
+          }
+          else {
+            break
+          }
+        }
+        if (hasCode && next === inlines.length) {
+          mergeText(nodes, textNode(content, false))
+          delete nodes.at(-1).center
+          break
+        }
+      }
       const literalAsterisk = kind === 'text' && context.markstream && context.final
         && raw.includes('*') && /[^*]/u.test(raw) && /(?<!\\)(?:\\\\)*\*/u.test(raw)
       mergeText(nodes, textNode(kind === 'softbreak' ? '\n' : readText(data, context),
@@ -713,7 +742,7 @@ function renderDetailChild(node, inlineParagraph = false) {
       return '<blockquote>\n' + children() + '</blockquote>\n'
     case 'list': {
       const tag = node.ordered ? 'ol' : 'ul'
-      const start = node.ordered && node.start !== 1 ? ' start="' + node.start + '"' : ''
+      const start = node.ordered && node.start !== undefined && node.start !== 1 ? ' start="' + node.start + '"' : ''
       const items = node.items.map(item => '<li>' + item.children.map(child => (
         renderDetailChild(child, item.children.length === 1)
       )).join('') + '</li>\n').join('')
@@ -861,7 +890,8 @@ function projectBlock(block, nodes, context) {
     }
     case 'list': {
       const items = projectChildren(nodes, block.children, context)
-      return { type: kind, ordered: data.ordered, start: data.ordered ? data.start : undefined, items, raw: items.map(item => item.raw).join('\n'), ...map }
+      const start = data.ordered && (!context.markstream || data.start !== 1) ? data.start : undefined
+      return { type: kind, ordered: data.ordered, start, items, raw: items.map(item => item.raw).join('\n'), ...map }
     }
     case 'list_item':
     case 'blockquote': {
