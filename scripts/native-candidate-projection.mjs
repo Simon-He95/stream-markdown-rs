@@ -313,8 +313,13 @@ function endsInSingleBacktick(text) {
 function projectInlines(content, context) {
   if (content.plain || content.fragments) {
     const text = inlineRaw(content, '', context)
-    if (context.markstream && !context.final && content.plain && endsInSingleBacktick(text)) {
-      return [textNode(text.slice(0, -1), false), { type: 'inline_code', code: '', raw: '' }]
+    if (context.markstream && !context.final && content.plain) {
+      if (text === '`')
+        return []
+      if (text === '``')
+        return [textNode(text, false)]
+      if (endsInSingleBacktick(text))
+        return [textNode(text.slice(0, -1), false), { type: 'inline_code', code: '', raw: '' }]
     }
     const nodes = []
     if (text && !(context.markstream && context.final && content.plain
@@ -398,6 +403,40 @@ function recoverAdjacentBracketLabel(inlines, index, nodes, label, context) {
   // This legacy recovery starts after the second opening bracket in the plain-text run.
   nodes[nodes.length - 1] = textNode(adjacent[1], false)
   return adjacent[2] + '[' + label
+}
+
+function projectCodeAdjacentDraftLink(inlines, index, nodes, children, href, context) {
+  const { span, data } = inlines[index]
+  if (children.length !== 1 || data.children.length !== 1 || data.title !== null
+    || !Array.isArray(data.destination) || data.destination[1] !== span[1] || !/^https?:\/\//iu.test(href))
+    return false
+  const label = data.children[0]
+  if (label.span[0] !== span[0] + 1 || context.read([span[0], label.span[0]]) !== '['
+    || context.read([label.span[1], data.destination[0]]) !== '](')
+    return false
+  const previous = inlines[index - 1]
+  const precedingText = nodes.at(-1)
+  const codeLabel = label.kind === 'code' && context.read([label.span[0], label.span[0] + 1]) === '`'
+    && previous?.kind === 'text' && previous.span[1] === span[0]
+    && precedingText?.type === 'text' && precedingText.raw === precedingText.content
+  const line = lineAt(context.lineStarts, span[0])
+  const afterCode = label.kind === 'text' && context.read(label.span) === children[0].content
+    && inlines.some((node, at) => at < index && node.kind === 'code'
+      && context.read([node.span[0], node.span[0] + 1]) === '`'
+      && lineAt(context.lineStarts, node.span[0]) === line)
+  if (!codeLabel && !afterCode)
+    return false
+  const [match] = legacyLinkify.match(href) ?? []
+  if (match?.index !== 0 || match.lastIndex !== href.length)
+    return false
+  if (codeLabel) {
+    mergeText(nodes, textNode('['))
+    nodes.push(children[0], textNode(']('))
+  }
+  const link = linkNode(href, null, [textNode(codeLabel ? href : children[0].content, codeLabel)], 'linkify')
+  link.loading = true
+  nodes.push(link)
+  return true
 }
 
 function projectInlineNodes(inlines, context, insideLoadingLink = false, insideLinkLabel = false) {
@@ -538,6 +577,9 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false, insideL
         const visibleHref = allowed && (preparedHref === href || !preparedHref || allowsLink(preparedHref, context, kind))
           ? preparedHref
           : ''
+        if (context.markstream && !context.final && visibleHref && visibleHref === destination
+          && projectCodeAdjacentDraftLink(inlines, index, nodes, children, visibleHref, context))
+          continue
         const linkified = Boolean(visibleHref && context.markstream && ready !== destination)
         let visibleChildren = children.map(child => child.type === 'text' ? textNode(child.content, false) : child)
         const waitingForHref = context.markstream && !hasImage && !ready

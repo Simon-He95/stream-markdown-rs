@@ -1428,6 +1428,55 @@ test('a draft Markdown link waiting for its href preserves the legacy preceding 
   }
 })
 
+test('legacy draft URLs preserve the evidenced code label and same-line code contexts', () => {
+  const href = 'https://example.org/docs'
+  const source = 'See [`code`](' + href
+  const codeLabel = createSession()
+  const earlierCode = createSession()
+  const denied = createSession({ parseOptions: { validateLink: () => false } })
+  const anotherLine = createSession()
+  try {
+    codeLabel.append(source)
+    assert.equal(codeLabel.snapshot()[0].raw, source)
+    assert.deepEqual(codeLabel.snapshot()[0].children, [
+      { type: 'text', content: 'See [', raw: 'See [', center: false },
+      { type: 'inline_code', code: 'code', raw: 'code' },
+      { type: 'text', content: '](', raw: '](', center: false },
+      {
+        type: 'link', href, title: null, text: href, loading: true,
+        children: [{ type: 'text', content: href, raw: href, center: false }],
+        raw: `[${href}](${href})`, attrs: [['href', href]], markup: 'linkify',
+      },
+    ])
+    earlierCode.append('See `earlier` and [docs](' + href)
+    assert.deepEqual(earlierCode.snapshot()[0].children.at(-1), {
+      type: 'link', href, title: null, text: 'docs', loading: true,
+      children: [{ type: 'text', content: 'docs', raw: 'docs' }],
+      raw: `[docs](${href})`, attrs: [['href', href]], markup: 'linkify',
+    })
+
+    for (const session of [codeLabel, earlierCode]) {
+      session.append(')')
+      const link = session.snapshot()[0].children.at(-1)
+      assert.equal(link.loading, false)
+      assert.equal(link.markup, '')
+    }
+    assert.equal(codeLabel.snapshot()[0].children.at(-1).children[0].code, 'code')
+
+    denied.append(source)
+    assert.equal(denied.snapshot()[0].children.at(-1).href, '')
+    assert.equal(denied.snapshot()[0].children.at(-1).markup, '')
+    anotherLine.append('See `earlier`\nand [docs](' + href)
+    assert.equal(anotherLine.snapshot()[0].children.at(-1).markup, '')
+  }
+  finally {
+    codeLabel.dispose()
+    earlierCode.dispose()
+    denied.dispose()
+    anotherLine.dispose()
+  }
+})
+
 test('legacy preview keeps adjacent-bracket recovery within unresolved link text', () => {
   const options = { parseOptions: { validateLink: href => !/^\s*javascript:/i.test(href) } }
   const session = createSession(options)
