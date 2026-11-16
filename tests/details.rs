@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use stream_markdown_rs::{
     BlockData, BlockStatus, Change, InlineContent, InlineKind, Options, Parser, Preview, parse,
 };
@@ -6,6 +7,93 @@ fn options() -> Options {
     Options {
         markstream: true,
         ..Options::default()
+    }
+}
+
+fn check_details_suffix_packets(source: &str, options: &Options) {
+    let expected = parse(source, options).unwrap();
+    for split in source
+        .char_indices()
+        .map(|(index, _)| index)
+        .chain([source.len()])
+    {
+        let mut parser = Parser::new(options.clone());
+        let mut changes = Vec::new();
+        parser.append(&source[..split], &mut changes).unwrap();
+        parser.append(&source[split..], &mut changes).unwrap();
+        parser.finish(&mut changes).unwrap();
+        let mut blocks = BTreeMap::new();
+        for change in changes {
+            match change {
+                Change::Insert { block, parent } => {
+                    assert!(blocks.insert(block.id, (block, parent)).is_none());
+                }
+                Change::Replace(block) => {
+                    let id = block.id;
+                    blocks.get_mut(&id).unwrap().0 = block;
+                }
+                Change::Remove { id } => {
+                    assert!(blocks.remove(&id).is_some());
+                }
+                Change::SetStatus { id, status, end } => {
+                    let block = &mut blocks.get_mut(&id).unwrap().0;
+                    block.status = status;
+                    block.span.end = end;
+                }
+                _ => {}
+            }
+        }
+        let expected_nodes = expected
+            .nodes
+            .iter()
+            .map(|block| (block.clone(), expected.parent(block.id)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            blocks.into_values().collect::<Vec<_>>(),
+            expected_nodes,
+            "split {split}: {source:?}"
+        );
+    }
+}
+
+#[test]
+fn details_root_suffix_does_not_restart_container_recognition() {
+    for preview in [Preview::Off, Preview::Ai] {
+        let options = Options {
+            preview,
+            ..options()
+        };
+        for source in [
+            "<details>\r\n> 注記\r\n\r\n</details>- [x] tail\r\n",
+            "<details>\ntext\n</details>  2.\titem\n",
+            "<details>\ntext\n</details>> [!NOTE]\n",
+            "<details>\ntext\n</details> \t\r\nnext",
+            "<details>\ntext\n</details>  ",
+            "<details>\ntext\n</details>   - item",
+            "<details>\n\n> 警告 `draft</details>\r\nnext",
+        ] {
+            check_details_suffix_packets(source, &options);
+        }
+    }
+}
+
+#[test]
+fn details_nested_suffix_keeps_native_ancestry_and_reference_ranges() {
+    for preview in [Preview::Off, Preview::Ai] {
+        let options = Options {
+            preview,
+            custom_tags: vec!["tool-call".into()],
+            ..options()
+        };
+        for source in [
+            "<details>\n<details>\r\n> 中文\r\n\r\n</details>[x]: /one\r\n",
+            "<details>\n<details>\nbody\n</details></details>\r\n",
+            "<details>\n<details>\nbody\n</details>  - tail\n</details>\n",
+            "<details>\ntext\n</details><tool-call>内容</tool-call>\r\n",
+            "<details>\ntext\n</details><tool-call\n title=\"a\">body</tool-call>\n",
+        ] {
+            check_details_suffix_packets(source, &options);
+        }
     }
 }
 

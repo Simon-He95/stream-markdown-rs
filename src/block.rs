@@ -682,6 +682,7 @@ impl Engine {
                 end + 1 + usize::from(bytes[end] == b'\r' && bytes.get(end + 1) == Some(&b'\n'));
             self.metrics.scanned_bytes += next - end;
             if !self.options.custom_tags.is_empty()
+                && !self.html_progress.has_tail()
                 && self.buffer_registered_tag_line(source, end, next, &mut output)?
             {
                 self.scan = next;
@@ -699,7 +700,7 @@ impl Engine {
                 let raw = &source[line.start..line.end];
                 self.fence_line(line, raw, unindent(raw), fence, &mut output);
             } else {
-                self.container_line(source, line, &mut output)?;
+                self.source_line(source, line, &mut output)?;
             }
             self.line_start = next;
             self.scan = next;
@@ -722,7 +723,7 @@ impl Engine {
             }
             if self.line_start != source.len() {
                 let end = source.len();
-                self.container_line(source, Line::new(self.line_start, end, end), &mut output)?;
+                self.source_line(source, Line::new(self.line_start, end, end), &mut output)?;
                 self.line_start = end;
             }
             if let Some(running) = self.running.take() {
@@ -734,6 +735,14 @@ impl Engine {
             self.close_containers(0, &mut output);
             self.clear_preview(&mut output);
         } else {
+            match self.html_progress {
+                details::HtmlProgress::Tail(_) => {
+                    self.partial_details(source, &mut output)?;
+                    return Ok(());
+                }
+                details::HtmlProgress::ClosingLine(_) => return Ok(()),
+                details::HtmlProgress::Scanning(_) => {}
+            }
             if self.options.markstream
                 && self.options.preview == Preview::Ai
                 && self.preview_reference(source, &mut output)
@@ -771,7 +780,8 @@ impl Engine {
             }
             if self.options.markstream
                 && (self.partial_vmr(source, &mut output)?
-                    || self.partial_details(source, &mut output)?)
+                    || self.partial_details(source, &mut output)?
+                    || !matches!(self.html_progress, details::HtmlProgress::Scanning(_)))
             {
                 return Ok(());
             }
@@ -2019,6 +2029,20 @@ impl Engine {
 
     fn parent(&self) -> Option<BlockId> {
         self.containers.last().map(|frame| frame.id)
+    }
+
+    fn source_line(
+        &mut self,
+        source: &str,
+        line: Line,
+        output: &mut Output<'_>,
+    ) -> Result<(), ParseError> {
+        if self.html_progress.has_tail() {
+            self.html_progress = details::HtmlProgress::Scanning(line.next);
+            self.line(source, line, output)
+        } else {
+            self.container_line(source, line, output)
+        }
     }
 
     fn container_line(

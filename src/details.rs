@@ -60,6 +60,14 @@ enum EndTag {
 pub(super) enum HtmlProgress {
     Scanning(usize),
     ClosingLine(BlockId),
+    // The closing tag ended, and the physical line still has content.
+    Tail(usize),
+}
+
+impl HtmlProgress {
+    pub(super) fn has_tail(&self) -> bool {
+        matches!(self, Self::Tail(_))
+    }
 }
 
 fn match_end(source: &str, start: usize, end: usize, name: Name) -> EndTag {
@@ -218,7 +226,11 @@ impl Engine {
         } else {
             super::line_break(bytes, at, bytes.len())
         };
-        self.html_progress = HtmlProgress::Scanning(self.line_start);
+        self.html_progress = if end.is_some() {
+            HtmlProgress::Scanning(self.line_start)
+        } else {
+            HtmlProgress::Tail(self.line_start)
+        };
         if let Some(end) = end
             && end > self.line_start
         {
@@ -390,14 +402,15 @@ impl Engine {
             *closed = true;
         }
         frame.end = end;
-        if !self.finalizing
-            && line.next == line.end
-            && close_end <= self.scan
-            && source.as_bytes()[close_end..self.scan]
+        if !self.finalizing && line.next == line.end && close_end <= self.scan {
+            self.html_progress = if source.as_bytes()[close_end..self.scan]
                 .iter()
                 .all(|&byte| matches!(byte, b' ' | b'\t'))
-        {
-            self.html_progress = HtmlProgress::ClosingLine(frame.id);
+            {
+                HtmlProgress::ClosingLine(frame.id)
+            } else {
+                HtmlProgress::Tail(close_end)
+            };
         }
         self.close_containers(index, output);
         self.extend_containers(end);
@@ -627,8 +640,9 @@ impl Engine {
         }
 
         while self.line_start < self.scan {
-            let HtmlProgress::Scanning(checked) = self.html_progress else {
-                return Ok(false);
+            let checked = match self.html_progress {
+                HtmlProgress::Scanning(checked) | HtmlProgress::Tail(checked) => checked,
+                HtmlProgress::ClosingLine(_) => return Ok(false),
             };
             let line = Line::new(self.line_start, self.scan, self.scan);
             if matches!(self.active, Some(Active::Summary(_))) {
@@ -693,10 +707,25 @@ impl Engine {
             } else if let Some((_, tag)) = self.html_container() {
                 let from = checked.max(line.start).min(line.end);
                 let (through, close) = find_end(source, from, line.end, &[tag]);
-                self.html_progress = HtmlProgress::Scanning(through);
+                self.html_progress = if self.html_progress.has_tail() {
+                    HtmlProgress::Tail(through)
+                } else {
+                    HtmlProgress::Scanning(through)
+                };
                 let Some((_, close)) = close else {
                     return Ok(false);
                 };
+                // Let the physical line consume any container prefix before this closer.
+                if !self.html_progress.has_tail()
+                    && container::opening_at(
+                        &source[line.start..close.start],
+                        line.column,
+                        line.padding,
+                    )
+                    .is_some()
+                {
+                    return Ok(false);
+                }
                 self.line(
                     source,
                     Line::new(self.line_start, close.end, close.end),
