@@ -138,6 +138,28 @@ def fingerprint(path):
         return {"path": str(path), "sha256": hashlib.file_digest(binary, "sha256").hexdigest()}
 
 
+def progress_details(row):
+    if "error" in row:
+        return row["error"]
+    if "gate_reference" not in row:
+        return "semantic verification failed"
+    reference = row["gate_reference"].replace("-", "_")
+    timing = row[f"{reference}_over_candidate_timing"]
+    memory = row[f"{reference}_over_candidate_memory"]
+    fields = [
+        ("total", timing["median_ns"]),
+        ("first-append", timing.get("first_append_median_ns")),
+        ("first-output", timing.get("first_output_median_ns")),
+        ("append-p95", timing.get("append_p95_median_ns")),
+        ("peak", memory["peak_live_bytes_delta"]),
+    ]
+    details = [f"{name}={ratio:.2f}x" for name, ratio in fields if ratio is not None]
+    failures = row["timing_failures"] + row["memory_failures"]
+    if failures:
+        details.append(f"below threshold: {', '.join(failures)}")
+    return " ".join(details)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--timing-binary", type=Path, required=True)
@@ -172,7 +194,8 @@ def main():
                 status = "MEASURED" if row["ok"] else "FAIL"
                 if row["ok"] and (args.min_speedup is not None or args.min_memory_ratio is not None):
                     status = "PASS"
-                print(f"{status} {corpus}/{size}/{mode}", file=sys.stderr, flush=True)
+                print(f"{status} {corpus}/{size}/{mode} {progress_details(row)}",
+                      file=sys.stderr, flush=True)
     report = {
         "revision": args.revision,
         "environment": environment,
