@@ -532,3 +532,39 @@ fn inline_nodes(trace: &mut Trace, source: &str, nodes: &[Inline]) -> Result<(),
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::corpus;
+
+    #[test]
+    fn fixed_chunk_streams_scan_source_once_as_workloads_grow() {
+        for case in [
+            "plain",
+            "long-paragraph",
+            "open-fence",
+            "table",
+            "list",
+            "late-reference",
+        ] {
+            for size in [4096, 8192, 16384] {
+                let source = corpus::source(case, size).unwrap();
+                let ends = corpus::chunk_ends(&source, 64);
+                let mut session = Candidate::start();
+                consume_stream::<Candidate>(&mut session, &source, &ends, Candidate::append)
+                    .unwrap();
+                Candidate::finish(&mut session).unwrap();
+
+                let metrics = session.parser.metrics();
+                assert_eq!(metrics.input_bytes, source.len(), "{case}/{size}");
+                assert_eq!(metrics.scanned_bytes, source.len(), "{case}/{size}");
+                assert_eq!(
+                    metrics.invalidated_blocks,
+                    usize::from(case == "late-reference"),
+                    "{case}/{size}"
+                );
+            }
+        }
+    }
+}
