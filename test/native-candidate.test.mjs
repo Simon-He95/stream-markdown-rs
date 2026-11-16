@@ -578,6 +578,49 @@ test('native candidate projects typed details and summary hierarchy separately f
   }
 })
 
+test('finished details render legacy fence controls from the structured child order', () => {
+  const session = createSession({ id: 'sample / doc' })
+  try {
+    session.append('<details>\n<summary>Example</summary>\n\nA `\'quoted\'` value.\n\n')
+    session.append('> quoted\n\n- one\n- two\n\n```ts extra\nconst value = "中文"\n```\n\n')
+    session.append('```\nsecond\n```\n\n</details>\n')
+    const preview = session.snapshot()[0].content
+    assert.match(preview, /data-lang="ts" id="editor-sample-doc-21-ts"/u)
+    session.finish()
+    const [details] = session.snapshot()
+    assert.equal(details.content, preview)
+    assert.match(details.content, /<code>'quoted'<\/code>/u)
+    assert.match(details.content, /data-lang="ts" id="editor-sample-doc-21-ts"/u)
+    assert.match(details.content, /data-lang="text" id="editor-sample-doc-22-text"/u)
+    const data = details.content.match(/data-code="([^"]+)"/u)[1]
+    assert.equal(Buffer.from(data, 'base64').toString(), 'const value = "中文"\n')
+    assert.match(details.content, /class="copy-button"/u)
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('open root details keep the current fenced line in legacy raw and editor output', () => {
+  const session = createSession({ id: 'draft' })
+  try {
+    const prefix = '<details>\n<summary>Example</summary>\n\n```ts\n'
+    session.append(prefix)
+    session.append('let 名称 = 1')
+    const [draft] = session.snapshot()
+    assert.equal(draft.raw, prefix + 'let 名称 = 1')
+    assert.equal(draft.children.at(-1).code, 'let 名称 = 1')
+    assert.match(draft.content, /id="editor-draft-1-ts"/u)
+    const data = draft.content.match(/data-code="([^"]+)"/u)[1]
+    assert.equal(Buffer.from(data, 'base64').toString(), 'let 名称 = 1')
+    session.append('\n```\n\n</details>\n')
+    assert.equal(session.snapshot()[0].loading, false)
+  }
+  finally {
+    session.dispose()
+  }
+})
+
 test('open HTML wrapper includes the current child source and keeps a held summary closer in raw', () => {
   const session = createSession()
   const opening = '<div class="same">\nBETA\n\n<details>\n<summary>S'

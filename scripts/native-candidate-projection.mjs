@@ -1,6 +1,7 @@
 // Converts the native delta view to the legacy ParsedNode test contract.
 // This module never tokenizes Markdown or calls the reference parser.
 import { domainToASCII } from 'node:url'
+import { Buffer } from 'node:buffer'
 import { LinkifyIt } from 'linkify-it'
 
 const VOID = new Set('area base br col embed hr img input link meta param source track wbr'.split(' '))
@@ -782,13 +783,13 @@ function codeBlock(info, raw, loading) {
   return { type: 'code_block', language, code: updatedCode, raw, diff: true, loading, originalCode, updatedCode }
 }
 
-function displayFence(block, context) {
+function displayFence(block, context, followsPhysicalLines) {
   const { span, data } = block
   const info = data.info === null ? '' : context.read(data.info)
   let content = data.lines ? rawLines(data.lines, context) : readText(data.body, context)
   let loading = block.status === 'open' && !context.final
   let sourceSpan = span
-  if (context.markstream && loading && block.parent === null && span[1] < context.length) {
+  if (context.markstream && loading && followsPhysicalLines && span[1] < context.length) {
     const lineEnd = context.lineStarts[lineAt(context.lineStarts, span[0]) + 1] ?? span[1]
     const opening = /^( {0,3})(`{3,}|~{3,})/.exec(context.read([span[0], lineEnd]))
     const tail = context.read([span[1], context.length])
@@ -914,8 +915,8 @@ function vmrNode(block, nodes, context) {
   }
 }
 
-function escapeHtml(value) {
-  return value.replace(/[&<>"']/g, char => ({
+function escapeHtml(value, apostrophes = true) {
+  return value.replace(apostrophes ? /[&<>"']/g : /[&<>"]/g, char => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   })[char])
 }
@@ -924,9 +925,9 @@ function renderDetailChild(node, inlineParagraph = false) {
   const children = () => (node.children ?? []).map(child => renderDetailChild(child)).join('')
   switch (node.type) {
     case 'text':
-      return escapeHtml(node.content)
+      return escapeHtml(node.content, false)
     case 'inline_code':
-      return '<code>' + escapeHtml(node.code) + '</code>'
+      return '<code>' + escapeHtml(node.code, false) + '</code>'
     case 'strong':
       return '<strong>' + children() + '</strong>'
     case 'emphasis':
@@ -963,6 +964,59 @@ function renderDetailChild(node, inlineParagraph = false) {
   }
 }
 
+function detailTokenWidth(node) {
+  if (node.type === 'paragraph' || node.type === 'heading')
+    return 3
+  if (node.type === 'code_block' || (node.type === 'html_block' && node.tag === 'summary' && !node.raw?.includes('\n')))
+    return 1
+  if (node.type === 'blockquote' || node.type === 'list' || node.type === 'list_item') {
+    let width = 2
+    for (const child of node.items ?? node.children) {
+      const childWidth = detailTokenWidth(child)
+      if (childWidth === undefined)
+        return
+      width += childWidth
+    }
+    return width
+  }
+}
+
+function detailTokenWidths(block, children, nodes, raw, context) {
+  if (context.detailMessageId === undefined || !context.markstream
+    || block.status === 'incomplete' || children.length !== block.children.length || raw.includes(']:'))
+    return
+  let end = block.data.opening[1]
+  const widths = []
+  for (const [index, child] of children.entries()) {
+    const [start, stop] = nodes.get(block.children[index]).span
+    if (start < end || !/^[ \t\r\n]*$/u.test(context.read([end, start])))
+      return
+    const width = detailTokenWidth(child)
+    if (width === undefined)
+      return
+    widths.push(width)
+    end = stop
+  }
+  if (block.status === 'closed'
+    && !/^[ \t\r\n]*<\/details[ \t]*>[ \t\r\n]*$/iu.test(context.read([end, block.span[1]])))
+    return
+  return widths
+}
+
+function renderDetailFence(raw, info, messageId, index) {
+  const first = info.trim().split(/\s+/, 1)[0] || 'text'
+  const lang = first.replace(/[^\w+.#:-]/gu, '-').replace(/-+/gu, '-')
+  const id = `editor-${messageId}-${index}-${lang}`.replace(/[^\w:.+-]/gu, '-').replace(/-+/gu, '-')
+  const code = Buffer.from(raw).toString('base64')
+  return `<div class="code-block" data-code="${code}" data-lang="${lang}" id="${id}">
+      <div class="code-header">
+        <span class="code-lang">${lang.toUpperCase()}</span>
+        <button class="copy-button" data-code="${code}">Copy</button>
+      </div>
+      <div class="code-editor"></div>
+    </div>`
+}
+
 function detailNode(block, nodes, raw, map, context) {
   const { status, data } = block
   const open = status === 'open'
@@ -991,8 +1045,10 @@ function detailNode(block, nodes, raw, map, context) {
   const openerLine = lineAt(context.lineStarts, data.opening[0])
   const openerLineEnd = context.lineStarts[openerLine + 1]
   const last = nodes.get(block.children.at(-1))
-  if (context.markstream && open && last?.kind === 'summary') {
-    const end = last.status === 'open' ? context.length : last.span[1]
+  if (context.markstream && open && last) {
+    const followsPhysicalLines = block.parent === null && last.kind === 'code_block'
+    const tailIsOpen = last.status === 'open' && (last.kind === 'summary' || followsPhysicalLines)
+    const end = tailIsOpen ? context.length : last.span[1]
     if (end > block.span[1]) {
       const surfaceSpan = [block.span[0], end]
       raw = normalize(context.read(surfaceSpan))
@@ -1005,10 +1061,19 @@ function detailNode(block, nodes, raw, map, context) {
     raw = normalize(context.read(surfaceSpan))
     map = sourceMap(surfaceSpan, context)
   }
-  const body = children.map((child, index) => renderDetailChild(
-    child,
-    openerLine === lineAt(context.lineStarts, nodes.get(block.children[index]).span[0]),
-  )).join('')
+  const widths = detailTokenWidths(block, children, nodes, raw, context)
+  let token = 0
+  const body = children.map((child, index) => {
+    const blockChild = nodes.get(block.children[index])
+    const ordinal = token
+    if (widths)
+      token += widths[index]
+    if (widths && blockChild.kind === 'code_block') {
+      const info = blockChild.data.info === null ? '' : context.read(blockChild.data.info)
+      return renderDetailFence(child.raw, info, context.detailMessageId, ordinal)
+    }
+    return renderDetailChild(child, openerLine === lineAt(context.lineStarts, blockChild.span[0]))
+  }).join('')
   const closing = status === 'closed' ? raw.match(/<\/details[ \t]*>[ \t]*\n?$/i)?.[0] : null
   return {
     type: 'html_block', tag: 'details', attrs, children, raw,
@@ -1091,8 +1156,10 @@ function projectBlock(block, nodes, context) {
       const raw = inlineRaw(data.content, '', context, span[1])
       return { type: kind, level: data.level, text: raw, children: projectInlines(block.previewInlines ?? data.content, context), raw, ...map }
     }
-    case 'code_block':
-      return displayFence(block, context)
+    case 'code_block': {
+      const parent = nodes.get(block.parent)
+      return displayFence(block, context, block.parent === null || (parent?.kind === 'details' && parent.parent === null))
+    }
     case 'indented_code': {
       const content = rawLines(data.lines, context)
       const text = content.trim()

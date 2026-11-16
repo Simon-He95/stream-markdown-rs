@@ -48,7 +48,7 @@ function request(op, session, data) {
   return reply.value
 }
 
-export function createSession({ factoryOptions, parseOptions = {} } = {}) {
+export function createSession({ id, factoryOptions, parseOptions = {} } = {}) {
   const session = ++nextSession
   const customTags = parseOptions.customHtmlTags ?? factoryOptions?.customHtmlTags ?? []
   const math = (parseOptions.enableMath ?? factoryOptions?.enableMath) !== false
@@ -56,6 +56,9 @@ export function createSession({ factoryOptions, parseOptions = {} } = {}) {
   const factoryValidateLink = factoryOptions?.markdownItOptions?.validateLink
   const validateLink = parseOptions.validateLink ?? factoryValidateLink
   const markstream = parseOptions.markstream ?? factoryOptions?.markstream ?? true
+  const detailMessageId = typeof id === 'string' && !factoryOptions?.i18n
+    && !factoryOptions?.plugin?.length && !factoryOptions?.apply?.length
+    && !parseOptions.preTransformTokens && !parseOptions.postTransformTokens ? id : undefined
   const fixIndentedCodeBlock = parseOptions.enableFixIndentedCodeBlock ?? factoryOptions?.enableFixIndentedCodeBlock ?? true
   request('create', session, { customTags, math, footnotes, markstream, requireClosingStrong: parseOptions.requireClosingStrong })
   const nodes = new Map()
@@ -132,6 +135,7 @@ export function createSession({ factoryOptions, parseOptions = {} } = {}) {
           length,
           final,
           markstream,
+          detailMessageId,
           fixIndentedCodeBlock,
           customTags,
           parseOptions,
