@@ -160,8 +160,12 @@ test('native candidate exposes complete attributes from a multiline registered o
     assert.equal(session.snapshot()[0].loading, true)
     session.append('</tool-call>')
     session.finish()
-    assert.equal(session.snapshot()[0].content, 'payload')
-    assert.equal(session.snapshot()[0].loading, false)
+    const [paragraph] = session.snapshot()
+    assert.equal(paragraph.type, 'paragraph')
+    const [tag] = paragraph.children
+    assert.deepEqual(tag.attrs, [['name', 'search'], ['title', '甲 >\n乙']])
+    assert.equal(tag.content, 'payload')
+    assert.equal(tag.loading, false)
   }
   finally {
     session.dispose()
@@ -931,6 +935,31 @@ test('link projection normalizes Unicode hostnames without changing userinfo, po
     const href = 'https://user:pass@xn--fsqu00a.xn--0zwm56d:8443/%E8%B7%AF%E5%BE%84?x=1'
     assert.equal(session.snapshot()[0].children[0].href, href)
     assert.ok(checked.has(href))
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('an explicit draft link keeps the title that has arrived', () => {
+  const session = createSession()
+  try {
+    const prefix = '[label](https://example.org/p "'
+    session.append(prefix)
+    assert.equal(session.snapshot()[0].children[0].title, '')
+    session.append('标题')
+    const draft = session.snapshot()[0]
+    assert.equal(draft.raw, prefix + '标题')
+    assert.deepEqual(draft.children[0], {
+      type: 'link', href: 'https://example.org/p', title: '标题', text: 'label',
+      children: [{ type: 'text', content: 'label', raw: 'label' }],
+      loading: true, raw: '[label](https://example.org/p)', markup: '',
+    })
+    session.append('")')
+    const closed = session.snapshot()[0].children[0]
+    assert.equal(closed.loading, false)
+    assert.equal(closed.title, '标题')
+    assert.equal(closed.markup, '')
   }
   finally {
     session.dispose()

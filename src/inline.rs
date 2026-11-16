@@ -1032,7 +1032,7 @@ fn parse_scanned<S: Storage, const MATH: bool, const MARKSTREAM: bool>(
                         end,
                         refs,
                         unresolved.as_deref_mut(),
-                        preview && (bracket.image || MARKSTREAM),
+                        lex.preview_end.filter(|_| bracket.image || MARKSTREAM),
                     ) {
                         let child_start = bracket.token + 1;
                         let linkify_image = gfm_autolink && bracket.image;
@@ -1802,6 +1802,14 @@ fn angle_destination(bytes: &[u8], opening: usize, end: usize) -> Option<(Span, 
 }
 
 pub(crate) fn link_title(source: &str, i: usize, end: usize) -> Option<(Span, usize)> {
+    read_link_title::<false>(source, i, end)
+}
+
+fn read_link_title<const PREVIEW: bool>(
+    source: &str,
+    i: usize,
+    end: usize,
+) -> Option<(Span, usize)> {
     if i >= end {
         return None;
     }
@@ -1823,7 +1831,7 @@ pub(crate) fn link_title(source: &str, i: usize, end: usize) -> Option<(Span, us
             _ => cursor += 1,
         }
     }
-    None
+    PREVIEW.then_some((span(start, end), end))
 }
 
 fn link_inline(source: &str, i: usize, end: usize) -> Option<(usize, Span, Option<Span>)> {
@@ -1885,7 +1893,7 @@ fn link_target<const MARKSTREAM: bool>(
     end: usize,
     refs: &References,
     unresolved: Option<&mut Vec<String>>,
-    preview_destination: bool,
+    preview_end: Option<usize>,
 ) -> Option<Target> {
     let bytes = source.as_bytes();
     if next < end && bytes[next] == b'(' {
@@ -1898,13 +1906,14 @@ fn link_target<const MARKSTREAM: bool>(
                 loading: false,
             });
         }
-        if preview_destination
-            && let Some(destination) = pending_destination::<MARKSTREAM>(source, next + 1, end)
+        if let Some(preview_end) = preview_end
+            && let Some((end, destination, title)) =
+                pending_inline::<MARKSTREAM>(source, next + 1, end, preview_end)
         {
             return Some(Target {
                 end,
                 destination,
-                title: None,
+                title,
                 is_reference: false,
                 loading: true,
             });
@@ -1944,28 +1953,47 @@ fn link_target<const MARKSTREAM: bool>(
     }
 }
 
-fn pending_destination<const MARKSTREAM: bool>(
+fn pending_inline<const MARKSTREAM: bool>(
     source: &str,
     start: usize,
     end: usize,
-) -> Option<Span> {
+    preview_end: usize,
+) -> Option<(usize, Span, Option<Span>)> {
     let bytes = source.as_bytes();
     let start = skip_link_space(bytes, start, end)?;
     if start == end {
-        return Some(span(start, end));
+        return Some((end, span(start, end), None));
     }
-    if MARKSTREAM && bytes[start] == b'<' {
-        let (destination, consumed) = angle_destination(bytes, start, end)?;
+    let angle = MARKSTREAM && bytes[start] == b'<';
+    let destination = if angle {
+        let (destination, tail) = angle_destination(bytes, start, end)?;
         // The opening delimiter establishes a draft link, but its destination
         // stays unavailable until the closing angle bracket actually arrives.
-        return (consumed == end).then_some(if destination.end == consumed {
-            span(destination.start, destination.start)
-        } else {
-            destination
-        });
-    }
-    if let Some((destination, consumed)) = link_destination(source, start, end) {
-        return (consumed == end && destination.start != destination.end).then_some(destination);
+        if destination.end == tail {
+            return Some((end, span(destination.start, destination.start), None));
+        }
+        Some((destination, tail))
+    } else {
+        link_destination(source, start, end)
+    };
+    if let Some((destination, tail)) = destination {
+        if tail == end && (angle || destination.start != destination.end) {
+            return Some((end, destination, None));
+        }
+        if MARKSTREAM && destination.start != destination.end && tail < end {
+            let title_start = skip_link_space(bytes, tail, end)?;
+            if title_start > tail && title_start < end && matches!(bytes[title_start], b'\'' | b'"')
+            {
+                let (title, after_title) =
+                    read_link_title::<true>(source, title_start, preview_end)?;
+                if skip_link_space(bytes, after_title, preview_end)? == preview_end {
+                    let title =
+                        (title.start != title.end || title.end != after_title).then_some(title);
+                    return Some((preview_end, destination, title));
+                }
+            }
+        }
+        return None;
     }
     // A destination with an unfinished parenthesized component is still a draft,
     // provided every byte so far belongs to that component.
@@ -1973,7 +2001,7 @@ fn pending_destination<const MARKSTREAM: bool>(
         && !bytes[start..end]
             .iter()
             .any(|byte| matches!(byte, b' ' | 0..=31 | 127)))
-    .then_some(span(start, end))
+    .then_some((end, span(start, end), None))
 }
 
 fn numeric_reference(source: &str, start: usize, close: usize, end: usize) -> bool {
@@ -2945,6 +2973,68 @@ mod tests {
         collect_math(source, &nodes, &mut found);
         assert_eq!(found, [("x^2", false)]);
         assert!(nodes.iter().any(|node| matches!(&node.kind, InlineKind::Code(code) if code.as_str(source) == "$312 and $289")));
+    }
+
+    #[test]
+    fn markstream_previews_quoted_titles_without_closing_the_link() {
+        let options = Options {
+            markstream: true,
+            ..Options::default()
+        };
+        let refs = References::default();
+        for (source, expected) in [
+            ("[label](https://example.org/p \"", None),
+            ("[label](https://example.org/p \"标题  ", Some("标题  ")),
+            ("[label](https://example.org/p \"title\"", Some("title")),
+            ("[label](https://example.org/p \"\"", Some("")),
+            (
+                r"[label](https://example.org/p 'a\'b &amp; 字",
+                Some("a'b & 字"),
+            ),
+            ("[label](<https://example.org/p> 'title", Some("title")),
+        ] {
+            let input = span(0, source.len());
+            let preview = parse_preview(source, input, &options, &refs);
+            let [
+                Inline {
+                    span: actual,
+                    kind: InlineKind::LinkPreview(link),
+                },
+            ] = preview.as_slice()
+            else {
+                panic!("expected draft link: {preview:?}");
+            };
+            assert_eq!(*actual, input);
+            assert_eq!(link.destination.as_str(source), "https://example.org/p");
+            assert_eq!(
+                link.title.as_ref().map(|title| title.as_str(source)),
+                expected
+            );
+            assert!(
+                parse(source, input, &options, &refs)
+                    .iter()
+                    .all(|node| node.span != input || !matches!(node.kind, InlineKind::Link(_))),
+                "{source}"
+            );
+            assert!(
+                parse_preview(source, input, &Options::default(), &refs)
+                    .iter()
+                    .all(|node| !matches!(node.kind, InlineKind::LinkPreview(_))),
+                "{source}"
+            );
+        }
+        let invalid = "[label](https://example.org/p \"title\" extra";
+        assert!(
+            parse_preview(invalid, span(0, invalid.len()), &options, &refs)
+                .iter()
+                .all(|node| !matches!(node.kind, InlineKind::LinkPreview(_)))
+        );
+        let closed = "[label](https://example.org/p \"title\")";
+        let nodes = parse(closed, span(0, closed.len()), &options, &refs);
+        let InlineKind::Link(link) = &nodes[0].kind else {
+            panic!("expected confirmed link");
+        };
+        assert_eq!(link.title.as_ref().unwrap().as_str(closed), "title");
     }
 
     #[test]

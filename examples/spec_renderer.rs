@@ -107,11 +107,21 @@ fn render_view<'src>(
 type StreamView = BTreeMap<BlockId, (Option<BlockId>, Block)>;
 
 fn stream_view(source: &str, options: Options) -> Result<StreamView, Box<dyn std::error::Error>> {
+    let chunks = source
+        .char_indices()
+        .map(|(start, character)| &source[start..start + character.len_utf8()]);
+    stream_view_chunks(chunks, options)
+}
+
+fn stream_view_chunks<'src>(
+    chunks: impl Iterator<Item = &'src str>,
+    options: Options,
+) -> Result<StreamView, Box<dyn std::error::Error>> {
     let mut parser = Parser::new(options);
     let mut changes = Vec::new();
     let mut blocks = BTreeMap::new();
-    for (start, character) in source.char_indices() {
-        parser.append(&source[start..start + character.len_utf8()], &mut changes)?;
+    for chunk in chunks {
+        parser.append(chunk, &mut changes)?;
         apply_changes(&mut blocks, &mut changes)?;
     }
     parser.finish(&mut changes)?;
@@ -696,4 +706,75 @@ fn unescape_punctuation(text: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn corpus_stream_matches_full_nodes_at_varied_chunk_boundaries() {
+        let normalize = |view: StreamView| {
+            let positions: HashMap<_, _> = view
+                .keys()
+                .enumerate()
+                .map(|(index, &id)| (id, index))
+                .collect();
+            view.into_values()
+                .enumerate()
+                .map(|(index, (parent, mut block))| {
+                    block.id = BlockId(index);
+                    (parent.map(|id| positions[&id]), block)
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let corpus = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/corpus");
+        for fixture in std::fs::read_dir(corpus).unwrap() {
+            let path = fixture.unwrap().path();
+            if path.extension().is_none_or(|extension| extension != "md") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).unwrap();
+            for markstream in [false, true] {
+                let options = Options {
+                    markstream,
+                    math: markstream,
+                    preview: Preview::Ai,
+                    ..Options::default()
+                };
+                let document = parse(&source, &options).unwrap();
+                let expected = normalize(
+                    document
+                        .nodes
+                        .iter()
+                        .map(|block| (block.id, (document.parent(block.id), block.clone())))
+                        .collect(),
+                );
+                for width in [31, 137, 1024] {
+                    let mut rest = source.as_str();
+                    let chunks = std::iter::from_fn(|| {
+                        if rest.is_empty() {
+                            return None;
+                        }
+                        let mut end = rest.len().min(width);
+                        while !rest.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        let (chunk, remaining) = rest.split_at(end);
+                        rest = remaining;
+                        Some(chunk)
+                    });
+                    let context = format!("{path:?} at {width} bytes with Markstream={markstream}");
+                    let view = stream_view_chunks(chunks, options.clone())
+                        .unwrap_or_else(|error| panic!("{context}: {error}"));
+                    let actual = normalize(view);
+                    assert_eq!(actual.len(), expected.len(), "{context}");
+                    for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
+                        assert_eq!(actual, expected, "{context}, block {index}");
+                    }
+                }
+            }
+        }
+    }
 }
