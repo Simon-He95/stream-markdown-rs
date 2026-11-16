@@ -3295,6 +3295,7 @@ impl Engine {
         if self.options.markstream && !self.options.custom_tags.is_empty() {
             self.remember_custom_closure(source, &leaf, &mut content);
         }
+        let preview_math = self.might_have_pending_math(source, &leaf, &content);
         output.done(
             Block {
                 id: leaf.id,
@@ -3308,23 +3309,36 @@ impl Engine {
             present,
             self.parent(),
         );
-        self.retain_math_preview(source, &leaf, output);
+        if preview_math {
+            self.retain_math_preview(source, &leaf, output);
+        }
         Ok(())
     }
 
-    fn retain_math_preview(&mut self, source: &str, leaf: &Dependent, output: &mut Output<'_>) {
+    fn might_have_pending_math(
+        &self,
+        source: &str,
+        leaf: &Dependent,
+        content: &InlineContent,
+    ) -> bool {
         if self.finalizing
             || !self.options.markstream
             || !self.options.math
             || self.options.preview != Preview::Ai
             || leaf.content.end - leaf.content.start > 1024
         {
-            return;
+            return false;
         }
         let body = &source[Range::from(leaf.content)];
-        if !body.contains('$') && !body.contains("\\(") {
-            return;
-        }
+        (body.contains('$') || body.contains("\\("))
+            && (!matches!(content, InlineContent::Parsed(nodes) if !has_literal_math_marker(source, nodes))
+                || self
+                    .preview_state
+                    .as_ref()
+                    .is_some_and(|state| state.pending_math.binary_search(&leaf.id).is_ok()))
+    }
+
+    fn retain_math_preview(&mut self, source: &str, leaf: &Dependent, output: &mut Output<'_>) {
         let mut nodes = if let Some(parts) = &leaf.parts {
             inline::parse_fragments_preview(source, parts, &self.options, &self.refs)
         } else {
@@ -3958,6 +3972,22 @@ fn has_pending_math(nodes: &[crate::Inline]) -> bool {
         | InlineKind::Insert(children) => has_pending_math(children),
         InlineKind::Link(link) | InlineKind::LinkPreview(link) => has_pending_math(&link.children),
         _ => false,
+    })
+}
+
+fn has_literal_math_marker(source: &str, nodes: &[crate::Inline]) -> bool {
+    use crate::InlineKind;
+    nodes.iter().any(|node| match &node.kind {
+        InlineKind::Math { loading: false, .. } => false,
+        InlineKind::Emphasis(children)
+        | InlineKind::Strong(children)
+        | InlineKind::Strikethrough(children)
+        | InlineKind::Highlight(children)
+        | InlineKind::Insert(children) => has_literal_math_marker(source, children),
+        _ => {
+            let raw = &source[Range::from(node.span)];
+            raw.contains('$') || raw.contains("\\(")
+        }
     })
 }
 
