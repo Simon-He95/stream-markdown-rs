@@ -1582,7 +1582,9 @@ impl Engine {
         }
         let bracket_preview = self.options.preview == Preview::Ai && !content.starts_with("[!");
         if !content.as_bytes().first().is_some_and(|&byte| {
-            ordinary_start(byte) || partial_inline_start(content, bracket_preview)
+            ordinary_start(byte)
+                || partial_inline_start(content, bracket_preview)
+                || self.options.preview == Preview::Ai && bare_code_marker(content)
         }) {
             return Ok(());
         }
@@ -1884,6 +1886,9 @@ impl Engine {
         let inline_text = self.options.markstream
             && (self.draft.is_some()
                 || partial_inline_start(head, bracket_preview)
+                || self.options.preview == Preview::Ai
+                    && self.partial_container.is_some()
+                    && bare_code_marker(head)
                 || root_preview && byte.is_ascii_digit() && numeric_text_prefix(head));
         if !(ordinary_start(byte) || header_text || inline_text) || self.has_block_plugin(byte) {
             return;
@@ -4203,6 +4208,10 @@ fn trim_span(source: &str, span: Span) -> Span {
     };
     let last = bytes.iter().rposition(content).unwrap();
     Span::new(span.start + first, span.start + last + 1)
+}
+
+fn bare_code_marker(text: &str) -> bool {
+    text.starts_with('`') && matches!(text.trim_end_matches([' ', '\t']), "`" | "``")
 }
 
 fn partial_inline_start(head: &str, bracket_preview: bool) -> bool {
