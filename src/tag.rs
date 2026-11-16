@@ -47,6 +47,7 @@ pub(crate) struct Opening {
 
 pub(crate) struct OpeningProbe {
     pub start: usize,
+    pub buffered: bool,
     checked: usize,
     quote: Option<u8>,
     rejected: bool,
@@ -56,6 +57,7 @@ impl OpeningProbe {
     pub fn new(start: usize, attributes: usize) -> Self {
         Self {
             start,
+            buffered: false,
             checked: attributes,
             quote: None,
             rejected: false,
@@ -87,6 +89,10 @@ impl OpeningProbe {
 
     pub fn reject(&mut self) {
         self.rejected = true;
+    }
+
+    pub fn rejected(&self) -> bool {
+        self.rejected
     }
 }
 

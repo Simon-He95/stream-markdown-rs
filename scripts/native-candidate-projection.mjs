@@ -318,6 +318,8 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false) {
       const title = data.title === null ? null : readText(data.title, context) || null
       const children = projectInlineNodes(data.children, context, kind === 'link' && data.loading)
       const allowed = allowsLink(href, context, kind)
+      const simpleMarkdownLink = context.markstream && kind === 'link' && raw.startsWith('[')
+        && children.length === 1 && children[0].type === 'text'
       if (kind === 'link' && data.loading) {
         const text = legacyLinkText(children, context.markstream)
         const hasImage = children.some(child => child.type === 'image')
@@ -342,7 +344,20 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false) {
         })
       }
       else if (!allowed) {
-        mergeText(nodes, textNode(displayText(children), false))
+        const text = displayText(children)
+        if (simpleMarkdownLink && !context.factoryValidateLink && /^(?:javascript|vbscript):/i.test(href.trimStart())) {
+          const afterLabel = normalize(context.read([data.children.at(-1).span[1], span[1]]))
+          const closing = afterLabel.indexOf(')', 2)
+          if (afterLabel.startsWith('](') && closing !== -1) {
+            // Legacy plain-text recovery starts after the first literal close
+            // when the Markdown URL is denied before it becomes a link.
+            mergeText(nodes, textNode(text + afterLabel.slice(closing + 1), false))
+            if (nodes.at(-1)?.type === 'text')
+              delete nodes.at(-1).center
+            continue
+          }
+        }
+        mergeText(nodes, textNode(text, false))
       }
       else if (kind === 'image') {
         const first = data.children.at(0)
@@ -360,15 +375,13 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false) {
       else {
         const markup = raw.startsWith('<') ? 'autolink' : raw.startsWith('[') ? '' : 'linkify'
         const compact =
-          ((markup && /^<?https?:\/\//i.test(raw))
-           || (context.markstream && !markup && raw.includes('](')
-             && children.length === 1 && children[0].type === 'text'))
+          ((markup && /^<?https?:\/\//i.test(raw)) || simpleMarkdownLink)
           && sameLineInlineSuffix(inlines, index, context)
         if (compact) {
           const text = legacyLinkText(children)
           nodes.push({
             type: 'link', href, title: title ?? '', text, children: [textNode(text, false)],
-            raw: `[${text}](${href}${title ? ` "${title}"` : ''})`, loading: false, markup,
+            raw: `[${text}](${href})`, loading: false, markup,
           })
         }
         else {

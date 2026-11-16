@@ -53,7 +53,8 @@ export function createSession({ factoryOptions, parseOptions = {} } = {}) {
   const customTags = parseOptions.customHtmlTags ?? factoryOptions?.customHtmlTags ?? []
   const math = (parseOptions.enableMath ?? factoryOptions?.enableMath) !== false
   const footnotes = (parseOptions.enableFootnotes ?? factoryOptions?.enableFootnotes) !== false
-  const validateLink = parseOptions.validateLink ?? factoryOptions?.markdownItOptions?.validateLink
+  const factoryValidateLink = factoryOptions?.markdownItOptions?.validateLink
+  const validateLink = parseOptions.validateLink ?? factoryValidateLink
   const markstream = parseOptions.markstream ?? factoryOptions?.markstream ?? true
   const fixIndentedCodeBlock = parseOptions.enableFixIndentedCodeBlock ?? factoryOptions?.enableFixIndentedCodeBlock ?? true
   request('create', session, { customTags, math, footnotes, markstream, requireClosingStrong: parseOptions.requireClosingStrong })
@@ -135,6 +136,7 @@ export function createSession({ factoryOptions, parseOptions = {} } = {}) {
           customTags,
           parseOptions,
           validateLink,
+          factoryValidateLink,
         })
         cached = parseOptions.postTransformNodes?.(projected) ?? projected
       }

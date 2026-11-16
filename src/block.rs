@@ -632,11 +632,22 @@ impl Engine {
             let next =
                 end + 1 + usize::from(bytes[end] == b'\r' && bytes.get(end + 1) == Some(&b'\n'));
             self.metrics.scanned_bytes += next - end;
+            if !self.options.custom_tags.is_empty()
+                && self.buffer_registered_tag_line(source, end, next, &mut output)?
+            {
+                self.scan = next;
+                continue;
+            }
             self.container_line(source, Line::new(self.line_start, end, next), &mut output)?;
             self.line_start = next;
             self.scan = next;
         }
 
+        if self.tag_probe.as_ref().is_some_and(|probe| probe.buffered)
+            && self.resume_buffered_tag(source, final_input, &mut output)?
+        {
+            return Ok(());
+        }
         if final_input {
             for id in self.pending_math_previews.drain(..) {
                 output.update(Change::PreviewInlines {
@@ -1125,6 +1136,107 @@ impl Engine {
         Ok(Some(start))
     }
 
+    fn registered_tag_probe(&mut self, source: &str, end: usize) -> Option<&mut tag::OpeningProbe> {
+        let head = unindent(&source[self.line_start..end]);
+        let start = end - head.len();
+        let name = head.strip_prefix('<')?;
+        let width = self.options.custom_tags.iter().find_map(|registered| {
+            let suffix = name.strip_prefix(registered)?;
+            suffix
+                .as_bytes()
+                .first()
+                .filter(|byte| byte.is_ascii_whitespace() || matches!(byte, b'/' | b'>'))
+                .map(|_| registered.len())
+        })?;
+        if self
+            .tag_probe
+            .as_ref()
+            .is_none_or(|probe| probe.start != start)
+        {
+            self.tag_probe = Some(tag::OpeningProbe::new(start, start + 1 + width));
+        }
+        self.tag_probe.as_mut()
+    }
+
+    fn buffer_registered_tag_line(
+        &mut self,
+        source: &str,
+        end: usize,
+        next: usize,
+        output: &mut Output<'_>,
+    ) -> Result<bool, ParseError> {
+        if self.running.is_some()
+            || !self.containers.is_empty()
+            || !matches!(self.active, None | Some(Active::Paragraph(_)))
+        {
+            return Ok(false);
+        }
+        let probe = if self.tag_probe.as_ref().is_some_and(|probe| probe.buffered) {
+            self.tag_probe.as_mut().unwrap()
+        } else if let Some(probe) = self.registered_tag_probe(source, next) {
+            probe
+        } else {
+            return Ok(false);
+        };
+        let buffered = probe.buffered;
+        let complete = probe
+            .update(source, next)
+            .map(|stop| tag::opening(source, probe.start, stop).is_some());
+        if complete.is_none() && !probe.rejected() {
+            probe.buffered = true;
+            return Ok(true);
+        }
+        self.tag_probe = None;
+        if buffered && complete != Some(true) {
+            self.replay_buffered_tag_lines(source, end, output)?;
+        }
+        Ok(false)
+    }
+
+    fn resume_buffered_tag(
+        &mut self,
+        source: &str,
+        final_input: bool,
+        output: &mut Output<'_>,
+    ) -> Result<bool, ParseError> {
+        let end = if final_input { source.len() } else { self.scan };
+        let probe = self.tag_probe.as_mut().unwrap();
+        if let Some(stop) = probe.update(source, end) {
+            if tag::opening(source, probe.start, stop).is_some() {
+                self.tag_probe = None;
+                if !final_input {
+                    self.line(source, Line::new(self.line_start, stop, stop), output)?;
+                    self.line_start = stop;
+                }
+                return Ok(false);
+            }
+            probe.reject();
+        }
+        if !final_input && !probe.rejected() {
+            return Ok(true);
+        }
+        self.tag_probe = None;
+        self.replay_buffered_tag_lines(source, end, output)?;
+        Ok(false)
+    }
+
+    fn replay_buffered_tag_lines(
+        &mut self,
+        source: &str,
+        end: usize,
+        output: &mut Output<'_>,
+    ) -> Result<(), ParseError> {
+        let bytes = source.as_bytes();
+        while let Some(relative) = memchr::memchr2(b'\n', b'\r', &bytes[self.line_start..end]) {
+            let break_at = self.line_start + relative;
+            let next = line_break(bytes, break_at, end).unwrap();
+            self.metrics.scanned_bytes += next - self.line_start;
+            self.container_line(source, Line::new(self.line_start, break_at, next), output)?;
+            self.line_start = next;
+        }
+        Ok(())
+    }
+
     fn open_partial_tag(
         &mut self,
         source: &str,
@@ -1164,30 +1276,12 @@ impl Engine {
         if !matches!(self.active, None | Some(Active::Paragraph(_))) {
             return Ok(false);
         }
-        let head = unindent(&source[self.line_start..self.scan]);
-        let start = self.scan - head.len();
-        if self
-            .tag_probe
-            .as_ref()
-            .is_none_or(|probe| probe.start != start)
-        {
-            let Some(name) = head.strip_prefix('<') else {
-                return Ok(false);
-            };
-            let Some(width) = self.options.custom_tags.iter().find_map(|registered| {
-                let suffix = name.strip_prefix(registered)?;
-                suffix
-                    .as_bytes()
-                    .first()
-                    .filter(|byte| matches!(byte, b' ' | b'\t' | b'/' | b'>'))
-                    .map(|_| registered.len())
-            }) else {
-                return Ok(false);
-            };
-            self.tag_probe = Some(tag::OpeningProbe::new(start, start + 1 + width));
-        }
-        let probe = self.tag_probe.as_mut().unwrap();
-        let Some(end) = probe.update(source, self.scan) else {
+        let scan = self.scan;
+        let Some(probe) = self.registered_tag_probe(source, scan) else {
+            return Ok(false);
+        };
+        let start = probe.start;
+        let Some(end) = probe.update(source, scan) else {
             return Ok(false);
         };
         let Some(opener) = tag::opening(source, start, end) else {

@@ -395,6 +395,98 @@ fn registered_opening_is_emitted_without_waiting_for_a_newline() {
 }
 
 #[test]
+fn multiline_registered_openers_keep_original_attributes_at_every_split() {
+    let options = Options {
+        custom_tags: vec!["tool-call".into()],
+        ..Options::default()
+    };
+    for source in [
+        "<tool-call\r\n  name='search'\r\n  title=\"甲 >\r\n乙\">body</tool-call>\r\n\r\n# Next",
+        "<tool-call\n  name='search'\n  title=\"甲 >\n乙\" />",
+    ] {
+        let expected = parse(source, &options).unwrap().nodes;
+        assert_eq!(
+            expected.len(),
+            if source.ends_with("# Next") { 2 } else { 1 }
+        );
+        let BlockData::CustomTag(element) = &expected[0].data else {
+            panic!("expected a registered tag: {expected:?}");
+        };
+        let attributes: Vec<_> = element
+            .tag
+            .attrs(source)
+            .map(|attr| (attr.name, attr.value))
+            .collect();
+        let title = if source.contains('\r') {
+            "甲 >\r\n乙"
+        } else {
+            "甲 >\n乙"
+        };
+        assert_eq!(
+            attributes,
+            [("name", Some("search")), ("title", Some(title))]
+        );
+        assert_eq!(expected[0].status, BlockStatus::Closed);
+
+        for split in source
+            .char_indices()
+            .map(|(offset, _)| offset)
+            .chain([source.len()])
+        {
+            let mut parser = Parser::new(options.clone());
+            let mut changes = Vec::new();
+            let mut view = View::default();
+            parser.append(&source[..split], &mut changes).unwrap();
+            if split < source.find("乙\"").unwrap() + "乙\"".len() + 1 {
+                assert!(
+                    changes.is_empty(),
+                    "published bare start at split {split}: {changes:?}"
+                );
+            }
+            view.apply(&mut changes);
+            parser.append(&source[split..], &mut changes).unwrap();
+            view.apply(&mut changes);
+            parser.finish(&mut changes).unwrap();
+            view.apply(&mut changes);
+            assert_eq!(
+                view.blocks.into_values().collect::<Vec<_>>(),
+                expected,
+                "split {split}: {source:?}"
+            );
+            assert_eq!(parser.metrics().scanned_bytes, source.len());
+        }
+    }
+}
+
+#[test]
+fn rejected_or_incomplete_multiline_openers_replay_the_buffer_once() {
+    let options = Options {
+        custom_tags: vec!["tool-call".into()],
+        ..Options::default()
+    };
+    let prefix = "<tool-call\n  title='unfinished\n\n# Heading\n";
+    for tail in ["", "' invalid==value>\n"] {
+        let mut parser = Parser::new(options.clone());
+        let mut changes = Vec::new();
+        parser.append(prefix, &mut changes).unwrap();
+        assert!(changes.is_empty());
+        parser.append(tail, &mut changes).unwrap();
+        parser.finish(&mut changes).unwrap();
+        let source = parser.source_text();
+        let expected = parse(source, &Options::default()).unwrap().nodes;
+        let mut view = View::default();
+        view.apply(&mut changes);
+        assert_eq!(view.blocks.into_values().collect::<Vec<_>>(), expected);
+        assert!(
+            expected
+                .iter()
+                .any(|node| matches!(node.data, BlockData::Heading { .. }))
+        );
+        assert!(parser.metrics().scanned_bytes <= 2 * source.len());
+    }
+}
+
+#[test]
 fn streaming_fence_does_not_publish_a_partial_indented_closer() {
     let mut parser = Parser::new(Options::default());
     let mut changes = Vec::new();

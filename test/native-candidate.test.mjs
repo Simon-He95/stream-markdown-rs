@@ -82,6 +82,26 @@ test('native candidate delivers Rust custom tag metadata only after a complete o
   }
 })
 
+test('native candidate exposes complete attributes from a multiline registered opening', () => {
+  const session = createSession({ factoryOptions: { customHtmlTags: ['tool-call'] } })
+  try {
+    session.append('<tool-call\n  name="search"\n  title="甲 >\n')
+    assert.equal(session.snapshot().length, 0)
+    session.append('乙"')
+    assert.equal(session.snapshot().length, 0)
+    session.append('>payload')
+    assert.deepEqual(session.snapshot()[0].attrs, [['name', 'search'], ['title', '甲 >\n乙']])
+    assert.equal(session.snapshot()[0].loading, true)
+    session.append('</tool-call>')
+    session.finish()
+    assert.equal(session.snapshot()[0].content, 'payload')
+    assert.equal(session.snapshot()[0].loading, false)
+  }
+  finally {
+    session.dispose()
+  }
+})
+
 test('native candidate addresses a backpatched table cell by its flat wire index', () => {
   const session = createSession()
   try {
@@ -606,12 +626,58 @@ test('legacy simple link metadata remains compact only with same-line inline con
     assert.deepEqual(heading.children[0], {
       type: 'link', href: 'https://a.test', title: 'title', text: 'label',
       children: [{ type: 'text', content: 'label', raw: 'label' }],
-      raw: '[label](https://a.test "title")', loading: false, markup: '',
+      raw: '[label](https://a.test)', loading: false, markup: '',
     })
     assert.deepEqual(paragraph.children[0].attrs, [['href', 'https://b.test']])
   }
   finally {
     session.dispose()
+  }
+})
+
+test('resolved references use the same compact metadata as direct links on the same line', () => {
+  const session = createSession()
+  try {
+    session.append('[label][id] tail\n\n[id]: https://a.test "title"')
+    session.finish()
+    assert.deepEqual(session.snapshot()[0].children, [
+      {
+        type: 'link', href: 'https://a.test', title: 'title', text: 'label',
+        children: [{ type: 'text', content: 'label', raw: 'label' }],
+        raw: '[label](https://a.test)', loading: false, markup: '',
+      },
+      { type: 'text', content: ' tail', raw: ' tail', center: false },
+    ])
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('the rejected unsafe link fallback keeps the source suffix after the first close', () => {
+  const session = createSession({ parseOptions: { validateLink: href => !/^javascript:/i.test(href) } })
+  const custom = createSession({
+    factoryOptions: { markdownItOptions: { validateLink: () => true } },
+    parseOptions: { validateLink: () => false },
+  })
+  try {
+    session.append('[安全链接][safe] 与 [拒绝链接](javascript:alert((1))) tail (z)\n\n[safe]: https://a.test')
+    session.finish()
+    assert.deepEqual(session.snapshot()[0].children, [
+      {
+        type: 'link', href: 'https://a.test', title: '', text: '安全链接',
+        children: [{ type: 'text', content: '安全链接', raw: '安全链接' }],
+        raw: '[安全链接](https://a.test)', loading: false, markup: '',
+      },
+      { type: 'text', content: ' 与 拒绝链接)) tail (z)', raw: ' 与 拒绝链接)) tail (z)' },
+    ])
+    custom.append('[label](javascript:alert(1)) tail')
+    custom.finish()
+    assert.equal(custom.snapshot()[0].children[0].content, 'label tail')
+  }
+  finally {
+    session.dispose()
+    custom.dispose()
   }
 })
 
