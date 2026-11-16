@@ -1,6 +1,6 @@
 # stream-markdown-rs
 
-为 Rust TUI 解析 AI 流式 Markdown 的库。解析器把每次追加转换成带类型、内容变化和生命周期状态的块更新。终端 UI 可以用同一条流逐步显示段落、代码、表格和列表，按块状态决定何时提交最终样式。原生追加延迟、内存占用和更新范围是首要指标。
+为 Rust TUI 解析 AI 流式 Markdown 的库。解析器把每次追加转换成带类型、内容变化和生命周期状态的块更新。终端 UI 可以用同一条流逐步显示段落、代码、表格和列表，按块状态决定何时提交最终样式。原生追加延迟、内存占用和更新范围是首要指标。默认 GFM，AI 预判可与 GFM 或 CommonMark 同时开启，运行时插件作为可选宿主层接入。
 
 当前仓库提供回归测试、候选适配器入口和 TypeScript 参考基线。Rust 核心及原生基准将在下一阶段实现。
 
@@ -31,4 +31,4 @@ PARSER_CANDIDATE=./path/to/adapter.mjs pnpm --silent bench > results/comparison-
 
 Node 验证适配器导出同步的 `createSession({ id, factoryOptions, parseOptions })`，返回 `append(chunk)`、`finish()`、`snapshot()` 和可选的 `dispose()`、`metrics()`。适配器逐次应用候选输出的增量更新，测试需要时才读取当前节点。规范入口调用 `renderSpec(source, { dialect, extensions })`，把同一个核心解析出的节点转换成规范示例的 HTML。
 
-[查看 TUI 接口、块生命周期、缓存和验收设计](docs/design.md)
+[查看流式预判、Rust 接口、插件、块缓存与验收设计](docs/design.md)
