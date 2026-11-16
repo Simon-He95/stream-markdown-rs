@@ -292,11 +292,14 @@ function appendMarkdownFilenameText(nodes, text, center) {
   return true
 }
 
+function endsInSingleBacktick(text) {
+  return text.length > 1 && text.indexOf('`') === text.length - 1 && !text.endsWith('\\`')
+}
+
 function projectInlines(content, context) {
   if (content.plain || content.fragments) {
     const text = inlineRaw(content, '', context)
-    if (context.markstream && !context.final && content.plain && text.length > 1
-      && text.indexOf('`') === text.length - 1 && !text.endsWith('\\`')) {
+    if (context.markstream && !context.final && content.plain && endsInSingleBacktick(text)) {
       return [textNode(text.slice(0, -1), false), { type: 'inline_code', code: '', raw: '' }]
     }
     const nodes = []
@@ -431,6 +434,12 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false, insideL
         && raw.includes('*') && /[^*]/u.test(raw) && /(?<!\\)(?:\\\\)*\*/u.test(raw)
       const center = kind !== 'softbreak' && !literalCodeMarker && !literalAsterisk
       const text = kind === 'softbreak' ? '\n' : readText(data, context)
+      const sourceText = kind === 'text' && Array.isArray(data) && data[0] === span[0] && data[1] === span[1]
+      if (sourceText && context.markstream && !context.final && index + 1 === inlines.length && endsInSingleBacktick(text)) {
+        mergeText(nodes, textNode(text.slice(0, -1), false))
+        nodes.push({ type: 'inline_code', code: '', raw: '' })
+        continue
+      }
       if (kind === 'text' && context.markstream && !context.final && text.endsWith('(')
         && !raw.endsWith('\\(') && inlines[index - 1]?.kind === 'softbreak'
         && ['code', 'emphasis', 'strong', 'strikethrough'].includes(inlines[index + 1]?.kind)) {
@@ -441,8 +450,7 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false, insideL
         previous.raw += text
         continue
       }
-      if (!(kind === 'text' && context.markstream && context.final && !literalCodeMarker && !insideLinkLabel
-        && Array.isArray(data) && data[0] === span[0] && data[1] === span[1]
+      if (!(sourceText && context.markstream && context.final && !literalCodeMarker && !insideLinkLabel
         && appendMarkdownFilenameText(nodes, text, center)))
         mergeText(nodes, textNode(text, center))
       if (literalCodeMarker && nodes.at(-1)?.type === 'text')
@@ -751,6 +759,10 @@ function projectTableRow(values, alignments, header, context) {
     ))
     const children = projectInlines(cell, context)
     const tail = children.at(-1)
+    if (context.markstream && !context.final && cell.parsed?.at(-1)?.kind === 'code_preview' && tail?.type === 'inline_code') {
+      // A pending cell span was still plain text when the legacy typographer saw it.
+      tail.code = tail.raw = tail.code.replace(/(?<![\w\\])'([\w-]+)'(?!\w)/gu, '‘$1’')
+    }
     if (context.markstream && tail?.type === 'text' && tail.content.endsWith('`')) {
       const marker = /(?<!\\)(?:\\\\)*(`+)/u.exec(tail.content)
       if (marker?.[1] === '`' && marker.index + marker[0].length === tail.content.length) {

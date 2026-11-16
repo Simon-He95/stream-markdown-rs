@@ -985,6 +985,7 @@ test('legacy multiline preview holds the trailing parenthesis before a typed inl
 
 test('legacy inline draft styles a single trailing backtick after actual text', () => {
   const session = createSession()
+  const afterCode = createSession()
   const literal = createSession()
   const escaped = createSession()
   try {
@@ -1006,11 +1007,33 @@ test('legacy inline draft styles a single trailing backtick after actual text', 
     escaped.append('Core from \\`')
     assert.equal(escaped.snapshot()[0].children[0].content, 'Core from `')
     assert.equal(escaped.snapshot()[0].children.length, 1)
+
+    afterCode.append('Try `old` and `')
+    assert.deepEqual(afterCode.snapshot()[0].children.slice(-2), [
+      { type: 'text', content: ' and ', raw: ' and ' },
+      { type: 'inline_code', code: '', raw: '' },
+    ])
   }
   finally {
     session.dispose()
+    afterCode.dispose()
     literal.dispose()
     escaped.dispose()
+  }
+})
+
+test('an open legacy table code span styles completed quote pairs until code is confirmed', () => {
+  const session = createSession()
+  try {
+    session.append("| Name | Type |\n| --- | --- |\n| Example | `Partial<'node' \\| 'x")
+    const draft = session.snapshot()[0].rows[0].cells[1].children[0]
+    assert.deepEqual(draft, { type: 'inline_code', code: "Partial<‘node’ | 'x", raw: "Partial<‘node’ | 'x" })
+    session.append("'>` |\n")
+    const confirmed = session.snapshot()[0].rows[0].cells[1].children[0]
+    assert.deepEqual(confirmed, { type: 'inline_code', code: "Partial<'node' | 'x'>", raw: "Partial<'node' | 'x'>" })
+  }
+  finally {
+    session.dispose()
   }
 })
 
