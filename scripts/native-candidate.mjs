@@ -216,6 +216,14 @@ function applyChange(nodes, roots, change) {
       }
       block.span[1] = change.end
       break
+    case 'close_inline_element': {
+      const base = block.data.content ?? block.data
+      const closed = closeInlineElement(base.parsed, change.start, change.end)
+      closeInlineElement(block.previewInlines?.parsed, change.start, change.end)
+      if (!closed)
+        throw new Error(`Native inline close references a missing opener at ${change.start}`)
+      break
+    }
     case 'remove': {
       const siblings = block.parent === null ? roots : nodes.get(block.parent).children
       siblings.splice(siblings.indexOf(block.id), 1)
@@ -231,4 +239,24 @@ function applyChange(nodes, roots, change) {
     default:
       throw new Error(`Unsupported native Markdown update ${change.op}`)
   }
+}
+
+
+function closeInlineElement(nodes, start, end) {
+  if (!nodes)
+    return false
+  for (let index = nodes.length - 1; index >= 0; index--) {
+    const node = nodes[index]
+    if (node.kind === 'custom_inline' && node.span[0] === start) {
+      node.span[1] = end
+      node.data.status = 'closed'
+      return true
+    }
+    const children = node.data?.children ?? (
+      Array.isArray(node.data) && typeof node.data[0] === 'object' ? node.data : null
+    )
+    if (closeInlineElement(children, start, end))
+      return true
+  }
+  return false
 }

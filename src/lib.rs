@@ -215,6 +215,7 @@ pub enum PreviewHint {
         loading: bool,
     },
     TableRow(Vec<InlineContent>),
+    HtmlContent(Span),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -254,6 +255,11 @@ pub enum Change {
     },
     Remove {
         id: BlockId,
+    },
+    CloseInlineElement {
+        id: BlockId,
+        start: usize,
+        end: usize,
     },
     Preview {
         id: BlockId,

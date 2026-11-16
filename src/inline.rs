@@ -4,7 +4,7 @@ use smallvec::{Array, SmallVec};
 use unicode_casefold::UnicodeCaseFold;
 use unicode_general_category::{GeneralCategory, get_general_category};
 
-use crate::{Options, References, Span, Syntax, Text};
+use crate::{InlineContent, Options, References, Span, Syntax, Text};
 
 #[path = "inline_math.rs"]
 mod inline_math;
@@ -246,6 +246,7 @@ pub(crate) fn normalize_label(label: &str) -> Cow<'_, str> {
     Cow::Owned(result)
 }
 
+#[cfg(test)]
 pub(crate) fn parse(
     source: &str,
     input: Span,
@@ -253,6 +254,58 @@ pub(crate) fn parse(
     refs: &References,
 ) -> Vec<Inline> {
     parse_inner(source, input, options, refs, None, None, false)
+}
+
+/// Parses a trimmed span and borrows it directly when no inline rules are needed.
+#[inline]
+pub(crate) fn parse_content(
+    source: &str,
+    input: Span,
+    options: &Options,
+    refs: &References,
+    unresolved: Option<&mut Vec<String>>,
+) -> InlineContent {
+    if options.math || options.markstream {
+        return parse_extended_content(source, input, options, refs, unresolved);
+    }
+
+    let (first, gfm_autolink) =
+        markup_probe::<false, false>(content(source, input), options.syntax);
+    let Some(first) = first else {
+        return plain_or_autolink(source, input, gfm_autolink);
+    };
+    let lex = LexStart {
+        span: input,
+        first: input.start + first,
+        gfm_autolink,
+        preview_end: None,
+    };
+    let nodes = if input.end - input.start <= 128 {
+        parse_scanned::<Local, false, false>(source, options, refs, unresolved, None, lex)
+    } else {
+        parse_scanned::<Heap, false, false>(source, options, refs, unresolved, None, lex)
+    };
+    InlineContent::Parsed(nodes)
+}
+
+fn parse_extended_content(
+    source: &str,
+    input: Span,
+    options: &Options,
+    refs: &References,
+    unresolved: Option<&mut Vec<String>>,
+) -> InlineContent {
+    // Preserve the legacy plain/parsed distinction.
+    let text = content(source, input);
+    if !(needs_markup(text, options.syntax)
+        || options.math && text.as_bytes().contains(&b'$')
+        || options.markstream && needs_markstream_markup(text))
+    {
+        return InlineContent::Plain(input);
+    }
+    InlineContent::Parsed(parse_inner(
+        source, input, options, refs, unresolved, None, false,
+    ))
 }
 
 pub(crate) fn parse_preview(
@@ -264,6 +317,7 @@ pub(crate) fn parse_preview(
     parse_inner(source, input, options, refs, None, None, true)
 }
 
+#[cfg(test)]
 pub(crate) fn parse_tracked(
     source: &str,
     input: Span,
@@ -546,7 +600,7 @@ fn parse_inner(
 ) -> Vec<Inline> {
     // Short leaves usually fit without allocating scratch. Use Vec for longer
     // leaves, where repeatedly checking SmallVec's spill state costs more.
-    let mut nodes = if input.end - input.start <= 128 {
+    let parsed = if input.end - input.start <= 128 {
         parse_storage::<Local>(
             source,
             input,
@@ -566,6 +620,11 @@ fn parse_inner(
             reference_origins,
             preview,
         )
+    };
+    let mut nodes = match parsed {
+        InlineContent::Plain(plain) => singleton(original(plain.start, plain.end)),
+        InlineContent::Parsed(nodes) => nodes,
+        InlineContent::Fragments(_) => unreachable!(),
     };
     if options.markstream && preview {
         markstream::strip_preview_tail(source, &mut nodes, options.math);
@@ -587,7 +646,7 @@ fn parse_storage<S: Storage>(
     unresolved: Option<&mut Vec<String>>,
     reference_origins: Option<(&str, &mut Vec<usize>)>,
     preview: bool,
-) -> Vec<Inline> {
+) -> InlineContent {
     match (options.math, options.markstream) {
         (false, false) => parse_with::<S, false, false>(
             source,
@@ -619,39 +678,89 @@ fn parse_storage<S: Storage>(
     }
 }
 
+struct LexStart {
+    span: Span,
+    first: usize,
+    gfm_autolink: bool,
+    preview_end: Option<usize>,
+}
+
+#[inline]
+fn markup_probe<const MATH: bool, const MARKSTREAM: bool>(
+    text: &str,
+    syntax: Syntax,
+) -> (Option<usize>, bool) {
+    let gfm = syntax == Syntax::Gfm;
+    (
+        first_special_mode::<MATH, MARKSTREAM>(text.as_bytes(), gfm),
+        gfm && has_gfm_trigger(text),
+    )
+}
+
+#[inline]
+fn plain_or_autolink(source: &str, input: Span, gfm_autolink: bool) -> InlineContent {
+    if gfm_autolink {
+        let mut output = Vec::new();
+        append_gfm_text(source, input.start, input.end, &mut output);
+        InlineContent::Parsed(output)
+    } else {
+        InlineContent::Plain(input)
+    }
+}
+
 fn parse_with<S: Storage, const MATH: bool, const MARKSTREAM: bool>(
     source: &str,
     input: Span,
     options: &Options,
     refs: &References,
-    mut unresolved: Option<&mut Vec<String>>,
+    unresolved: Option<&mut Vec<String>>,
     reference_origins: Option<(&str, &mut Vec<usize>)>,
     preview: bool,
+) -> InlineContent {
+    let leading = content(source, input).trim_start_matches([' ', '\t', '\r', '\n']);
+    let start = input.end - leading.len();
+    let end = start + leading.trim_end_matches([' ', '\t', '\r', '\n']).len();
+    let (first, gfm_autolink) =
+        markup_probe::<MATH, MARKSTREAM>(&source[start..end], options.syntax);
+    let span = span(start, end);
+    let Some(first) = first else {
+        return plain_or_autolink(source, span, gfm_autolink);
+    };
+    let lex = LexStart {
+        span,
+        first: start + first,
+        gfm_autolink,
+        preview_end: preview.then_some(input.end),
+    };
+    InlineContent::Parsed(parse_scanned::<S, MATH, MARKSTREAM>(
+        source,
+        options,
+        refs,
+        unresolved,
+        reference_origins,
+        lex,
+    ))
+}
+
+fn parse_scanned<S: Storage, const MATH: bool, const MARKSTREAM: bool>(
+    source: &str,
+    options: &Options,
+    refs: &References,
+    mut unresolved: Option<&mut Vec<String>>,
+    reference_origins: Option<(&str, &mut Vec<usize>)>,
+    lex: LexStart,
 ) -> Vec<Inline> {
     let (reference_source, mut reference_offsets) = reference_origins
         .map_or((source, None), |(reference_source, offsets)| {
             (reference_source, Some(offsets))
         });
     let bytes = source.as_bytes();
-    let raw = content(source, input);
-    let leading = raw.trim_start_matches([' ', '\t', '\r', '\n']);
-    let start = input.end - leading.len();
-    let end = start + leading.trim_end_matches([' ', '\t', '\r', '\n']).len();
+    let Span { start, end } = lex.span;
     let gfm = options.syntax == Syntax::Gfm;
     let math = MATH && (!MARKSTREAM || options.math);
-    let math_end = if preview { input.end } else { end };
-    let gfm_autolink = gfm && has_gfm_trigger(&source[start..end]);
-    let Some(first) = first_special_mode::<MATH, MARKSTREAM>(&bytes[start..end], gfm) else {
-        return if start == end {
-            Vec::new()
-        } else if gfm_autolink {
-            let mut output = Vec::new();
-            append_gfm_text(source, start, end, &mut output);
-            output
-        } else {
-            vec![original(start, end)]
-        };
-    };
+    let preview = lex.preview_end.is_some();
+    let math_end = lex.preview_end.unwrap_or(end);
+    let gfm_autolink = lex.gfm_autolink;
 
     let mut tokens = S::Tokens::default();
     let mut payloads = S::Payloads::default();
@@ -659,8 +768,8 @@ fn parse_with<S: Storage, const MATH: bool, const MARKSTREAM: bool>(
     let mut link_generation = 0;
     let mut backticks = None;
     let mut math_scanner = inline_math::Scanner::default();
-    push_original(&mut tokens, start, start + first);
-    let mut i = start + first;
+    push_original(&mut tokens, start, lex.first);
+    let mut i = lex.first;
     while i < end {
         if !special_mode::<MATH, MARKSTREAM>(bytes[i], gfm) {
             let next = first_special_mode::<MATH, MARKSTREAM>(&bytes[i..end], gfm)
@@ -3162,5 +3271,52 @@ mod tests {
             })
             .collect::<String>();
         assert_eq!(visible, "Value (12%)");
+    }
+
+    #[test]
+    fn direct_inline_content_keeps_plain_spans_and_markup_boundaries() {
+        let options = Options::default();
+        let refs = References::default();
+        let plain = "  普通文本 only.  ";
+        assert_eq!(
+            parse_content(plain, span(2, plain.len() - 2), &options, &refs, None),
+            InlineContent::Plain(span(2, plain.len() - 2)),
+        );
+        let plain = "普通文本".repeat(30);
+        assert_eq!(
+            parse_content(&plain, span(0, plain.len()), &options, &refs, None),
+            InlineContent::Plain(span(0, plain.len())),
+        );
+
+        for source in ["a*b", "**word**", "www.example.com/path"] {
+            let parsed = parse_content(source, span(0, source.len()), &options, &refs, None);
+            assert_eq!(
+                parsed,
+                InlineContent::Parsed(parse(source, span(0, source.len()), &options, &refs)),
+                "{source}",
+            );
+        }
+
+        let options = Options {
+            markstream: true,
+            math: true,
+            ..options
+        };
+        let legacy_plain = "x = y";
+        assert_eq!(
+            parse_content(
+                legacy_plain,
+                span(0, legacy_plain.len()),
+                &options,
+                &refs,
+                None
+            ),
+            InlineContent::Plain(span(0, legacy_plain.len())),
+        );
+        let source = r"**A** \(0.0002\%\)";
+        assert_eq!(
+            parse_content(source, span(0, source.len()), &options, &refs, None),
+            InlineContent::Parsed(parse(source, span(0, source.len()), &options, &refs)),
+        );
     }
 }

@@ -455,3 +455,122 @@ test('legacy custom closure keeps the preserved same-line suffix next to the typ
     session.dispose()
   }
 })
+
+test('legacy strict strong projection omits center on a typed literal fallback', () => {
+  const session = createSession({ parseOptions: { requireClosingStrong: true } })
+  try {
+    session.append('prefix **soft')
+    assert.deepEqual(session.snapshot()[0].children, [{
+      type: 'text', content: 'prefix **soft', raw: 'prefix **soft',
+    }])
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('native HTML content preview retains the held closing prefix only in raw', () => {
+  const session = createSession()
+  try {
+    session.append('<div data-kind="box">HTML 内容</d')
+    const [block] = session.snapshot()
+    assert.equal(block.raw, '<div data-kind="box">HTML 内容</d')
+    assert.equal(block.content, '<div data-kind="box">HTML 内容\n</div>')
+    assert.equal(block.loading, true)
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('native external closer updates the inline raw without extending its paragraph source', () => {
+  const session = createSession({ parseOptions: { customHtmlTags: ['widget'] } })
+  try {
+    session.append('- prefix <widget>{"a":"b"}\n\n')
+    session.append('</widget>')
+    session.finish()
+    const [list] = session.snapshot()
+    const [paragraph] = list.items[0].children
+    const widget = paragraph.children.find(node => node.type === 'widget')
+    assert.equal(widget.content, '{"a":"b"}')
+    assert.ok(widget.raw.endsWith('</widget>'))
+    assert.equal(paragraph.raw, 'prefix <widget>{"a":"b"}')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('locally closed paragraph keeps explicit math preview until the session ends', () => {
+  const session = createSession()
+  try {
+    session.append('Equation $x +')
+    session.append('\n\nNext')
+    const [paragraph, following] = session.snapshot()
+    assert.equal(paragraph.raw, 'Equation $x +')
+    assert.equal(paragraph.children[1].type, 'math_inline')
+    assert.equal(paragraph.children[1].loading, true)
+    assert.equal(following.raw, 'Next')
+    session.finish()
+    assert.equal(session.snapshot()[0].raw, 'Equation $x +')
+    assert.deepEqual(session.snapshot()[0].children, [
+      { type: 'text', content: 'Equation $x +', raw: 'Equation $x +', center: false },
+    ])
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('native provisional fence uses the existing code block output', () => {
+  const session = createSession()
+  try {
+    session.append('~~~dif')
+    assert.deepEqual(session.snapshot(), [{
+      type: 'code_block', language: 'dif', code: '', raw: '', diff: false, loading: true,
+    }])
+    session.append('f\n+line')
+    const [block] = session.snapshot()
+    assert.equal(block.diff, true)
+    assert.equal(block.updatedCode, 'line')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('legacy simple link metadata remains compact only with same-line inline content after it', () => {
+  const session = createSession()
+  try {
+    session.append('## [label](https://a.test "title") tail\n\n[label](https://b.test)\nnext')
+    session.finish()
+    const [heading, paragraph] = session.snapshot()
+    assert.deepEqual(heading.children[0], {
+      type: 'link', href: 'https://a.test', title: 'title', text: 'label',
+      children: [{ type: 'text', content: 'label', raw: 'label' }],
+      raw: '[label](https://a.test "title")', loading: false, markup: '',
+    })
+    assert.deepEqual(paragraph.children[0].attrs, [['href', 'https://b.test']])
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('legacy math map extends only for typed open Markstream blocks', () => {
+  const session = createSession({ parseOptions: { includeSourceMap: true } })
+  try {
+    session.append('$$\nx +\n')
+    let [block] = session.snapshot()
+    assert.equal(block.loading, true)
+    assert.deepEqual(block.sourceMap, { startLine: 0, endLine: 3 })
+    session.append('$$\n')
+    session.finish()
+    ;[block] = session.snapshot()
+    assert.equal(block.loading, false)
+    assert.deepEqual(block.sourceMap, { startLine: 0, endLine: 3 })
+  }
+  finally {
+    session.dispose()
+  }
+})

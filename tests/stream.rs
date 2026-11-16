@@ -69,6 +69,16 @@ impl View {
                     block.status = status;
                     block.span.end = end;
                 }
+                Change::CloseInlineElement { id, start, end } => {
+                    let block = self.blocks.get_mut(&id).unwrap();
+                    let content = match &mut block.data {
+                        BlockData::Paragraph(content) | BlockData::Heading { content, .. } => {
+                            content
+                        }
+                        _ => panic!("invalid inline closer target: {id:?}"),
+                    };
+                    assert!(content.close_inline_element(start, end));
+                }
                 Change::Preview { .. } | Change::PreviewInlines { .. } => {}
                 change => panic!("unexpected nested change: {change:?}"),
             }
@@ -1036,5 +1046,203 @@ fn a_partial_reference_definition_previews_only_waiting_text() {
         changes
             .iter()
             .any(|change| matches!(change, Change::Replace(block) if block.id == id))
+    );
+}
+
+#[test]
+fn markstream_fence_previews_the_info_and_keeps_the_id_at_the_newline() {
+    let options = Options {
+        markstream: true,
+        preview: Preview::Ai,
+        ..Options::default()
+    };
+    let mut parser = Parser::new(options);
+    let mut changes = Vec::new();
+    parser.append("~~~dif", &mut changes).unwrap();
+    let [Change::Insert { block, .. }] = changes.as_slice() else {
+        panic!("expected preview")
+    };
+    let id = block.id;
+    let BlockData::CodeBlock {
+        info: Some(info),
+        body,
+    } = block.data
+    else {
+        panic!("expected a fence")
+    };
+    assert_eq!(parser.source(info), "dif");
+    assert_eq!(parser.source(body), "");
+    changes.clear();
+    parser.append("f\n+x\n", &mut changes).unwrap();
+    assert!(matches!(changes.as_slice(),
+        [Change::Replace(block), Change::AppendText { id: updated, .. }] if block.id == id && *updated == id));
+}
+
+#[test]
+fn invalid_backtick_info_changes_a_fence_preview_into_the_same_paragraph() {
+    let options = Options {
+        markstream: true,
+        preview: Preview::Ai,
+        ..Options::default()
+    };
+    let mut parser = Parser::new(options.clone());
+    let mut changes = Vec::new();
+    let mut view = View::default();
+    parser.append("```ts", &mut changes).unwrap();
+    view.apply(&mut changes);
+    let id = *view.blocks.keys().next().unwrap();
+    parser.append(" `", &mut changes).unwrap();
+    view.apply(&mut changes);
+    assert!(matches!(view.blocks[&id].data, BlockData::Paragraph(_)));
+    parser.finish(&mut changes).unwrap();
+    view.apply(&mut changes);
+    assert_eq!(
+        view.blocks.into_values().collect::<Vec<_>>(),
+        parse(parser.source_text(), &options).unwrap().nodes
+    );
+}
+
+#[test]
+fn locally_closed_paragraph_keeps_pending_math_until_document_finish() {
+    let options = Options {
+        markstream: true,
+        math: true,
+        preview: Preview::Ai,
+        ..Options::default()
+    };
+    let mut parser = Parser::new(options);
+    let mut changes = Vec::new();
+    parser.append("before $x +\n\nnext", &mut changes).unwrap();
+    let id = changes
+        .iter()
+        .find_map(|change| match change {
+            Change::Insert { block, .. } | Change::Replace(block)
+                if block.status == BlockStatus::Closed =>
+            {
+                Some(block.id)
+            }
+            _ => None,
+        })
+        .expect("the first paragraph must close");
+    assert!(changes.iter().any(|change| matches!(change, Change::PreviewInlines { id: changed, nodes }
+        if *changed == id && nodes.iter().any(|node| matches!(node.kind, InlineKind::Math { loading: true, .. })))));
+    changes.clear();
+    parser.finish(&mut changes).unwrap();
+    assert!(changes.iter().any(|change| matches!(change,
+        Change::PreviewInlines { id: changed, nodes } if *changed == id && nodes.is_empty())));
+}
+
+#[test]
+fn append_coalesces_only_insertions_from_its_own_batch() {
+    let mut parser = Parser::new(Options::default());
+    let mut changes = Vec::new();
+    parser.append("first\n\nsecond\n\n", &mut changes).unwrap();
+    assert!(matches!(changes.as_slice(),
+        [Change::Insert { block: first, .. }, Change::Insert { block: second, .. }]
+        if first.status == BlockStatus::Closed && second.status == BlockStatus::Closed));
+    changes.clear();
+    parser.append("third", &mut changes).unwrap();
+    let [Change::Insert { block, .. }] = changes.as_slice() else {
+        panic!("expected the open paragraph")
+    };
+    let id = block.id;
+    parser.append("\n\n", &mut changes).unwrap();
+    assert!(matches!(changes.as_slice(),
+        [Change::Insert { block, .. }, Change::Replace(closed)]
+        if block.id == id && block.status == BlockStatus::Open && closed.id == id && closed.status == BlockStatus::Closed));
+}
+
+#[test]
+fn a_partial_sibling_item_reuses_the_list_and_publishes_its_first_paragraph() {
+    let options = Options {
+        markstream: true,
+        preview: Preview::Ai,
+        ..Options::default()
+    };
+    let mut parser = Parser::new(options);
+    let mut changes = Vec::new();
+    parser
+        .append("  1. first\n  2. second\n", &mut changes)
+        .unwrap();
+    let id = changes
+        .iter()
+        .find_map(|change| match change {
+            Change::Insert { block, .. } if matches!(block.data, BlockData::List { .. }) => {
+                Some(block.id)
+            }
+            _ => None,
+        })
+        .expect("a list was emitted");
+    changes.clear();
+    parser.append("  3. thi", &mut changes).unwrap();
+    let item = changes
+        .iter()
+        .find_map(|change| match change {
+            Change::Insert {
+                parent: Some(parent),
+                block,
+            } if *parent == id && matches!(block.data, BlockData::ListItem { .. }) => {
+                Some(block.id)
+            }
+            _ => None,
+        })
+        .expect("the sibling item reused the existing list");
+    assert!(changes.iter().any(|change| matches!(change,
+        Change::Insert { parent: Some(parent), block } if *parent == item
+            && matches!(block.data, BlockData::Paragraph(InlineContent::Plain(span)) if parser.source(span) == "thi"))));
+    changes.clear();
+    parser.append("rd\n", &mut changes).unwrap();
+    assert!(!changes.iter().any(|change| matches!(change,
+        Change::Insert { block, .. } if matches!(block.data, BlockData::ListItem { .. }))));
+}
+
+#[test]
+fn a_provisional_html_closer_keeps_raw_bytes_separate_from_visible_content() {
+    let options = Options {
+        markstream: true,
+        preview: Preview::Ai,
+        ..Options::default()
+    };
+    let mut parser = Parser::new(options);
+    let mut changes = Vec::new();
+    parser.append("<div>内容</d", &mut changes).unwrap();
+    let [
+        Change::Insert { block, .. },
+        Change::Preview {
+            id,
+            hint: Some(PreviewHint::HtmlContent(content)),
+        },
+    ] = changes.as_slice()
+    else {
+        panic!("expected raw HTML and a held closer")
+    };
+    let id = *id;
+    assert_eq!(block.id, id);
+    assert_eq!(parser.source(block.span), "<div>内容</d");
+    assert_eq!(parser.source(*content), "<div>内容");
+    changes.clear();
+    parser.append("iv>", &mut changes).unwrap();
+    assert!(
+        matches!(changes.as_slice(), [Change::Replace(block)] if block.id == id && block.status == BlockStatus::Closed)
+    );
+}
+
+#[test]
+fn incomplete_image_link_is_previewed_without_a_destination() {
+    let options = Options {
+        markstream: true,
+        preview: Preview::Ai,
+        ..Options::default()
+    };
+    let mut parser = Parser::new(options);
+    let mut changes = Vec::new();
+    parser
+        .append("[![badge](https://example.com/bad", &mut changes)
+        .unwrap();
+    assert!(
+        matches!(changes.last(), Some(Change::PreviewInlines { nodes, .. }) if
+        matches!(&nodes[0].kind, InlineKind::LinkPreview(link)
+            if link.destination.as_str(parser.source_text()).is_empty()
+               && matches!(link.children[0].kind, InlineKind::ImagePreview(_))))
     );
 }

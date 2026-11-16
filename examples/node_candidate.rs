@@ -350,6 +350,9 @@ fn change_value(change: &Change, source: &str) -> Value {
         Change::SetStatus { id, status, end } => {
             json!({ "op": "status", "id": id.0, "status": status_name(*status), "end": end })
         }
+        Change::CloseInlineElement { id, start, end } => {
+            json!({ "op": "close_inline_element", "id": id.0, "start": start, "end": end })
+        }
         Change::Remove { id } => json!({ "op": "remove", "id": id.0 }),
         Change::PreviewInlines { id, nodes } => {
             json!({ "op": "preview_inlines", "id": id.0, "nodes": inlines(nodes, source) })
@@ -358,6 +361,7 @@ fn change_value(change: &Change, source: &str) -> Value {
             json!({ "op": "preview", "id": id.0, "hint": hint.as_ref().map(|hint| match hint {
                 PreviewHint::Table { table, loading } => json!({ "kind": "table", "data": table_value(table, source), "loading": loading }),
                 PreviewHint::TableRow(cells) => json!({ "kind": "table_row", "cells": cells.iter().map(|value| content(value, source)).collect::<Vec<_>>() }),
+                PreviewHint::HtmlContent(value) => json!({ "kind": "html_content", "span": span(*value) }),
             }) })
         }
     }

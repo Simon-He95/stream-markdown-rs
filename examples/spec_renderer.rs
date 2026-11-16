@@ -228,6 +228,14 @@ fn apply_changes(blocks: &mut StreamView, changes: &mut Vec<Change>) -> Result<(
                 table.add_row(cells);
                 block.span.end = end;
             }
+            Change::CloseInlineElement { id, start, end } => {
+                let block = existing_block(blocks, id)?;
+                let content = match &mut block.data {
+                    BlockData::Paragraph(content) | BlockData::Heading { content, .. } => content,
+                    _ => panic!("invalid inline closer target: {id:?}"),
+                };
+                assert!(content.close_inline_element(start, end));
+            }
             Change::Preview { .. } | Change::PreviewInlines { .. } => {}
         }
     }

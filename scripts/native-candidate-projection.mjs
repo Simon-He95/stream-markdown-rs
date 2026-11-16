@@ -106,14 +106,14 @@ function rawLines(lines, context) {
   return normalize(lines.map(line => ' '.repeat(line.leading) + context.read(line.span)).join(''))
 }
 
-function inlineRaw(content, range, context) {
+function inlineRaw(content, range, context, end = Infinity) {
   if (content.plain)
     return readText(content.plain, context).trim()
   if (content.fragments)
     return normalize(content.fragments.map(span => context.read(span)).join('')).trim()
   const first = content.parsed.at(0)
   const last = content.parsed.at(-1)
-  return first && last ? normalize(context.read([first.span[0], last.span[1]])).trim() : range ?? ''
+  return first && last ? normalize(context.read([first.span[0], Math.min(last.span[1], end)])).trim() : range ?? ''
 }
 
 function htmlHeader(raw) {
@@ -194,10 +194,16 @@ function mathNode(type, body, raw, loading, context) {
   return { type, content, raw: open + content + close, loading, markup }
 }
 
+function needsLegacyCenter(text, context) {
+  // The strict legacy strong fallback omits center on text already left literal by the parser.
+  return !(context.markstream && !context.final
+    && context.parseOptions.requireClosingStrong && text.includes('**'))
+}
+
 function projectInlines(content, context) {
   if (content.plain || content.fragments) {
     const text = inlineRaw(content, '', context)
-    return text ? [textNode(text)] : []
+    return text ? [textNode(text, needsLegacyCenter(text, context))] : []
   }
   return projectInlineNodes(content.parsed, context)
 }
@@ -224,7 +230,20 @@ function customInlineNode(data, status, raw, context) {
   }
 }
 
-function projectInlineNodes(inlines, context) {
+function sameLineInlineSuffix(inlines, index, context) {
+  const line = lineAt(context.lineStarts, inlines[index].span[1])
+  for (let i = index + 1; i < inlines.length; i++) {
+    const node = inlines[i]
+    if (node.kind === 'softbreak' || node.kind === 'hardbreak'
+      || lineAt(context.lineStarts, node.span[0]) !== line)
+      return false
+    if (node.kind !== 'text' || readText(node.data, context).trim())
+      return true
+  }
+  return false
+}
+
+function projectInlineNodes(inlines, context, insideLoadingLink = false) {
   const nodes = []
   for (let index = 0; index < inlines.length; index++) {
     const { kind, span, data } = inlines[index]
@@ -267,14 +286,14 @@ function projectInlineNodes(inlines, context) {
     else if (kind === 'link' || kind === 'image') {
       const href = markdownHref(readText(data.destination, context))
       const title = data.title === null ? null : readText(data.title, context) || null
-      const children = projectInlineNodes(data.children, context)
+      const children = projectInlineNodes(data.children, context, kind === 'link' && data.loading)
       const allowed = allowsLink(href, context, kind)
       if (kind === 'link' && data.loading) {
         const text = legacyLinkText(children)
         const visibleHref = allowed ? href : ''
         const visibleChildren = children.map(child => child.type === 'text' ? textNode(child.content, false) : child)
         nodes.push({
-          type: kind, href: visibleHref, title: title ?? '', text, children: visibleChildren,
+          type: kind, href: visibleHref, title: title ?? (children.some(child => child.type === 'image') ? null : ''), text, children: visibleChildren,
           raw: `[${text}](${visibleHref})`, loading: true, markup: '',
         })
       }
@@ -284,16 +303,24 @@ function projectInlineNodes(inlines, context) {
       else if (kind === 'image') {
         const first = data.children.at(0)
         const last = data.children.at(-1)
-        const raw = first && last ? normalize(context.read([first.span[0], last.span[1]])) : ''
-        nodes.push({ type: 'image', src: href, alt: displayText(children), title, raw, loading: data.loading })
+        const labelRaw = first && last ? normalize(context.read([first.span[0], last.span[1]])) : ''
+        const imageRaw = context.markstream && insideLoadingLink && data.loading
+          ? raw + (href ? ')' : '')
+          : labelRaw
+        nodes.push({ type: 'image', src: href, alt: displayText(children), title, raw: imageRaw, loading: data.loading })
       }
       else {
         const markup = raw.startsWith('<') ? 'autolink' : raw.startsWith('[') ? '' : 'linkify'
-        if (markup && /^<?https?:\/\//i.test(raw)) {
+        const compact =
+          (markup && /^<?https?:\/\//i.test(raw))
+          || (context.markstream && !markup && raw.includes('](')
+            && children.length === 1 && children[0].type === 'text'
+            && sameLineInlineSuffix(inlines, index, context))
+        if (compact) {
           const text = legacyLinkText(children)
           nodes.push({
-            type: 'link', href, title: '', text, children: [textNode(text, false)],
-            raw: `[${text}](${href})`, loading: false, markup,
+            type: 'link', href, title: title ?? '', text, children: [textNode(text, false)],
+            raw: `[${text}](${href}${title ? ` "${title}"` : ''})`, loading: false, markup,
           })
         }
         else {
@@ -365,6 +392,10 @@ function projectInlineNodes(inlines, context) {
     else {
       nodes.push({ type: kind, raw, ...data })
     }
+  }
+  for (const node of nodes) {
+    if (node.type === 'text' && !needsLegacyCenter(node.content, context))
+      delete node.center
   }
   return nodes
 }
@@ -548,6 +579,7 @@ function renderDetailChild(node, inlineParagraph = false) {
       return '<div class="code-block" data-lang="' + escapeHtml(node.language) + '"><pre>'
         + escapeHtml(node.code) + '</pre></div>'
     case 'html_block':
+      return node.tag === 'summary' && node.loading ? node.raw ?? node.content : node.content
     case 'html_inline':
       return node.content
     default:
@@ -561,6 +593,12 @@ function detailNode(block, nodes, raw, map, context) {
   const summary = block.kind === 'summary'
   const attrs = data.attrs
   if (summary) {
+    if (context.markstream && open && !context.final) {
+      const visible = normalize(context.read([block.span[0], context.length]))
+      if (/<\/[^>]*$/.test(visible))
+        return { type: 'html_block', content: visible, tag: 'summary', loading: true }
+      return { type: 'html_block', content: visible + '\n</summary>', raw: visible, tag: 'summary', loading: true }
+    }
     const content = raw.trimEnd()
     return {
       type: 'html_block', tag: 'summary', content, raw: content,
@@ -573,6 +611,12 @@ function detailNode(block, nodes, raw, map, context) {
   const opening = normalize(context.read(data.opening))
   const openerLine = lineAt(context.lineStarts, data.opening[0])
   const openerLineEnd = context.lineStarts[openerLine + 1]
+  const last = nodes.get(block.children.at(-1))
+  if (context.markstream && open && last?.kind === 'summary' && last.status === 'open') {
+    const surfaceSpan = [block.span[0], context.length]
+    raw = normalize(context.read(surfaceSpan))
+    map = sourceMap(surfaceSpan, context)
+  }
   if (open && !children.length && openerLineEnd > block.span[1]
     && !context.read([data.opening[1], openerLineEnd]).trim()) {
     const surfaceSpan = [block.span[0], openerLineEnd]
@@ -604,7 +648,7 @@ function projectBlock(block, nodes, context) {
         const previewMap = sourceMap([span[0], context.length], context)
         return projectTable(preview.data, preview.loading, previewMap, context)
       }
-      let projectedRaw = inlineRaw(data, raw.trim(), context)
+      let projectedRaw = inlineRaw(data, raw.trim(), context, span[1])
       const last = block.previewInlines?.parsed.at(-1)
       if (context.markstream && open && last && last.span[1] < span[1]
         && context.read([last.span[1], span[1]]).trimStart().startsWith('<')) {
@@ -613,7 +657,7 @@ function projectBlock(block, nodes, context) {
       return { type: kind, children: projectInlines(block.previewInlines ?? data, context), raw: projectedRaw, ...map }
     }
     case 'heading': {
-      const raw = inlineRaw(data.content, '', context)
+      const raw = inlineRaw(data.content, '', context, span[1])
       return { type: kind, level: data.level, text: raw, children: projectInlines(block.previewInlines ?? data.content, context), raw, ...map }
     }
     case 'code_block':
@@ -640,6 +684,8 @@ function projectBlock(block, nodes, context) {
     case 'thematic_break':
       return { type: kind, raw: '---', ...map }
     case 'math_block':
+      if (map.sourceMap && context.markstream && open && !context.final)
+        map.sourceMap.endLine++
       return { ...mathNode(kind, data.body, raw.trimStart(), open && !context.final, context), ...map }
     case 'footnote': {
       const id = context.read(data.label)
@@ -718,10 +764,13 @@ function projectBlock(block, nodes, context) {
     case 'html_block': {
       const content = data.lines ? rawLines(data.lines, context) : raw
       const header = htmlHeader(content.trimStart())
-      const loading = status === 'open' && !context.final && !header?.closed
-      const display = context.markstream && loading && header?.tag
-        ? content + (content.endsWith('\n') ? '' : '\n') + `</${header.tag}>`
+      const loading = status === 'open' && !context.final && Boolean(header) && !header.closed
+      const visible = block.preview?.kind === 'html_content'
+        ? readText(block.preview.span, context)
         : content
+      const display = context.markstream && loading
+        ? visible + `\n</${header.tag}>`
+        : visible
       return {
         type: kind, content: display, raw: content, tag: header?.tag ?? '',
         ...(header?.attrs.length && { attrs: header.attrs }),

@@ -264,11 +264,22 @@ function verify(id, options, actions, corpus = false) {
 
 const corpora = new URL('../fixtures/corpus/', import.meta.url)
 let checked = 0
+let failed = 0
+function check(...args) {
+  checked++
+  try {
+    verify(...args)
+  }
+  catch (error) {
+    failed++
+    console.error(error)
+  }
+}
+
 for (const fixture of fixtures) {
   if (requested && requested !== fixture.id)
     continue
-  verify(fixture.id, fixture.options, createActionPlan(fixture, fixture.seed))
-  checked++
+  check(fixture.id, fixture.options, createActionPlan(fixture, fixture.seed))
 }
 
 for (const name of readdirSync(corpora).sort()) {
@@ -283,8 +294,11 @@ for (const name of readdirSync(corpora).sort()) {
     offset = end
   }
   actions.push({ kind: 'final-transition', final: true })
-  verify(name, {}, actions, true)
-  checked++
+  check(name, {}, actions, true)
 }
 if (!checked)
   throw new Error(`Unknown differential fixture: ${requested}`)
+if (failed) {
+  console.error(`Strict differential: ${checked - failed}/${checked} fixtures passed`)
+  process.exitCode = 1
+}
