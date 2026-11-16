@@ -345,6 +345,9 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false) {
         const linkified = Boolean(visibleHref && context.markstream && ready !== destination)
         const visibleChildren = children.map(child => child.type === 'text' ? textNode(child.content, false) : child)
         const waitingForHref = context.markstream && !hasImage && !ready
+        const previous = nodes.at(-1)
+        if (waitingForHref && previous?.type === 'text' && !previous.content.includes('\n'))
+          delete previous.center
         nodes.push({
           type: kind,
           href: visibleHref,

@@ -1007,6 +1007,36 @@ test('an explicit draft link keeps the title that has arrived', () => {
   }
 })
 
+test('a draft Markdown link waiting for its href preserves the legacy preceding text shape', () => {
+  const session = createSession()
+  const multiline = createSession()
+  try {
+    session.append('See [Guide](/gu')
+    assert.deepEqual(session.snapshot()[0].children, [
+      { type: 'text', content: 'See ', raw: 'See ' },
+      {
+        type: 'link', href: '', title: null, text: 'Guide',
+        children: [{ type: 'text', content: 'Guide', raw: 'Guide' }],
+        loading: true, markup: '',
+      },
+    ])
+    session.append('ide)')
+    assert.deepEqual(session.snapshot()[0].children[0], {
+      type: 'text', content: 'See ', raw: 'See ', center: false,
+    })
+    assert.equal(session.snapshot()[0].children[1].href, '/guide')
+
+    multiline.append('Overview\nSee [Guide](/gu')
+    assert.deepEqual(multiline.snapshot()[0].children[0], {
+      type: 'text', content: 'Overview\nSee ', raw: 'Overview\nSee ', center: false,
+    })
+  }
+  finally {
+    session.dispose()
+    multiline.dispose()
+  }
+})
+
 test('a loading image link after a completed link uses the image alt as its label', () => {
   const session = createSession()
   try {
