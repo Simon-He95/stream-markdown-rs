@@ -154,7 +154,15 @@ pub(crate) enum Opening {
 pub(crate) fn opening_at(line: &str, column: usize, padding: usize) -> Option<Opening> {
     let bytes = line.as_bytes();
     let leading = whitespace(bytes, column, padding, 3);
-    if leading.padding != 0 {
+    opening_after_indent(bytes, column, leading)
+}
+
+pub(crate) fn opening_after_indent(
+    bytes: &[u8],
+    column: usize,
+    leading: Prefix,
+) -> Option<Opening> {
+    if leading.columns > 3 || leading.padding != 0 {
         return None;
     }
     if bytes.get(leading.bytes) == Some(&b'>') {

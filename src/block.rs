@@ -1882,6 +1882,7 @@ impl Engine {
         }
         let physical_blank = blank(&source[line.start..line.end]);
         let mut matched = 0;
+        let mut failed_item_prefix = None;
         let mut vmr_close = None;
         let mut details_close = None;
         while let Some(frame) = self.containers.get(matched) {
@@ -1936,7 +1937,12 @@ impl Engine {
                             line.padding,
                             indent,
                         );
-                        (prefix.columns == indent).then_some(prefix)
+                        if prefix.columns == indent {
+                            Some(prefix)
+                        } else {
+                            failed_item_prefix = Some(prefix);
+                            None
+                        }
                     }
                 }
             };
@@ -1991,7 +1997,13 @@ impl Engine {
         }
 
         let remaining = &source[line.start..line.end];
-        let mut opening = container::opening_at(remaining, line.column, line.padding);
+        // A short item prefix reached the first non-whitespace byte without advancing the line.
+        let mut opening =
+            if let Some(prefix) = failed_item_prefix.filter(|prefix| prefix.padding == 0) {
+                container::opening_after_indent(remaining.as_bytes(), line.column, prefix)
+            } else {
+                container::opening_at(remaining, line.column, line.padding)
+            };
         if matched < self.containers.len() {
             let starts_container = opening.is_some()
                 || self.options.markstream
