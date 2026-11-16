@@ -808,21 +808,23 @@ function projectBlock(block, nodes, context) {
       let projectedMap = map
       if (context.markstream && status === 'closed')
         content = content.replace(/\n$/, '')
-      if (context.markstream && open && block.parent === null) {
+      const partialBlock = context.markstream && block.parent === null && status !== 'closed'
+      if (partialBlock) {
         // The native node can hold a potential same-tag closer. Legacy raw displays those bytes.
-        const suffix = normalize(context.read([data.body[1], context.length]))
+        const suffix = open ? normalize(context.read([data.body[1], context.length])) : ''
         const sourceBody = body + suffix
         const onSameLine = /^[ \t]*\S/.test(sourceBody)
         const visibleBody = onSameLine ? sourceBody.replace(/^[ \t]+/, '') : sourceBody.replace(/^\n/, '')
         const pendingClose = '</' + data.name
-        content = visibleBody.endsWith(pendingClose)
+        content = open && visibleBody.endsWith(pendingClose)
           ? visibleBody.slice(0, -pendingClose.length)
           : visibleBody
         const opening = normalize(context.read([span[0], data.body[0]]))
         projectedRaw = opening + (onSameLine ? '\n' + visibleBody : sourceBody)
-        projectedMap = sourceMap([span[0], context.length], context)
+        if (open)
+          projectedMap = sourceMap([span[0], context.length], context)
       }
-      const children = data.children?.length && (!open || !context.markstream)
+      const children = data.children?.length && !partialBlock && (!open || !context.markstream)
         ? projectInlineNodes(data.children, context)
         : undefined
       return {
