@@ -440,12 +440,62 @@ function projectCodeAdjacentDraftLink(inlines, index, nodes, children, href, con
   return true
 }
 
+function isEscapedBacktick(node, context) {
+  return node?.kind === 'text' && Array.isArray(node.data)
+    && node.data[0] === node.span[0] + 1 && node.data[1] === node.span[1]
+    && context.read([node.span[0], node.span[0] + 2]) === '\\`'
+}
+
+function escapedBacktickPair(inlines, index, context) {
+  const opening = inlines[index]
+  if (!isEscapedBacktick(opening, context))
+    return
+  const previous = inlines[index - 1]
+  if (previous?.span[1] === opening.span[0] && previous.span[1] - previous.span[0] === 2
+    && isEscapedBacktick(previous, context))
+    return
+  let code = readText(opening.data, context).slice(1)
+  if (code.includes('`'))
+    return
+  const line = lineAt(context.lineStarts, opening.span[0])
+  for (let at = index + 1; at < inlines.length; at++) {
+    const node = inlines[at]
+    if (node.kind !== 'text' || node.span[0] !== inlines[at - 1].span[1]
+      || lineAt(context.lineStarts, node.span[1] - 1) !== line)
+      return
+    const text = readText(node.data, context)
+    if (isEscapedBacktick(node, context)) {
+      const next = inlines[at + 1]
+      const tail = text.slice(1)
+      if (!code || tail.startsWith('`') || (!tail && next?.span[0] === node.span[1] && isEscapedBacktick(next, context)))
+        return
+      return { code, tail, end: at }
+    }
+    if (text.includes('`'))
+      return
+    code += text
+  }
+}
+
 function projectInlineNodes(inlines, context, insideLoadingLink = false, insideLinkLabel = false) {
   const nodes = []
   for (let index = 0; index < inlines.length; index++) {
     const { kind, span, data } = inlines[index]
     const raw = normalize(context.read(span))
     if (kind === 'text' || kind === 'softbreak') {
+      if (kind === 'text' && context.markstream && context.final && !insideLinkLabel && raw.startsWith('\\`')) {
+        const pair = escapedBacktickPair(inlines, index, context)
+        if (pair) {
+          const previous = nodes.at(-1)
+          if (previous?.type === 'text' && !previous.content.includes('\n'))
+            delete previous.center
+          nodes.push({ type: 'inline_code', code: pair.code, raw: pair.code })
+          if (pair.tail)
+            nodes.push(textNode(pair.tail))
+          index = pair.end
+          continue
+        }
+      }
       if (kind === 'text' && context.markstream && Array.isArray(data)
         && data[0] === span[0] && data[1] === span[1]
         && raw.startsWith('<') && raw.endsWith('/>') && HTML_START.exec(raw)?.[0] === raw) {

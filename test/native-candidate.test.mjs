@@ -973,6 +973,46 @@ test('literal unmatched multi-backticks keep their text and legacy metadata', ()
   }
 })
 
+test('legacy final view uses only contiguous matched escaped backticks as displayed code', () => {
+  const source = '转义：\\*literal\\* \\[not link\\] \\$not math\\$ \\`not code\\`。'
+  const legacy = createSession()
+  const standard = createSession({ parseOptions: { markstream: false } })
+  const controls = createSession()
+  try {
+    for (const session of [legacy, standard]) {
+      session.append(source.slice(0, -2))
+      session.append(source.slice(-2))
+      session.finish()
+    }
+    assert.deepEqual(legacy.snapshot(), [{
+      type: 'paragraph', raw: source,
+      children: [
+        { type: 'text', content: '转义：*literal* [not link] $not math$ ', raw: '转义：*literal* [not link] $not math$ ' },
+        { type: 'inline_code', code: 'not code', raw: 'not code' },
+        { type: 'text', content: '。', raw: '。', center: false },
+      ],
+    }])
+    assert.equal(standard.snapshot()[0].children[0].content, '转义：*literal* [not link] $not math$ `not code`。')
+
+    controls.append([
+      'say \\` x \\` and \\`a \\*b\\* &amp;\\`',
+      'say \\`unclosed',
+      'say \\`\\`adjacent\\`\\`',
+      'say \\`a [b](https://example.org)\\`',
+      'say `confirmed`',
+    ].join('\n\n'))
+    controls.finish()
+    const code = node => node.children.filter(child => child.type === 'inline_code').map(child => child.code)
+    assert.deepEqual(controls.snapshot().map(code), [[' x ', 'a *b* &'], [], [], [], ['confirmed']])
+    assert.equal(controls.snapshot()[3].children.find(child => child.type === 'link').markup, '')
+  }
+  finally {
+    legacy.dispose()
+    standard.dispose()
+    controls.dispose()
+  }
+})
+
 test('legacy unmatched multi-backticks fold later code while retaining the paragraph source', () => {
   const legacy = createSession()
   const standard = createSession({ parseOptions: { markstream: false } })
