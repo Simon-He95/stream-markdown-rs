@@ -9,7 +9,7 @@ use std::{
 
 use stream_markdown_rs::{
     Alignment, Block, BlockData, BlockId, BlockStatus, Change, Inline, InlineContent, InlineKind,
-    Options, Parser, Preview, RawLine, Span, Syntax, parse,
+    Options, Parser, Preview, RawLine, Span, Syntax, Text, parse,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -160,11 +160,18 @@ fn apply_changes(blocks: &mut StreamView, changes: &mut Vec<Change>) -> Result<(
                 let block = existing_block(blocks, id)?;
                 let body = match &mut block.data {
                     BlockData::Paragraph(InlineContent::Plain(body))
+                    | BlockData::Footnote {
+                        content: InlineContent::Plain(body),
+                        ..
+                    }
                     | BlockData::Heading {
                         content: InlineContent::Plain(body),
                         ..
                     }
                     | BlockData::CustomTag { body, .. }
+                    | BlockData::Math {
+                        body: Text::Source(body),
+                    }
                     | BlockData::CodeBlock { body, .. } => body,
                     BlockData::Paragraph(InlineContent::Fragments(parts)) => parts
                         .last_mut()
@@ -217,7 +224,7 @@ fn apply_changes(blocks: &mut StreamView, changes: &mut Vec<Change>) -> Result<(
                 table.add_row(cells);
                 block.span.end = end;
             }
-            Change::Preview { .. } => {}
+            Change::Preview { .. } | Change::PreviewInlines { .. } => {}
         }
     }
     Ok(())
@@ -323,6 +330,10 @@ impl Renderer<'_> {
                 self.html.push_str("</table>\n");
             }
             BlockData::CustomTag { .. } => self.raw_html(&self.source[Range::from(block.span)]),
+            BlockData::Math { body } => {
+                escape(&mut self.html, body.as_str(self.source));
+            }
+            BlockData::Footnote { content, .. } => self.inline_content(content),
             BlockData::Extension { .. } | BlockData::ExtensionWithFields { .. } => {
                 escape(&mut self.html, &self.source[Range::from(block.span)])
             }
@@ -426,7 +437,9 @@ impl Renderer<'_> {
     fn inline_children(&mut self, nodes: &[Inline], parent_is_strong: bool) {
         for inline in nodes {
             match &inline.kind {
-                InlineKind::Text(text) => escape(&mut self.html, text.as_str(self.source)),
+                InlineKind::Text(text) | InlineKind::Math { body: text, .. } => {
+                    escape(&mut self.html, text.as_str(self.source))
+                }
                 InlineKind::Code(text) => {
                     self.html.push_str("<code>");
                     escape(&mut self.html, text.as_str(self.source));
@@ -458,7 +471,7 @@ impl Renderer<'_> {
                     self.inlines(&link.children);
                     self.html.push_str("</a>");
                 }
-                InlineKind::Image(link) => {
+                InlineKind::Image(link) | InlineKind::ImagePreview(link) => {
                     self.html.push_str("<img src=\"");
                     escape_url(&mut self.html, link.destination.as_str(self.source));
                     self.html.push_str("\" alt=\"");
@@ -477,6 +490,9 @@ impl Renderer<'_> {
                 }
                 InlineKind::SoftBreak => self.html.push('\n'),
                 InlineKind::HardBreak => self.html.push_str("<br />\n"),
+                InlineKind::FootnoteReference { label, .. } => {
+                    escape(&mut self.html, &self.source[Range::from(*label)])
+                }
             }
         }
     }
@@ -490,14 +506,21 @@ impl Renderer<'_> {
     fn image_alt(&mut self, nodes: &[Inline]) {
         for inline in nodes {
             match &inline.kind {
-                InlineKind::Text(text) | InlineKind::Code(text) => {
+                InlineKind::Text(text)
+                | InlineKind::Code(text)
+                | InlineKind::Math { body: text, .. } => {
                     escape(&mut self.html, text.as_str(self.source))
                 }
                 InlineKind::Emphasis(children)
                 | InlineKind::Strong(children)
                 | InlineKind::Strikethrough(children) => self.image_alt(children),
-                InlineKind::Link(link) | InlineKind::Image(link) => self.image_alt(&link.children),
+                InlineKind::Link(link)
+                | InlineKind::Image(link)
+                | InlineKind::ImagePreview(link) => self.image_alt(&link.children),
                 InlineKind::SoftBreak | InlineKind::HardBreak => self.html.push(' '),
+                InlineKind::FootnoteReference { label, .. } => {
+                    escape(&mut self.html, &self.source[Range::from(*label)])
+                }
                 InlineKind::Html
                 | InlineKind::Extension(_)
                 | InlineKind::ExtensionWithFields { .. } => {}

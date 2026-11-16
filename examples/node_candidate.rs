@@ -47,6 +47,8 @@ fn request(sessions: &mut HashMap<u64, Parser>, input: &Value) -> Result<Value, 
             syntax: Syntax::Gfm,
             preview: Preview::Ai,
             custom_tags,
+            math: input["math"].as_bool().unwrap_or(true),
+            footnotes: input["footnotes"].as_bool().unwrap_or(true),
         }));
         return Ok(Value::Null);
     }
@@ -93,10 +95,17 @@ fn inline(value: &Inline) -> Value {
     let (kind, data) = match &value.kind {
         InlineKind::Text(value) => ("text", text(value)),
         InlineKind::Code(value) => ("code", text(value)),
+        InlineKind::Math { body, loading } => (
+            "math_inline",
+            json!({ "body": text(body), "loading": loading }),
+        ),
+        InlineKind::FootnoteReference { label, .. } => {
+            ("footnote_reference", json!({ "label": span(*label) }))
+        }
         InlineKind::Emphasis(children) => ("emphasis", json!(inlines(children))),
         InlineKind::Strong(children) => ("strong", json!(inlines(children))),
         InlineKind::Strikethrough(children) => ("strikethrough", json!(inlines(children))),
-        InlineKind::Link(link) | InlineKind::Image(link) => {
+        InlineKind::Link(link) | InlineKind::Image(link) | InlineKind::ImagePreview(link) => {
             let kind = if matches!(value.kind, InlineKind::Link(_)) {
                 "link"
             } else {
@@ -107,6 +116,7 @@ fn inline(value: &Inline) -> Value {
                 json!({
                     "destination": text(&link.destination),
                     "title": link.title.as_ref().map(text),
+                    "loading": matches!(value.kind, InlineKind::ImagePreview(_)),
                     "children": inlines(&link.children),
                 }),
             )
@@ -167,6 +177,14 @@ fn block(value: &Block, source: &str) -> Value {
             json!({ "lines": lines.iter().copied().map(raw_line).collect::<Vec<_>>() }),
         ),
         BlockData::ThematicBreak => ("thematic_break", Value::Null),
+        BlockData::Math { body } => ("math_block", json!({ "body": text(body) })),
+        BlockData::Footnote {
+            label,
+            content: value,
+        } => (
+            "footnote",
+            json!({ "label": span(*label), "content": content(value) }),
+        ),
         BlockData::Quote => ("blockquote", Value::Null),
         BlockData::List { ordered, start, .. } => {
             ("list", json!({ "ordered": ordered, "start": start }))
@@ -263,6 +281,9 @@ fn change_value(change: &Change, source: &str) -> Value {
             json!({ "op": "status", "id": id.0, "open": *status == stream_markdown_rs::BlockStatus::Open, "end": end })
         }
         Change::Remove { id } => json!({ "op": "remove", "id": id.0 }),
+        Change::PreviewInlines { id, nodes } => {
+            json!({ "op": "preview_inlines", "id": id.0, "nodes": inlines(nodes) })
+        }
         Change::Preview { id, hint } => {
             json!({ "op": "preview", "id": id.0, "hint": hint.map(|hint| match hint {
                 PreviewHint::Table => "table",

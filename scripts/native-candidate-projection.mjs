@@ -5,7 +5,37 @@ const HTML_START = /^<([A-Z][\w:.-]*)(\s(?:[^"'<>]|"[^"]*"|'[^']*')*)?\s*\/?>/i
 const HTML_ATTRIBUTE = /([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g
 
 export function projectBlocks(nodes, roots, context) {
-  return roots.map(id => projectBlock(nodes.get(id), nodes, context))
+  const blocks = projectChildren(nodes, roots, context)
+  const definitions = new Map()
+  for (const node of blocks) {
+    if (node.type === 'footnote' && !definitions.has(node.id))
+      definitions.set(node.id, node)
+  }
+  if (!definitions.size)
+    return blocks
+
+  const visible = blocks.filter(node => node.type !== 'footnote')
+  const notes = []
+  const seen = new Set()
+  function collectReferences(children) {
+    for (const child of children) {
+      if (child.type === 'footnote_reference' && definitions.has(child.id) && !seen.has(child.id)) {
+        seen.add(child.id)
+        notes.push(definitions.get(child.id))
+      }
+      collectReferences(child.children ?? child.items ?? child.cells ?? [])
+      if (child.type === 'table')
+        collectReferences([child.header, ...child.rows])
+    }
+  }
+  collectReferences(visible)
+  for (const note of notes)
+    collectReferences(note.children)
+  return [...visible, ...notes]
+}
+
+function projectChildren(nodes, ids, context) {
+  return ids.map(id => projectBlock(nodes.get(id), nodes, context))
 }
 
 function lineAt(starts, offset) {
@@ -69,7 +99,7 @@ function htmlHeader(raw) {
 }
 
 function displayText(nodes) {
-  return nodes.map(node => node.content ?? node.code ?? node.alt ?? (
+  return nodes.map(node => (node.type === 'math_inline' ? node.raw : node.content) ?? node.code ?? node.alt ?? (
     node.children ? displayText(node.children) : node.raw
   )).join('')
 }
@@ -90,16 +120,44 @@ function mergeText(nodes, node) {
 }
 
 function allowsLink(href, context) {
-  return context.parseOptions.validateLink?.(href)
+  return context.validateLink?.(href)
     ?? !/^\s*(?:javascript|vbscript|file):/i.test(href)
 }
 
-function linkNode(href, title, text, children, raw, markup) {
+function legacyLinkText(children) {
+  return children.map(child => child.content ?? child.raw).join('')
+}
+
+function markdownHref(href) {
+  return href.replace(/%(?![0-9a-fA-F]{2})|[^!-~]|[<>"`{}|\\^]/gu, encodeURIComponent)
+}
+
+function linkNode(href, title, children, markup, raw, attrs) {
+  const text = legacyLinkText(children)
   return {
-    type: 'link', href, title, text, children, raw, loading: false,
-    attrs: [['href', href], ...(title ? [['title', title]] : [])],
+    type: 'link', href, title, text, children, loading: false,
+    raw: raw ?? `[${text}](${href}${title ? ` "${title}"` : ''})`,
+    attrs: attrs ?? [['href', href], ...(title === null ? [] : [['title', title]])],
     markup,
   }
+}
+
+function attrValue(attrs, name) {
+  for (let i = attrs.length - 1; i >= 0; i--) {
+    if (attrs[i][0].toLowerCase() === name)
+      return attrs[i][1]
+  }
+  return null
+}
+
+function mathNode(type, body, raw, loading, context) {
+  const delimiters = [
+    ['\\[', '\\]'], ['\\(', '\\)'], ['$$', '$$'], ['[', ']'], ['(', ')'], ['$', '$'],
+  ]
+  const [open, close] = delimiters.find(([left]) => raw.startsWith(left)) ?? delimiters.at(-1)
+  const markup = open === close ? open : open + close
+  const content = readText(body, context).trim()
+  return { type, content, raw: open + content + close, loading, markup }
 }
 
 function projectInlines(content, context) {
@@ -128,23 +186,38 @@ function projectInlineNodes(inlines, context) {
     else if (kind === 'emphasis' || kind === 'strong' || kind === 'strikethrough') {
       nodes.push({ type: kind, children: projectInlineNodes(data, context), raw })
     }
+    else if (kind === 'math_inline') {
+      nodes.push(mathNode(kind, data.body, raw, data.loading, context))
+    }
+    else if (kind === 'footnote_reference') {
+      const id = context.read(data.label)
+      nodes.push({ type: kind, id, raw: `[^${id}]` })
+    }
     else if (kind === 'link' || kind === 'image') {
-      const href = readText(data.destination, context)
-      const title = data.title === null ? null : readText(data.title, context)
+      const href = markdownHref(readText(data.destination, context))
+      const title = data.title === null ? null : readText(data.title, context) || null
       const children = projectInlineNodes(data.children, context)
-      const text = displayText(children)
       if (!allowsLink(href, context)) {
-        mergeText(nodes, textNode(text, false))
+        mergeText(nodes, textNode(displayText(children), false))
       }
       else if (kind === 'image') {
-        nodes.push({ type: 'image', src: href, alt: text, title, raw: text, loading: false })
+        const first = data.children.at(0)
+        const last = data.children.at(-1)
+        const raw = first && last ? normalize(context.read([first.span[0], last.span[1]])) : ''
+        nodes.push({ type: 'image', src: href, alt: displayText(children), title, raw, loading: data.loading })
       }
       else {
         const markup = raw.startsWith('<') ? 'autolink' : raw.startsWith('[') ? '' : 'linkify'
-        const written = raw.startsWith('[') && raw.includes('](')
-          ? raw
-          : `[${text}](${href}${title ? ` "${title}"` : ''})`
-        nodes.push(linkNode(href, title, text, children, written, markup))
+        if (markup && /^<?https?:\/\//i.test(raw)) {
+          const text = legacyLinkText(children)
+          nodes.push({
+            type: 'link', href, title: '', text, children: [textNode(text, false)],
+            raw: `[${text}](${href})`, loading: false, markup,
+          })
+        }
+        else {
+          nodes.push(linkNode(href, title, children, markup))
+        }
       }
     }
     else if (kind === 'html') {
@@ -173,13 +246,16 @@ function projectInlineNodes(inlines, context) {
       const children = projectInlineNodes(inlines.slice(index + 1, end), context)
       const combined = end > index ? normalize(context.read([span[0], inlines[end].span[1]])) : raw
       const tag = header?.tag
-      const href = header?.attrs.find(([name]) => name === 'href')?.[1]
+      const href = header && attrValue(header.attrs, 'href')
       if (tag === 'a' && href && end > index) {
-        const text = displayText(children)
-        if (allowsLink(href, context))
-          nodes.push(linkNode(href, null, text, children, `[${text}](${href})`, 'html'))
-        else
-          mergeText(nodes, textNode(text, false))
+        if (allowsLink(href, context)) {
+          const title = attrValue(header.attrs, 'title')
+          const attrs = title === '' ? [...header.attrs, ['title', title]] : header.attrs
+          nodes.push(linkNode(href, title, children, 'html', combined, attrs))
+        }
+        else {
+          mergeText(nodes, textNode(displayText(children), false))
+        }
       }
       else {
         const custom = tag && context.customTags.includes(tag)
@@ -247,10 +323,10 @@ function projectBlock(block, nodes, context) {
 
   switch (kind) {
     case 'paragraph':
-      return { type: kind, children: projectInlines(data, context), raw: inlineRaw(data, raw.trim(), context), ...map }
+      return { type: kind, children: projectInlines(block.previewInlines ?? data, context), raw: inlineRaw(data, raw.trim(), context), ...map }
     case 'heading': {
       const raw = inlineRaw(data.content, '', context)
-      return { type: kind, level: data.level, text: raw, children: projectInlines(data.content, context), raw, ...map }
+      return { type: kind, level: data.level, text: raw, children: projectInlines(block.previewInlines ?? data.content, context), raw, ...map }
     }
     case 'code_block': {
       const info = data.info === null ? '' : context.read(data.info)
@@ -263,13 +339,26 @@ function projectBlock(block, nodes, context) {
     }
     case 'thematic_break':
       return { type: kind, raw: '---', ...map }
+    case 'math_block':
+      return { ...mathNode(kind, data.body, raw.trimStart(), open && !context.final, context), ...map }
+    case 'footnote': {
+      const id = context.read(data.label)
+      const text = inlineRaw(data.content, '', context)
+      const children = text ? [{
+        type: 'paragraph', raw: text, children: [
+          ...projectInlines(data.content, context),
+          { type: 'footnote_anchor', id, raw: '' },
+        ],
+      }] : []
+      return { type: kind, id, children, raw: `[^${id}]: ${text}` }
+    }
     case 'list': {
-      const items = projectBlocks(nodes, block.children, context)
+      const items = projectChildren(nodes, block.children, context)
       return { type: kind, ordered: data.ordered, start: data.ordered ? data.start : undefined, items, raw: items.map(item => item.raw).join('\n'), ...map }
     }
     case 'list_item':
     case 'blockquote': {
-      const children = projectBlocks(nodes, block.children, context)
+      const children = projectChildren(nodes, block.children, context)
       if (data?.task !== undefined && data.task !== null && children[0]?.type === 'paragraph') {
         const marker = data.task ? '[x]' : '[ ]'
         children[0].children.unshift({ type: 'checkbox_input', checked: data.task, raw: marker })

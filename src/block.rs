@@ -1,15 +1,19 @@
-use std::{collections::HashMap, ops::Range, sync::Arc};
+#[path = "footnotes.rs"]
+mod footnotes;
+
+use std::{collections::HashMap, num::NonZeroUsize, ops::Range, sync::Arc};
 
 use crate::container::{self, Frame, Kind, Style};
 use crate::{
     Alignment, Block, BlockData, BlockId, BlockStatus, Change, InlineContent, Metrics, Options,
     ParseError, Phase, PluginError, PluginRule, Preview, PreviewHint, RawLine, Reference,
-    References, Rule, RuleInput, RuleResult, Scope, Span, Syntax, TableData, Tag, inline, tag,
+    References, Rule, RuleInput, RuleResult, Scope, Span, Syntax, TableData, Tag, Text, inline,
+    math_block, tag,
 };
 
 pub(crate) enum Output<'a> {
     Stream(&'a mut Vec<Change>, usize),
-    Batch(&'a mut Vec<Block>, &'a mut Vec<Option<BlockId>>),
+    Batch(&'a mut Vec<Block>, &'a mut Vec<Option<NonZeroUsize>>),
 }
 
 impl Output<'_> {
@@ -20,9 +24,9 @@ impl Output<'_> {
     fn done(&mut self, block: Block, present: bool, parent: Option<BlockId>) {
         match self {
             Self::Batch(nodes, parents) => {
-                if parent.is_some() {
-                    parents.resize(block.id.0 + 1, None);
-                    parents[block.id.0] = parent;
+                if let Some(parent) = parent {
+                    parents.resize(block.id.0, None);
+                    parents.push(NonZeroUsize::new(parent.0 + 1));
                 }
                 nodes.push(block);
             }
@@ -274,9 +278,57 @@ struct Element {
     body: Span,
 }
 
+struct DisplayMath {
+    id: BlockId,
+    start: usize,
+    delimiter: math_block::Delimiter,
+    body: Span,
+    line_next: usize,
+    end: usize,
+    present: bool,
+    shown: bool,
+    evidence: bool,
+    checked: usize,
+    parts: Vec<Span>,
+}
+
+impl DisplayMath {
+    fn add(&mut self, source: &str, start: usize, end: usize, next: usize) {
+        if end > start {
+            if self.body.start == self.body.end {
+                self.body.start = start;
+            } else if !self.parts.is_empty() || start != self.line_next {
+                if self.parts.is_empty() {
+                    self.parts.push(Span::new(self.body.start, self.line_next));
+                }
+                self.parts.push(Span::new(start, next));
+            }
+            self.body.end = end;
+            self.evidence |= math_block::evidence(&source[start..end], false);
+        }
+        self.line_next = next;
+        self.end = next;
+    }
+
+    fn into_text(mut self, source: &str) -> Text {
+        if self.parts.is_empty() {
+            Text::Source(self.body)
+        } else {
+            self.parts.last_mut().unwrap().end = self.body.end;
+            let mut text = String::new();
+            for span in self.parts {
+                text.push_str(&source[Range::from(span)]);
+            }
+            Text::Decoded(text.into_boxed_str())
+        }
+    }
+}
+
 enum Active {
     Paragraph(Paragraph),
     Fence(Fence),
+    Math(DisplayMath),
+    Footnote(footnotes::Note),
     Table(Table),
     Element(Element),
     Html(Html),
@@ -302,6 +354,7 @@ struct Dependent {
 #[derive(Clone)]
 enum Dependency {
     Leaf(Dependent),
+    Footnote(footnotes::NoteBody),
     Cell {
         id: BlockId,
         index: usize,
@@ -313,6 +366,7 @@ impl Dependency {
     fn key(&self) -> (BlockId, Option<usize>) {
         match self {
             Self::Leaf(leaf) => (leaf.id, None),
+            Self::Footnote(body) => (body.id, None),
             Self::Cell { id, index, .. } => (*id, Some(*index)),
         }
     }
@@ -339,9 +393,11 @@ pub(crate) struct Engine {
     containers: Vec<Frame>,
     draft: Option<Draft>,
     preview: Option<BlockId>,
+    inline_preview: Option<(BlockId, usize)>,
     separator: Option<SeparatorProbe>,
     tag_probe: Option<tag::OpeningProbe>,
     refs: References,
+    footnotes: Option<Box<footnotes::Index>>,
     waiting: HashMap<String, Vec<Dependency>>,
     batch_parts: HashMap<BlockId, Arc<[Span]>>,
     plugins: Vec<Registered>,
@@ -353,6 +409,7 @@ pub(crate) struct Engine {
 
 impl Engine {
     pub(crate) fn new(options: Options, batch: bool) -> Self {
+        let footnotes = options.footnotes.then(Box::<footnotes::Index>::default);
         Self {
             options,
             batch,
@@ -363,9 +420,11 @@ impl Engine {
             containers: Vec::new(),
             draft: None,
             preview: None,
+            inline_preview: None,
             separator: None,
             tag_probe: None,
             refs: References::default(),
+            footnotes,
             waiting: HashMap::new(),
             batch_parts: HashMap::new(),
             plugins: Vec::new(),
@@ -474,15 +533,186 @@ impl Engine {
             self.close_containers(0, &mut output);
             self.clear_preview(&mut output);
         } else {
+            if self.active.is_none()
+                && !self.containers.is_empty()
+                && let Some(&byte) = bytes.get(self.line_start)
+                && (ordinary_start(byte) || byte == b'|')
+            {
+                self.close_containers(0, &mut output);
+            }
+            if self.options.footnotes
+                && self.running.is_none()
+                && self.open_partial_footnote(source, &mut output)?
+            {
+                return Ok(());
+            }
             if self.running.is_none()
                 && self.containers.is_empty()
                 && !self.options.custom_tags.is_empty()
             {
                 while self.open_partial_tag(source, &mut output)? {}
             }
+            if self.options.math
+                && self.running.is_none()
+                && self.containers.is_empty()
+                && self.partial_display(source, &mut output)?
+            {
+                return Ok(());
+            }
             self.partial(source, &mut output);
+            if self.options.preview == Preview::Ai {
+                self.preview_inline(source, &mut output);
+            }
         }
         Ok(())
+    }
+
+    fn partial_display(
+        &mut self,
+        source: &str,
+        output: &mut Output<'_>,
+    ) -> Result<bool, ParseError> {
+        loop {
+            if self.line_start >= self.scan {
+                return Ok(false);
+            }
+            if let Some(Active::Math(math)) = &mut self.active {
+                let line = self.line_start;
+                let end = self.scan;
+                let mark = math.delimiter;
+                let from = math.checked.saturating_sub(mark.width() - 1).max(line);
+                if mark != math_block::Delimiter::Brackets
+                    && let Some(close) = mark.explicit_close(source, line, from, end)
+                {
+                    self.line(source, Line::new(line, close.end, close.end), output)?;
+                    self.line_start = close.end;
+                    continue;
+                }
+                let old_end = math.body.end;
+                let raw = &source[line..end];
+                let pending = mark.closing();
+                let display_end = if pending.len() == 2 && raw.as_bytes().last() == pending.first()
+                {
+                    end - 1
+                } else {
+                    end
+                };
+                let newly_visible = math.checked.saturating_sub(4).max(line);
+                let mut evidence_start = newly_visible.min(display_end);
+                while !source.is_char_boundary(evidence_start) {
+                    evidence_start -= 1;
+                }
+                if display_end > old_end
+                    && !blank(&source[old_end.max(line)..display_end])
+                    && math.parts.is_empty()
+                {
+                    if math.body.start == math.body.end {
+                        math.body.start = line;
+                    }
+                    math.body.end = display_end;
+                    math.end = display_end;
+                    math.evidence |=
+                        math_block::evidence(&source[evidence_start..display_end], false);
+                }
+                math.checked = end;
+                let mut active = self.active.take().unwrap();
+                let Active::Math(math) = &mut active else {
+                    unreachable!()
+                };
+                self.publish_display_progress(math, old_end, output);
+                self.active = Some(active);
+                return Ok(true);
+            }
+            if !matches!(self.active, None | Some(Active::Paragraph(_))) {
+                return Ok(false);
+            }
+            let head = unindent(&source[self.line_start..self.scan]);
+            let start = self.scan - head.len();
+            if matches!(head, "$" | "$$" | "\\" | "\\[") {
+                return Ok(true);
+            }
+            let marker = if let Some(body) = head.strip_prefix("$$") {
+                (!body.starts_with('$')).then_some(math_block::Delimiter::Dollars)
+            } else if head.starts_with("\\[") && head.len() <= 1024 {
+                math_block::opening(head)
+            } else {
+                None
+            };
+            let Some(marker) = marker else {
+                return Ok(false);
+            };
+            self.stop_leaf(source, output)?;
+            let open_end = start + marker.width();
+            self.start_display(
+                source,
+                Line::new(self.line_start, open_end, open_end),
+                start,
+                marker,
+                output,
+            )?;
+            self.line_start = open_end;
+        }
+    }
+
+    fn preview_inline(&mut self, source: &str, output: &mut Output<'_>) {
+        const MAX_PREVIEW_BYTES: usize = 1024;
+        let target = match &self.active {
+            Some(Active::Paragraph(paragraph))
+                if paragraph.visible && paragraph.parts.is_empty() =>
+            {
+                Some((
+                    paragraph.id,
+                    Span::new(paragraph.span.start, paragraph.published),
+                ))
+            }
+            None => self.draft.map(|draft| {
+                let mut start = draft.start;
+                if source.as_bytes()[start] == b'#'
+                    && let Some((_, content)) = atx(&source[start..draft.published], start)
+                {
+                    start = content.start;
+                }
+                (draft.id, Span::new(start, draft.published))
+            }),
+            _ => None,
+        };
+        let Some((id, body)) = target else {
+            self.inline_preview = None;
+            return;
+        };
+        let had_preview = self
+            .inline_preview
+            .is_some_and(|(previous, _)| previous == id);
+        if body.end - body.start <= MAX_PREVIEW_BYTES {
+            if self.inline_preview == Some((id, body.end)) {
+                return;
+            }
+            let text = &source[Range::from(body)];
+            if inline::needs_markup(text, self.options.syntax)
+                || self.options.math && text.as_bytes().contains(&b'$')
+            {
+                let mut nodes = inline::parse_preview(source, body, &self.options, &self.refs);
+                if self.options.footnotes {
+                    self.resolve_footnote_nodes(source, &mut nodes, false);
+                }
+                let trimmed = trim_span(source, body);
+                if !nodes.is_empty()
+                    && !matches!(nodes.as_slice(),
+                    [crate::Inline { kind: crate::InlineKind::Text(Text::Source(span)), .. }] if *span == trimmed)
+                {
+                    self.inline_preview = Some((id, body.end));
+                    output.update(Change::PreviewInlines { id, nodes });
+                    return;
+                }
+            }
+        }
+        if had_preview {
+            output.update(Change::PreviewInlines {
+                id,
+                nodes: Vec::new(),
+            });
+        }
+        self.inline_preview = None;
     }
 
     fn stream_fence_text(&mut self, bytes: &[u8], output: &mut Output<'_>) -> bool {
@@ -583,8 +813,7 @@ impl Engine {
         }
         if let Some(Active::Element(element)) = &mut self.active {
             let start = element.body.end.max(self.line_start);
-            let text_end =
-                memchr::memchr(b'<', &source.as_bytes()[start..end]).map_or(end, |at| start + at);
+            let text_end = tag::pending_close(source, start, end, element.tag);
             emit_append(output, element.id, &mut element.body.end, text_end);
             return;
         }
@@ -792,7 +1021,13 @@ impl Engine {
             }
         } else if matches!(
             self.active,
-            Some(Active::Fence(_) | Active::Element(_) | Active::Html(_))
+            Some(
+                Active::Fence(_)
+                    | Active::Element(_)
+                    | Active::Html(_)
+                    | Active::Math(_)
+                    | Active::Footnote(_)
+            )
         ) || self.running.is_some()
         {
             self.extend_containers(line.next);
@@ -973,7 +1208,22 @@ impl Engine {
         };
         let start = line.end - head.len();
 
+        if self.options.footnotes
+            && head.starts_with("[^")
+            && self.try_open_footnote(source, line, start, output)?
+        {
+            return Ok(());
+        }
         match self.active.take() {
+            Some(Active::Footnote(note)) => {
+                if self.advance_footnote(source, note, line, output)? {
+                    return Ok(());
+                }
+                return self.line(source, line, output);
+            }
+            Some(Active::Math(math)) => {
+                return self.display_line(source, line, line.start, math, output);
+            }
             Some(Active::Fence(mut fence)) => {
                 if closing_fence(head, fence.marker, fence.count) {
                     self.close_code(fence, line.next, BlockStatus::Closed, output);
@@ -1184,6 +1434,7 @@ impl Engine {
                 if !head.trim_matches([' ', '\t']).is_empty()
                     && !interrupts_paragraph(head)
                     && !self.is_custom_start(source, start, line.end)
+                    && !(self.options.math && math_block::opening(head).is_some())
                 {
                     paragraph.lines += 1;
                     if paragraph.parts.is_empty() && line.start == paragraph.next {
@@ -1257,6 +1508,11 @@ impl Engine {
             return Ok(());
         }
 
+        if self.options.math
+            && let Some(delimiter) = math_block::opening(head)
+        {
+            return self.start_display(source, line, start, delimiter, output);
+        }
         if let Some((level, content)) = atx(head, start) {
             let (id, present) = self.block_id(start);
             return self.finish_leaf(
@@ -1503,6 +1759,8 @@ impl Engine {
                     self.finish_leaf(source, p.leaf(span, None), visible, output)?;
                 }
             }
+            Active::Math(math) => self.display_fallback(source, math, output)?,
+            Active::Footnote(note) => self.finish_footnote(source, note, output)?,
             Active::Fence(fence) => {
                 let end = fence.body.end;
                 self.close_code(fence, end, status, output);
@@ -1541,6 +1799,143 @@ impl Engine {
             }
         }
         Ok(())
+    }
+
+    fn start_display(
+        &mut self,
+        source: &str,
+        line: Line,
+        start: usize,
+        delimiter: math_block::Delimiter,
+        output: &mut Output<'_>,
+    ) -> Result<(), ParseError> {
+        let (id, present) = self.block_id(start);
+        let content = start + delimiter.width();
+        let math = DisplayMath {
+            id,
+            start,
+            delimiter,
+            body: Span::new(content, content),
+            line_next: content,
+            end: content,
+            present,
+            shown: false,
+            evidence: false,
+            checked: content,
+            parts: Vec::new(),
+        };
+        self.display_line(source, line, content, math, output)
+    }
+
+    fn display_line(
+        &mut self,
+        source: &str,
+        line: Line,
+        start: usize,
+        mut math: DisplayMath,
+        output: &mut Output<'_>,
+    ) -> Result<(), ParseError> {
+        if let Some(close) = math.delimiter.closes(source, start, line.end) {
+            let same_line = start == math.start + math.delimiter.width();
+            math.add(source, start, close.start, close.start);
+            let span = Span::new(math.start, close.end);
+            let id = math.id;
+            let present = math.present;
+            let delimiter = math.delimiter;
+            let body = math.into_text(source);
+            if delimiter.accepts(body.as_str(source), same_line) {
+                output.done(
+                    Block {
+                        id,
+                        span,
+                        status: BlockStatus::Closed,
+                        data: BlockData::Math { body },
+                    },
+                    present,
+                    self.parent(),
+                );
+            } else {
+                self.finish_leaf(
+                    source,
+                    Dependent {
+                        id,
+                        span,
+                        content: span,
+                        heading: None,
+                        parts: None,
+                    },
+                    present,
+                    output,
+                )?;
+            }
+            if !blank(&source[close.end..line.end]) {
+                return self.line(
+                    source,
+                    Line {
+                        start: close.end,
+                        ..line
+                    },
+                    output,
+                );
+            }
+        } else {
+            let old_end = math.body.end;
+            math.add(source, start, line.end, line.next);
+            self.publish_display_progress(&mut math, old_end, output);
+            self.active = Some(Active::Math(math));
+        }
+        Ok(())
+    }
+
+    fn publish_display_progress(
+        &self,
+        math: &mut DisplayMath,
+        old_end: usize,
+        output: &mut Output<'_>,
+    ) {
+        if self.batch || !math.evidence || !math.parts.is_empty() {
+            return;
+        }
+        if !math.shown {
+            let block = Block {
+                id: math.id,
+                span: Span::new(math.start, math.end),
+                status: BlockStatus::Open,
+                data: BlockData::Math {
+                    body: Text::Source(math.body),
+                },
+            };
+            if math.present {
+                output.update(Change::Replace(block));
+            } else {
+                output.open(block, self.parent());
+                math.present = true;
+            }
+            math.shown = true;
+        } else if old_end < math.body.end {
+            output.append_text(math.id, Span::new(old_end, math.body.end));
+        }
+    }
+
+    fn display_fallback(
+        &mut self,
+        source: &str,
+        math: DisplayMath,
+        output: &mut Output<'_>,
+    ) -> Result<(), ParseError> {
+        let span = trim_span(source, Span::new(math.start, math.end));
+        self.finish_leaf(
+            source,
+            Dependent {
+                id: math.id,
+                span,
+                content: span,
+                heading: None,
+                parts: None,
+            },
+            math.present,
+            output,
+        )
     }
 
     fn close_html(&self, html: Html, status: BlockStatus, output: &mut Output<'_>) {
@@ -1656,7 +2051,10 @@ impl Engine {
         mut paragraph: Paragraph,
         output: &mut Output<'_>,
     ) -> Result<Option<Paragraph>, ParseError> {
-        if !paragraph.parts.is_empty() || source.as_bytes().get(paragraph.span.start) != Some(&b'[')
+        if !paragraph.parts.is_empty()
+            || source.as_bytes().get(paragraph.span.start) != Some(&b'[')
+            || self.options.footnotes
+                && source[paragraph.span.start..paragraph.span.end].starts_with("[^")
         {
             return Ok(Some(paragraph));
         }
@@ -1698,6 +2096,9 @@ impl Engine {
                 }
                 match dependent {
                     Dependency::Leaf(leaf) => self.finish_leaf(source, leaf, true, output)?,
+                    Dependency::Footnote(body) => {
+                        self.finish_footnote_body(source, body, output)?
+                    }
                     Dependency::Cell { id, index, span } => {
                         let content = self.stream_cell(source, id, index, span)?;
                         output.update(Change::ReplaceTableCell { id, index, content });
@@ -1716,6 +2117,7 @@ impl Engine {
         output: &mut Output<'_>,
     ) -> Result<(), ParseError> {
         self.unresolved.clear();
+        self.clear_footnote_unresolved();
         let content = match &leaf.parts {
             Some(parts) if self.batch => {
                 self.batch_parts.insert(leaf.id, parts.clone());
@@ -1724,6 +2126,9 @@ impl Engine {
             Some(parts) => self.parse_parts(source, parts, true)?,
             None => self.inline(source, leaf.content)?,
         };
+        if self.options.footnotes {
+            self.track_footnote_dependency(&Dependency::Leaf(leaf.clone()));
+        }
         if !self.unresolved.is_empty() {
             self.track_dependency(Dependency::Leaf(leaf.clone()));
         }
@@ -1776,10 +2181,13 @@ impl Engine {
             registered.rule.scope == Scope::Inline
                 && text.as_bytes().contains(&registered.rule.trigger)
         });
-        if !plugin_hit && !inline::needs_markup(text, self.options.syntax) {
+        if !(plugin_hit
+            || inline::needs_markup(text, self.options.syntax)
+            || self.options.math && text.as_bytes().contains(&b'$'))
+        {
             return Ok(InlineContent::Plain(span));
         }
-        let nodes = if track {
+        let mut nodes = if track {
             inline::parse_tracked(
                 source,
                 span,
@@ -1790,6 +2198,9 @@ impl Engine {
         } else {
             inline::parse(source, span, &self.options, &self.refs)
         };
+        if self.options.footnotes {
+            self.resolve_footnote_nodes(source, &mut nodes, track);
+        }
         // Registered inline rules share the same source coordinates as built-in nodes.
         if plugin_hit {
             return self
@@ -1810,7 +2221,11 @@ impl Engine {
             .map(|part| part.end - part.start)
             .sum::<usize>();
         let unresolved = track.then_some(&mut self.unresolved);
-        let nodes = inline::parse_fragments(source, parts, &self.options, &self.refs, unresolved);
+        let mut nodes =
+            inline::parse_fragments(source, parts, &self.options, &self.refs, unresolved);
+        if self.options.footnotes {
+            self.resolve_footnote_nodes(source, &mut nodes, track);
+        }
         if self
             .plugins
             .iter()
@@ -1831,7 +2246,11 @@ impl Engine {
         span: Span,
     ) -> Result<InlineContent, ParseError> {
         self.unresolved.clear();
+        self.clear_footnote_unresolved();
         let content = self.table_cell(source, span, true)?;
+        if self.options.footnotes {
+            self.track_footnote_dependency(&Dependency::Cell { id, index, span });
+        }
         if !self.unresolved.is_empty() {
             self.track_dependency(Dependency::Cell { id, index, span });
         }
@@ -1873,6 +2292,10 @@ impl Engine {
         for block in nodes {
             match &mut block.data {
                 BlockData::Paragraph(InlineContent::Plain(span))
+                | BlockData::Footnote {
+                    content: InlineContent::Plain(span),
+                    ..
+                }
                 | BlockData::Heading {
                     content: InlineContent::Plain(span),
                     ..
@@ -1882,9 +2305,9 @@ impl Engine {
                         None => self.parse_inline(source, *span, false)?,
                     };
                     match &mut block.data {
-                        BlockData::Paragraph(node) | BlockData::Heading { content: node, .. } => {
-                            *node = content
-                        }
+                        BlockData::Paragraph(node)
+                        | BlockData::Heading { content: node, .. }
+                        | BlockData::Footnote { content: node, .. } => *node = content,
                         _ => unreachable!(),
                     }
                 }

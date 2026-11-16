@@ -30,9 +30,16 @@ impl View {
                     let block = self.blocks.get_mut(&id).unwrap();
                     let body = match &mut block.data {
                         BlockData::Paragraph(InlineContent::Plain(body))
+                        | BlockData::Footnote {
+                            content: InlineContent::Plain(body),
+                            ..
+                        }
                         | BlockData::Heading {
                             content: InlineContent::Plain(body),
                             ..
+                        }
+                        | BlockData::Math {
+                            body: stream_markdown_rs::Text::Source(body),
                         }
                         | BlockData::CodeBlock { body, .. }
                         | BlockData::CustomTag { body, .. } => body,
@@ -62,7 +69,7 @@ impl View {
                     block.status = status;
                     block.span.end = end;
                 }
-                Change::Preview { .. } => {}
+                Change::Preview { .. } | Change::PreviewInlines { .. } => {}
                 change => panic!("unexpected nested change: {change:?}"),
             }
         }
@@ -453,4 +460,188 @@ fn partial_table_header_is_visible_as_text_until_the_delimiter() {
         panic!("expected the delimiter to confirm the table");
     };
     assert_eq!(table.header().len(), 2);
+}
+
+#[test]
+fn display_math_is_opt_in_and_does_not_consume_footnote_labels() {
+    let source = "$$\nx+1\n$$\n\n\\[y^2\\]\n\n[\n^1\n]\n\n[^1]";
+    let default = parse(source, &Options::default()).unwrap();
+    assert!(
+        default
+            .nodes
+            .iter()
+            .all(|block| !matches!(block.data, BlockData::Math { .. }))
+    );
+    let options = Options {
+        math: true,
+        ..Options::default()
+    };
+    let document = parse(source, &options).unwrap();
+    let bodies = document
+        .nodes
+        .iter()
+        .filter_map(|block| match &block.data {
+            BlockData::Math { body } => Some(body.as_str(source)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(bodies, ["x+1", "y^2", "^1"]);
+    assert!(matches!(
+        document.nodes.last().unwrap().data,
+        BlockData::Paragraph(_)
+    ));
+}
+
+#[test]
+fn display_math_streams_on_evidence_and_falls_back_at_end_of_input() {
+    let options = Options {
+        math: true,
+        preview: Preview::Ai,
+        ..Options::default()
+    };
+    let mut parser = Parser::new(options.clone());
+    let mut changes = Vec::new();
+    let mut view = View::default();
+    parser.append("$$\n", &mut changes).unwrap();
+    assert!(changes.is_empty());
+    parser.append("x + 1\n", &mut changes).unwrap();
+    let [Change::Insert { block, .. }] = changes.as_slice() else {
+        panic!("expected an open display block");
+    };
+    let id = block.id;
+    assert_eq!(block.status, BlockStatus::Open);
+    view.apply(&mut changes);
+    parser.finish(&mut changes).unwrap();
+    assert!(
+        matches!(changes.as_slice(), [Change::Replace(block)] if block.id == id &&
+        block.status == BlockStatus::Closed && matches!(block.data, BlockData::Paragraph(_)))
+    );
+    view.apply(&mut changes);
+    let expected = parse(parser.source_text(), &options).unwrap().nodes;
+    assert_eq!(view.blocks.into_values().collect::<Vec<_>>(), expected);
+}
+
+#[test]
+fn confirmed_display_math_preserves_inline_markup_in_later_blocks() {
+    let options = Options {
+        math: true,
+        ..Options::default()
+    };
+    let source = "before\n$$a$$ **after**\n";
+    let document = parse(source, &options).unwrap();
+    assert_eq!(document.nodes.len(), 3);
+    assert!(matches!(document.nodes[1].data, BlockData::Math { .. }));
+    assert!(matches!(
+        document.nodes[2].data,
+        BlockData::Paragraph(InlineContent::Parsed(_))
+    ));
+}
+
+#[test]
+fn display_math_handles_a_closing_marker_split_without_newline() {
+    let options = Options {
+        math: true,
+        preview: Preview::Ai,
+        ..Options::default()
+    };
+    let mut parser = Parser::new(options.clone());
+    let mut changes = Vec::new();
+    let mut view = View::default();
+    parser.append("$", &mut changes).unwrap();
+    assert!(changes.is_empty());
+    parser.append("$x+1$", &mut changes).unwrap();
+    let [Change::Insert { block, .. }] = changes.as_slice() else {
+        panic!("expected open math")
+    };
+    let id = block.id;
+    let BlockData::Math { body } = &block.data else {
+        panic!("expected open math")
+    };
+    assert_eq!(body.as_str(parser.source_text()), "x+1");
+    view.apply(&mut changes);
+    parser.append("$ trailing", &mut changes).unwrap();
+    assert!(
+        matches!(&changes[0], Change::Replace(block) if block.id == id && block.status == BlockStatus::Closed)
+    );
+    view.apply(&mut changes);
+    parser.finish(&mut changes).unwrap();
+    view.apply(&mut changes);
+    let expected = parse(parser.source_text(), &options).unwrap().nodes;
+    assert_eq!(view.blocks.into_values().collect::<Vec<_>>(), expected);
+}
+
+#[test]
+fn inline_math_preview_is_temporary_and_bounded() {
+    let options = Options {
+        math: true,
+        preview: Preview::Ai,
+        ..Options::default()
+    };
+    let mut parser = Parser::new(options);
+    let mut changes = Vec::new();
+    parser.append("result: $x+1", &mut changes).unwrap();
+    assert!(changes.iter().any(
+        |change| matches!(change, Change::PreviewInlines { nodes, .. }
+        if nodes.iter().any(|node| matches!(node.kind, InlineKind::Math { loading: true, .. })))
+    ));
+    changes.clear();
+    parser.append(&"x".repeat(1024), &mut changes).unwrap();
+    assert!(
+        matches!(changes.last(), Some(Change::PreviewInlines { nodes, .. }) if nodes.is_empty())
+    );
+    changes.clear();
+    parser.finish(&mut changes).unwrap();
+    assert!(
+        changes
+            .iter()
+            .all(|change| !matches!(change, Change::PreviewInlines { .. }))
+    );
+}
+
+#[test]
+fn a_partial_unindented_header_can_follow_a_completed_list() {
+    let options = Options {
+        preview: Preview::Ai,
+        ..Options::default()
+    };
+    let mut parser = Parser::new(options);
+    let mut changes = Vec::new();
+    parser
+        .append("- 第一项\n  - nested 🙂\n- 第二项\n\n", &mut changes)
+        .unwrap();
+    changes.clear();
+    parser.append("| 列 A |", &mut changes).unwrap();
+    assert!(matches!(changes.last(),
+        Some(Change::Insert { parent: None, block }) if block.status == BlockStatus::Open
+            && matches!(block.data, BlockData::Paragraph(InlineContent::Plain(_)))));
+}
+
+#[test]
+fn custom_tag_body_streams_nested_markup_until_its_own_closer() {
+    let options = Options {
+        custom_tags: vec!["thinking".into()],
+        ..Options::default()
+    };
+    let mut parser = Parser::new(options);
+    let mut changes = Vec::new();
+    let mut view = View::default();
+    parser
+        .append("<thinking>分析 <em>中</e", &mut changes)
+        .unwrap();
+    view.apply(&mut changes);
+    let id = *view.blocks.keys().next().unwrap();
+    let BlockData::CustomTag { body, .. } = view.blocks[&id].data else {
+        panic!("expected tag")
+    };
+    assert_eq!(parser.source(body), "分析 <em>中</e");
+
+    parser.append("m></thi", &mut changes).unwrap();
+    view.apply(&mut changes);
+    let BlockData::CustomTag { body, .. } = view.blocks[&id].data else {
+        panic!("expected tag")
+    };
+    assert_eq!(parser.source(body), "分析 <em>中</em>");
+    parser.append("nking>\n", &mut changes).unwrap();
+    view.apply(&mut changes);
+    assert_eq!(view.blocks[&id].status, BlockStatus::Closed);
 }

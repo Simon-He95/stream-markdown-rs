@@ -3,10 +3,11 @@
 mod block;
 mod container;
 mod inline;
+mod math_block;
 mod plugin;
 mod tag;
 
-use std::{borrow::Cow, collections::HashMap, fmt, ops::Range};
+use std::{borrow::Cow, collections::HashMap, fmt, num::NonZeroUsize, ops::Range};
 
 pub use inline::{Inline, InlineKind, Link};
 pub use plugin::{
@@ -66,6 +67,8 @@ pub enum Preview {
 pub struct Options {
     pub syntax: Syntax,
     pub preview: Preview,
+    pub math: bool,
+    pub footnotes: bool,
     /// HTML-like element names that produce structured custom nodes.
     pub custom_tags: Vec<String>,
 }
@@ -165,6 +168,13 @@ pub enum BlockData {
     Html,
     SegmentedHtml(Vec<RawLine>),
     Table(Box<TableData>),
+    Math {
+        body: Text,
+    },
+    Footnote {
+        label: Span,
+        content: InlineContent,
+    },
     CustomTag {
         tag: Tag,
         body: Span,
@@ -233,19 +243,28 @@ pub enum Change {
         id: BlockId,
         hint: Option<PreviewHint>,
     },
+    /// Temporary inline overlay for an open paragraph or heading.
+    /// An empty vector clears it. Replacement or closure also clears it.
+    PreviewInlines {
+        id: BlockId,
+        nodes: Vec<Inline>,
+    },
 }
 
 #[derive(Debug)]
 pub struct Document<'src> {
     pub source: &'src str,
     pub nodes: Vec<Block>,
-    /// Parent relationships indexed by BlockId. Empty for a flat document.
-    pub parents: Vec<Option<BlockId>>,
+    parents: Vec<Option<NonZeroUsize>>,
 }
 
 impl Document<'_> {
     pub fn parent(&self, id: BlockId) -> Option<BlockId> {
-        self.parents.get(id.0).copied().flatten()
+        self.parents
+            .get(id.0)
+            .copied()
+            .flatten()
+            .map(|parent| BlockId(parent.get() - 1))
     }
 }
 

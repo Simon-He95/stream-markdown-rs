@@ -6,6 +6,9 @@ use unicode_general_category::{GeneralCategory, get_general_category};
 
 use crate::{Options, References, Span, Syntax, Text};
 
+#[path = "inline_math.rs"]
+mod inline_math;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Inline {
     pub span: Span,
@@ -16,12 +19,21 @@ pub struct Inline {
 pub enum InlineKind {
     Text(Text),
     Code(Text),
+    Math {
+        body: Text,
+        loading: bool,
+    },
     Emphasis(Vec<Inline>),
     Strong(Vec<Inline>),
     Strikethrough(Vec<Inline>),
     Link(Box<Link>),
     Image(Box<Link>),
+    ImagePreview(Box<Link>),
     Html,
+    FootnoteReference {
+        label: Span,
+        definition: crate::BlockId,
+    },
     Extension(u32),
     ExtensionWithFields {
         kind: u32,
@@ -230,7 +242,16 @@ pub(crate) fn parse(
     options: &Options,
     refs: &References,
 ) -> Vec<Inline> {
-    parse_inner(source, input, options, refs, None, None)
+    parse_inner(source, input, options, refs, None, None, false)
+}
+
+pub(crate) fn parse_preview(
+    source: &str,
+    input: Span,
+    options: &Options,
+    refs: &References,
+) -> Vec<Inline> {
+    parse_inner(source, input, options, refs, None, None, true)
 }
 
 pub(crate) fn parse_tracked(
@@ -240,7 +261,7 @@ pub(crate) fn parse_tracked(
     refs: &References,
     unresolved: &mut Vec<String>,
 ) -> Vec<Inline> {
-    parse_inner(source, input, options, refs, Some(unresolved), None)
+    parse_inner(source, input, options, refs, Some(unresolved), None, false)
 }
 
 pub(crate) fn parse_fragments(
@@ -262,7 +283,7 @@ pub(crate) fn parse_fragments(
         contiguous.end = part.end;
         next
     }) {
-        return parse_inner(source, contiguous, options, refs, unresolved, None);
+        return parse_inner(source, contiguous, options, refs, unresolved, None, false);
     }
 
     let capacity = fragments.iter().map(|part| part.end - part.start).sum();
@@ -294,6 +315,7 @@ pub(crate) fn parse_fragments(
         refs,
         unresolved,
         Some((source, &mut references)),
+        false,
     );
     references.sort_unstable();
     remap_nodes(&mut nodes, &joined, &mapping, &references);
@@ -333,13 +355,15 @@ fn remap_text(value: &mut Text, joined: &str, parts: &[Fragment]) {
 fn remap_nodes(nodes: &mut [Inline], joined: &str, parts: &[Fragment], references: &[usize]) {
     for node in nodes {
         match &mut node.kind {
-            InlineKind::Text(text) | InlineKind::Code(text) => remap_text(text, joined, parts),
+            InlineKind::Text(text)
+            | InlineKind::Code(text)
+            | InlineKind::Math { body: text, .. } => remap_text(text, joined, parts),
             InlineKind::Emphasis(children)
             | InlineKind::Strong(children)
             | InlineKind::Strikethrough(children) => {
                 remap_nodes(children, joined, parts, references)
             }
-            InlineKind::Link(link) | InlineKind::Image(link) => {
+            InlineKind::Link(link) | InlineKind::Image(link) | InlineKind::ImagePreview(link) => {
                 if references.binary_search(&node.span.start).is_err() {
                     remap_text(&mut link.destination, joined, parts);
                     if let Some(title) = &mut link.title {
@@ -368,7 +392,7 @@ pub(crate) fn needs_markup(text: &str, syntax: Syntax) -> bool {
 }
 
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
-const fn marker_table(gfm: bool) -> [u8; 16] {
+const fn marker_table(gfm: bool, math: bool) -> [u8; 16] {
     let mut table = [0; 16];
     let markers = b"\0\n\r!&*[\\]_`<";
     let mut i = 0;
@@ -380,25 +404,42 @@ const fn marker_table(gfm: bool) -> [u8; 16] {
     if gfm {
         table[(b'~' & 15) as usize] |= 1 << (b'~' >> 4);
     }
+    if math {
+        table[(b'$' & 15) as usize] |= 1 << (b'$' >> 4);
+    }
     table
 }
 
-#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+#[inline]
 fn first_special(bytes: &[u8], gfm: bool) -> Option<usize> {
+    first_special_mode::<false>(bytes, gfm)
+}
+
+#[inline]
+fn special_mode<const MATH: bool>(byte: u8, gfm: bool) -> bool {
+    special(byte, gfm) || MATH && byte == b'$'
+}
+
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+fn first_special_mode<const MATH: bool>(bytes: &[u8], gfm: bool) -> Option<usize> {
     use std::arch::aarch64::{vandq_u8, vdupq_n_u8, vld1q_u8, vmaxvq_u8, vqtbl1q_u8, vshrq_n_u8};
 
-    const COMMONMARK: [u8; 16] = marker_table(false);
-    const GFM: [u8; 16] = marker_table(true);
+    const COMMONMARK: [u8; 16] = marker_table(false, false);
+    const GFM: [u8; 16] = marker_table(true, false);
+    const COMMONMARK_MATH: [u8; 16] = marker_table(false, true);
+    const GFM_MATH: [u8; 16] = marker_table(true, true);
     const HIGH_BITS: [u8; 16] = [1, 2, 4, 8, 16, 32, 64, 128, 0, 0, 0, 0, 0, 0, 0, 0];
     let (chunks, tail) = bytes.as_chunks::<16>();
     if !chunks.is_empty() {
         // The lookup tables and each exact chunk contain 16 readable bytes.
         unsafe {
-            let table = vld1q_u8(if gfm {
-                GFM.as_ptr()
-            } else {
-                COMMONMARK.as_ptr()
-            });
+            let markers = match (gfm, MATH) {
+                (true, true) => &GFM_MATH,
+                (true, false) => &GFM,
+                (false, true) => &COMMONMARK_MATH,
+                (false, false) => &COMMONMARK,
+            };
+            let table = vld1q_u8(markers.as_ptr());
             let high_bits = vld1q_u8(HIGH_BITS.as_ptr());
             let mask = vdupq_n_u8(15);
             for (index, chunk) in chunks.iter().enumerate() {
@@ -409,20 +450,22 @@ fn first_special(bytes: &[u8], gfm: bool) -> Option<usize> {
                 if vmaxvq_u8(candidates) != 0 {
                     return chunk
                         .iter()
-                        .position(|&byte| special(byte, gfm))
+                        .position(|&byte| special_mode::<MATH>(byte, gfm))
                         .map(|n| index * 16 + n);
                 }
             }
         }
     }
     tail.iter()
-        .position(|&byte| special(byte, gfm))
+        .position(|&byte| special_mode::<MATH>(byte, gfm))
         .map(|n| bytes.len() - tail.len() + n)
 }
 
 #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
-fn first_special(bytes: &[u8], gfm: bool) -> Option<usize> {
-    bytes.iter().position(|&byte| special(byte, gfm))
+fn first_special_mode<const MATH: bool>(bytes: &[u8], gfm: bool) -> Option<usize> {
+    bytes
+        .iter()
+        .position(|&byte| special_mode::<MATH>(byte, gfm))
 }
 
 fn parse_inner(
@@ -432,23 +475,58 @@ fn parse_inner(
     refs: &References,
     unresolved: Option<&mut Vec<String>>,
     reference_origins: Option<(&str, &mut Vec<usize>)>,
+    preview: bool,
 ) -> Vec<Inline> {
     // Short leaves usually fit without allocating scratch. Use Vec for longer
     // leaves, where repeatedly checking SmallVec's spill state costs more.
-    if input.end - input.start <= 128 {
-        parse_with::<Local>(source, input, options, refs, unresolved, reference_origins)
-    } else {
-        parse_with::<Heap>(source, input, options, refs, unresolved, reference_origins)
+    match (input.end - input.start <= 128, options.math) {
+        (true, false) => parse_with::<Local, false>(
+            source,
+            input,
+            options,
+            refs,
+            unresolved,
+            reference_origins,
+            preview,
+        ),
+        (false, false) => parse_with::<Heap, false>(
+            source,
+            input,
+            options,
+            refs,
+            unresolved,
+            reference_origins,
+            preview,
+        ),
+        (true, true) => parse_with::<Local, true>(
+            source,
+            input,
+            options,
+            refs,
+            unresolved,
+            reference_origins,
+            preview,
+        ),
+        (false, true) => parse_with::<Heap, true>(
+            source,
+            input,
+            options,
+            refs,
+            unresolved,
+            reference_origins,
+            preview,
+        ),
     }
 }
 
-fn parse_with<S: Storage>(
+fn parse_with<S: Storage, const MATH: bool>(
     source: &str,
     input: Span,
     options: &Options,
     refs: &References,
     mut unresolved: Option<&mut Vec<String>>,
     reference_origins: Option<(&str, &mut Vec<usize>)>,
+    preview: bool,
 ) -> Vec<Inline> {
     let (reference_source, mut reference_offsets) = reference_origins
         .map_or((source, None), |(reference_source, offsets)| {
@@ -460,8 +538,9 @@ fn parse_with<S: Storage>(
     let start = input.end - leading.len();
     let end = start + leading.trim_end_matches([' ', '\t', '\r', '\n']).len();
     let gfm = options.syntax == Syntax::Gfm;
+    let math_end = if preview { input.end } else { end };
     let gfm_autolink = gfm && has_gfm_trigger(&source[start..end]);
-    let Some(first) = first_special(&bytes[start..end], gfm) else {
+    let Some(first) = first_special_mode::<MATH>(&bytes[start..end], gfm) else {
         return if start == end {
             Vec::new()
         } else if gfm_autolink {
@@ -478,13 +557,32 @@ fn parse_with<S: Storage>(
     let mut brackets = S::Brackets::default();
     let mut link_generation = 0;
     let mut backticks = None;
+    let mut math_scanner = inline_math::Scanner::default();
     push_original(&mut tokens, start, start + first);
     let mut i = start + first;
     while i < end {
-        if !special(bytes[i], gfm) {
-            let next = first_special(&bytes[i..end], gfm).map_or(end, |offset| i + offset);
+        if !special_mode::<MATH>(bytes[i], gfm) {
+            let next =
+                first_special_mode::<MATH>(&bytes[i..end], gfm).map_or(end, |offset| i + offset);
             push_original(&mut tokens, i, next);
             i = next;
+            continue;
+        }
+        if MATH
+            && (bytes[i] == b'$' || bytes[i..end].starts_with(b"\\("))
+            && let Some(formula) = math_scanner.read(source, i, math_end, preview)
+        {
+            let kind = InlineKind::Math {
+                body: formula.body,
+                loading: formula.loading,
+            };
+            tokens.push(Token::from_inline(
+                span(i, formula.end),
+                kind,
+                None,
+                &mut payloads,
+            ));
+            i = formula.end;
             continue;
         }
         let begin = i;
@@ -528,6 +626,10 @@ fn parse_with<S: Storage>(
                     InlineKind::Text(Text::Source(span(begin, i)))
                 }
             }
+            b'$' if MATH => {
+                i = run_end(bytes, i, end);
+                InlineKind::Text(Text::Source(span(begin, i)))
+            }
             b'`' => {
                 let n = run_end(bytes, i, end);
                 if let Some(close) = end_code_span(bytes, n, end, n - begin, &mut backticks) {
@@ -545,8 +647,8 @@ fn parse_with<S: Storage>(
                 if marker != b'~' || width <= 2 {
                     let opener = flanking(source, start, begin, i, end);
                     if width <= 2 && opener.opens && !opener.closes {
-                        let candidate =
-                            first_special(&bytes[i..end], gfm).map_or(end, |offset| i + offset);
+                        let candidate = first_special_mode::<MATH>(&bytes[i..end], gfm)
+                            .map_or(end, |offset| i + offset);
                         if candidate < end && bytes[candidate] == marker {
                             let close_end = run_end(bytes, candidate, end);
                             if close_end - candidate == width {
@@ -594,10 +696,11 @@ fn parse_with<S: Storage>(
                         end,
                         refs,
                         unresolved.as_deref_mut(),
+                        preview && bracket.image,
                     ) {
                         let child_start = bracket.token + 1;
                         let linkify_image = gfm_autolink && bracket.image;
-                        let children = if tokens.len() == child_start + 1 && !linkify_image {
+                        let mut children = if tokens.len() == child_start + 1 && !linkify_image {
                             singleton(tokens.pop().unwrap().into_inline(&mut payloads))
                         } else {
                             finish_tokens::<S>(
@@ -609,6 +712,9 @@ fn parse_with<S: Storage>(
                             )
                         };
                         tokens.pop();
+                        if MATH && bracket.image {
+                            literal_math_in_image(&mut children);
+                        }
                         let target_source = if target.is_reference {
                             if let Some(offsets) = &mut reference_offsets {
                                 offsets.push(open.start);
@@ -622,7 +728,9 @@ fn parse_with<S: Storage>(
                             title: target.title.map(|value| decode_span(target_source, value)),
                             children,
                         });
-                        let kind = if bracket.image {
+                        let kind = if target.loading {
+                            InlineKind::ImagePreview(link)
+                        } else if bracket.image {
                             InlineKind::Image(link)
                         } else {
                             link_generation += 1;
@@ -675,13 +783,31 @@ fn parse_with<S: Storage>(
             delimiter,
             &mut payloads,
         ));
-        let next = next_special
-            .unwrap_or_else(|| first_special(&bytes[i..end], gfm).map_or(end, |offset| i + offset));
+        let next = next_special.unwrap_or_else(|| {
+            first_special_mode::<MATH>(&bytes[i..end], gfm).map_or(end, |offset| i + offset)
+        });
         push_original(&mut tokens, i, next);
         i = next;
     }
 
     finish_tokens::<S>(source, &mut tokens, 0, &mut payloads, gfm_autolink)
+}
+
+fn literal_math_in_image(nodes: &mut [Inline]) {
+    for node in nodes {
+        match &mut node.kind {
+            InlineKind::Math { .. } => node.kind = InlineKind::Text(Text::Source(node.span)),
+            InlineKind::Emphasis(children)
+            | InlineKind::Strong(children)
+            | InlineKind::Strikethrough(children) => {
+                literal_math_in_image(children);
+            }
+            InlineKind::Link(link) | InlineKind::Image(link) | InlineKind::ImagePreview(link) => {
+                literal_math_in_image(&mut link.children)
+            }
+            _ => {}
+        }
+    }
 }
 
 fn push_original(tokens: &mut impl Scratch<Token>, start: usize, end: usize) {
@@ -1214,6 +1340,7 @@ struct Target {
     destination: Span,
     title: Option<Span>,
     is_reference: bool,
+    loading: bool,
 }
 
 fn link_target(
@@ -1223,18 +1350,29 @@ fn link_target(
     end: usize,
     refs: &References,
     unresolved: Option<&mut Vec<String>>,
+    preview_image: bool,
 ) -> Option<Target> {
     let bytes = source.as_bytes();
-    if next < end
-        && bytes[next] == b'('
-        && let Some((end, destination, title)) = link_inline(source, next, end)
-    {
-        return Some(Target {
-            end,
-            destination,
-            title,
-            is_reference: false,
-        });
+    if next < end && bytes[next] == b'(' {
+        if let Some((end, destination, title)) = link_inline(source, next, end) {
+            return Some(Target {
+                end,
+                destination,
+                title,
+                is_reference: false,
+                loading: false,
+            });
+        }
+        if preview_image && let Some(destination) = pending_image_destination(source, next + 1, end)
+        {
+            return Some(Target {
+                end,
+                destination,
+                title: None,
+                is_reference: false,
+                loading: true,
+            });
+        }
     }
     let suffix = if next < end && bytes[next] == b'[' {
         label_end(source, next + 1, end)
@@ -1260,6 +1398,7 @@ fn link_target(
             destination: reference.destination,
             title: reference.title,
             is_reference: true,
+            loading: false,
         })
     } else {
         if let Some(unresolved) = unresolved {
@@ -1267,6 +1406,15 @@ fn link_target(
         }
         None
     }
+}
+
+fn pending_image_destination(source: &str, start: usize, end: usize) -> Option<Span> {
+    let start = skip_link_space(source.as_bytes(), start, end)?;
+    if start == end {
+        return Some(span(start, end));
+    }
+    let (destination, consumed) = link_destination(source, start, end)?;
+    (consumed == end && destination.start != destination.end).then_some(destination)
 }
 
 fn autolink_end(source: &str, i: usize, end: usize) -> Option<(usize, bool)> {
@@ -1673,6 +1821,11 @@ mod tests {
                         expected,
                         "{gfm} {offset} {byte}"
                     );
+                    assert_eq!(
+                        first_special_mode::<true>(&bytes, gfm),
+                        (special(byte, gfm) || byte == b'$').then_some(offset),
+                        "math {gfm} {offset} {byte}"
+                    );
                 }
             }
         }
@@ -1847,5 +2000,284 @@ mod tests {
             panic!("expected decoded text")
         };
         assert_eq!(text.as_str(source), "≧̸");
+    }
+
+    fn collect_math<'a>(source: &'a str, nodes: &'a [Inline], output: &mut Vec<(&'a str, bool)>) {
+        for node in nodes {
+            match &node.kind {
+                InlineKind::Math { body, loading } => output.push((body.as_str(source), *loading)),
+                InlineKind::Emphasis(children)
+                | InlineKind::Strong(children)
+                | InlineKind::Strikethrough(children) => collect_math(source, children, output),
+                InlineKind::Link(link) | InlineKind::Image(link) => {
+                    collect_math(source, &link.children, output)
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn markstream_inline_math_keeps_currency_and_recognizes_formulas() {
+        let cases: &[(&str, &[&str])] = &[
+            (
+                "United - **$312** nonstop, Alaska - **$289** with a stop.",
+                &[],
+            ),
+            (
+                "The October range is **$130–$375**, so you are above the market.",
+                &[],
+            ),
+            (
+                "The Alaska round trip is roughly $210 + $98 = $308. Cheaper than $460.",
+                &[],
+            ),
+            (
+                "A $10,000 deposit at 4%: $A = P(1 + r)^t$ grows to about $12,209.",
+                &["A = P(1 + r)^t"],
+            ),
+            (
+                "Prices **$312** and **$289**; $$x^2$$ then $H$.",
+                &["x^2", "H"],
+            ),
+            (
+                "$H$ $1$ $2 + 3 = 5$ $1,000 + x$ $1-2$ $2x$ $5\\%$ $CO_2$",
+                &[
+                    "H",
+                    "1",
+                    "2 + 3 = 5",
+                    "1,000 + x",
+                    "1-2",
+                    "2x",
+                    "5\\%",
+                    "CO_2",
+                ],
+            ),
+            (r"literal \[x\] and \$5\$ and real $y$", &["y"]),
+            (r"Prices $312 and $289; \(x^2\).", &["x^2"]),
+            (r"$...$ or $…$ and \(plain parentheses\)", &[]),
+            (
+                r"$2.897771955 times 10^{-3}text{m·K}$^[1]^",
+                &[r"2.897771955 \times 10^{-3}\text{m·K}"],
+            ),
+        ];
+        let options = Options {
+            math: true,
+            ..Options::default()
+        };
+        for (source, expected) in cases {
+            let nodes = parse(
+                source,
+                span(0, source.len()),
+                &options,
+                &References::default(),
+            );
+            let mut found = Vec::new();
+            collect_math(source, &nodes, &mut found);
+            assert_eq!(
+                found,
+                expected
+                    .iter()
+                    .map(|&body| (body, false))
+                    .collect::<Vec<_>>(),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn markstream_currency_stays_text_at_each_stream_prefix() {
+        let options = Options {
+            math: true,
+            ..Options::default()
+        };
+        let refs = References::default();
+        for (source, formula) in [
+            (
+                "United - **$312** nonstop, Alaska - **$289** with a stop.",
+                None,
+            ),
+            (
+                "The October range is **$130–$375**, so you are above the market.",
+                None,
+            ),
+            (
+                "The Alaska round trip is roughly $210 + $98 = $308. Cheaper than $460.",
+                None,
+            ),
+            (
+                "A $10,000 deposit at 4%: $A = P(1 + r)^t$ grows to about $12,209.",
+                Some("A = P(1 + r)^t"),
+            ),
+        ] {
+            for end in source
+                .char_indices()
+                .map(|(at, _)| at)
+                .skip(1)
+                .chain(std::iter::once(source.len()))
+            {
+                let nodes = parse_preview(source, span(0, end), &options, &refs);
+                let mut actual = Vec::new();
+                collect_math(source, &nodes, &mut actual);
+                if let Some(formula) = formula {
+                    assert!(
+                        actual.iter().all(|(body, _)| formula.starts_with(body)),
+                        "prefix: {}",
+                        &source[..end]
+                    );
+                } else {
+                    assert!(actual.is_empty(), "prefix: {}", &source[..end]);
+                }
+            }
+        }
+        let long = "$".repeat(4096);
+        assert_eq!(
+            parse(&long, span(0, long.len()), &options, &refs),
+            [original(0, long.len())]
+        );
+    }
+
+    #[test]
+    fn markstream_math_preserves_strong_links_code_and_image_alt() {
+        let source = r"**图 2: \((d,n)\) 和 \((\log d,\log n)\)** [$x$](https://example.com) ![caption $X[v,d]$](https://example.com/image.png) and $y$";
+        let options = Options {
+            math: true,
+            ..Options::default()
+        };
+        let nodes = parse(
+            source,
+            span(0, source.len()),
+            &options,
+            &References::default(),
+        );
+        let mut found = Vec::new();
+        collect_math(source, &nodes, &mut found);
+        assert_eq!(
+            found,
+            [
+                ("(d,n)", false),
+                (r"(\log d,\log n)", false),
+                ("x", false),
+                ("y", false)
+            ]
+        );
+        let InlineKind::Strong(_) = &nodes[0].kind else {
+            panic!("strong disappeared")
+        };
+        let InlineKind::Link(_) = &nodes[2].kind else {
+            panic!("link disappeared")
+        };
+        let InlineKind::Image(image) = &nodes[4].kind else {
+            panic!("image disappeared")
+        };
+        let alt = image
+            .children
+            .iter()
+            .map(|node| match &node.kind {
+                InlineKind::Text(text) => text.as_str(source),
+                _ => panic!("image alt math should be literal"),
+            })
+            .collect::<String>();
+        assert_eq!(alt, "caption $X[v,d]$");
+
+        let source = "Escaped \\$5, code `$312 and $289`, prices $210 + $98; real $x^2$.";
+        let nodes = parse(
+            source,
+            span(0, source.len()),
+            &options,
+            &References::default(),
+        );
+        let mut found = Vec::new();
+        collect_math(source, &nodes, &mut found);
+        assert_eq!(found, [("x^2", false)]);
+        assert!(nodes.iter().any(|node| matches!(&node.kind, InlineKind::Code(code) if code.as_str(source) == "$312 and $289")));
+    }
+
+    #[test]
+    fn incomplete_image_destination_is_only_a_preview() {
+        let options = Options {
+            math: true,
+            ..Options::default()
+        };
+        let refs = References::default();
+        for (source, destination) in [
+            ("![caption $X[v,d]$](", ""),
+            (
+                "![caption $X[v,d]$](https://example.com/image.png",
+                "https://example.com/image.png",
+            ),
+        ] {
+            let nodes = parse_preview(source, span(0, source.len()), &options, &refs);
+            let [
+                Inline {
+                    kind: InlineKind::ImagePreview(image),
+                    ..
+                },
+            ] = nodes.as_slice()
+            else {
+                panic!("expected exactly one provisional image for {source}");
+            };
+            assert_eq!(image.destination.as_str(source), destination);
+            let mut math = Vec::new();
+            collect_math(source, &image.children, &mut math);
+            assert!(math.is_empty(), "image alt uses literal math");
+            let nodes = parse(source, span(0, source.len()), &options, &refs);
+            assert!(nodes.iter().all(|node| !matches!(
+                node.kind,
+                InlineKind::Image(_) | InlineKind::ImagePreview(_)
+            )));
+        }
+    }
+
+    #[test]
+    fn markstream_math_waits_for_evidence_and_preserves_final_literal() {
+        let cases: &[(&str, &[(&str, bool)])] = &[
+            ("$", &[]),
+            ("($450,000) or communication preference", &[]),
+            ("$1,000 +", &[]),
+            ("$1,000 + x", &[("1,000 + x", true)]),
+            (r"literal \(\(x", &[("x", true)]),
+            (
+                r"解释。\(W = \operatorname{span}\{\boldsy",
+                &[(r"W = \operatorname{span}\{\boldsy", true)],
+            ),
+            ("prices $210 + $98 = $308. Cheaper than $460.", &[]),
+        ];
+        let options = Options {
+            math: true,
+            ..Options::default()
+        };
+        for (source, expected) in cases {
+            let nodes = parse_preview(
+                source,
+                span(0, source.len()),
+                &options,
+                &References::default(),
+            );
+            let mut found = Vec::new();
+            collect_math(source, &nodes, &mut found);
+            assert_eq!(found, *expected, "{source}");
+            let nodes = parse(
+                source,
+                span(0, source.len()),
+                &options,
+                &References::default(),
+            );
+            let mut found = Vec::new();
+            collect_math(source, &nodes, &mut found);
+            assert!(
+                found.is_empty(),
+                "unfinished formula survived finalization in {source}"
+            );
+        }
+
+        let source = "default $x$";
+        let nodes = parse(
+            source,
+            span(0, source.len()),
+            &Options::default(),
+            &References::default(),
+        );
+        assert_eq!(nodes, [original(0, source.len())]);
     }
 }

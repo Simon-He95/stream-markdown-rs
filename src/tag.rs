@@ -185,6 +185,31 @@ fn attribute(input: &str) -> Option<(Attribute<'_>, &str)> {
     })
 }
 
+/// Publish body bytes until a possible close of the current element.
+pub(crate) fn pending_close(source: &str, start: usize, end: usize, tag: Tag) -> usize {
+    let bytes = source.as_bytes();
+    let name = tag.tag_name(source).as_bytes();
+    for relative in memchr::memchr_iter(b'<', &bytes[start..end]) {
+        let offset = start + relative;
+        let after_lt = &bytes[offset + 1..end];
+        if after_lt.is_empty() {
+            return offset;
+        }
+        let Some(after_slash) = after_lt.strip_prefix(b"/") else {
+            continue;
+        };
+        if name.starts_with(after_slash)
+            || after_slash.strip_prefix(name).is_some_and(|tail| {
+                tail.first()
+                    .is_some_and(|byte| matches!(byte, b'>' | b' ' | b'\t'))
+            })
+        {
+            return offset;
+        }
+    }
+    end
+}
+
 pub(crate) fn close(
     source: &str,
     start: usize,

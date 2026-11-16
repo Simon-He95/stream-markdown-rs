@@ -51,7 +51,10 @@ function request(op, session, data) {
 export function createSession({ factoryOptions, parseOptions = {} } = {}) {
   const session = ++nextSession
   const customTags = parseOptions.customHtmlTags ?? factoryOptions?.customHtmlTags ?? []
-  request('create', session, { customTags })
+  const math = (parseOptions.enableMath ?? factoryOptions?.enableMath) !== false
+  const footnotes = (parseOptions.enableFootnotes ?? factoryOptions?.enableFootnotes) !== false
+  const validateLink = parseOptions.validateLink ?? factoryOptions?.markdownItOptions?.validateLink
+  request('create', session, { customTags, math, footnotes })
   const nodes = new Map()
   const roots = []
   const lineStarts = [0]
@@ -126,6 +129,7 @@ export function createSession({ factoryOptions, parseOptions = {} } = {}) {
           final,
           customTags,
           parseOptions,
+          validateLink,
         })
         cached = parseOptions.postTransformNodes?.(projected) ?? projected
       }
@@ -161,23 +165,27 @@ function applyChange(nodes, roots, change) {
   switch (change.op) {
     case 'replace':
       Object.assign(block, change.block)
+      delete block.previewInlines
       break
     case 'append_text': {
       const range = block.data.body
         ?? block.data.plain
         ?? block.data.content?.plain
+        ?? block.data.content?.fragments?.at(-1)
         ?? block.data.fragments?.at(-1)
         ?? block.span
       range[1] = change.span[1]
       block.span[1] = change.span[1]
       break
     }
-    case 'add_text_fragment':
-      block.data.fragments ??= [block.data.plain]
-      delete block.data.plain
-      block.data.fragments.push(change.span)
+    case 'add_text_fragment': {
+      const content = block.data.content ?? block.data
+      content.fragments ??= [content.plain]
+      delete content.plain
+      content.fragments.push(change.span)
       block.span[1] = change.span[1]
       break
+    }
     case 'add_raw_line':
       block.data.lines.push(change.line)
       block.span[1] = change.end
@@ -196,6 +204,8 @@ function applyChange(nodes, roots, change) {
     }
     case 'status':
       block.open = change.open
+      if (!change.open)
+        delete block.previewInlines
       block.span[1] = change.end
       break
     case 'remove': {
@@ -206,6 +216,9 @@ function applyChange(nodes, roots, change) {
     }
     case 'preview':
       block.preview = change.hint
+      break
+    case 'preview_inlines':
+      block.previewInlines = change.nodes.length ? { parsed: change.nodes } : undefined
       break
     default:
       throw new Error(`Unsupported native Markdown update ${change.op}`)
