@@ -11,9 +11,18 @@ export function projectBlocks(nodes, roots, context) {
   if (context.markstream && !context.final) {
     const start = context.lineStarts.at(-1)
     const last = nodes.get(roots.at(-1))
-    if (start < context.length && (!last || (last.status !== 'open' && last.span[1] <= start))
-      && /^ {0,3}<\/?[ \t]*$/u.test(context.read([start, context.length]))) {
-      blocks.push({ type: 'paragraph', raw: '', children: [], ...sourceMap([start, context.length], context) })
+    if (start < context.length && (!last || (last.status !== 'open' && last.span[1] <= start))) {
+      const marker = /^ {0,3}(#{1,6}|`{1,2}|\||<\/?)[ \t]*$/u.exec(context.read([start, context.length]))?.[1]
+      if (marker) {
+        const map = sourceMap([start, context.length], context)
+        if (marker.startsWith('#'))
+          blocks.push({ type: 'heading', level: marker.length, text: '', raw: '', children: [], ...map })
+        else
+          blocks.push({
+            type: 'paragraph', raw: marker.startsWith('<') ? '' : marker,
+            children: marker === '``' ? [textNode(marker, false)] : [], ...map,
+          })
+      }
     }
   }
   const definitions = new Map()
@@ -416,6 +425,16 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false, insideL
         && raw.includes('*') && /[^*]/u.test(raw) && /(?<!\\)(?:\\\\)*\*/u.test(raw)
       const center = kind !== 'softbreak' && !literalCodeMarker && !literalAsterisk
       const text = kind === 'softbreak' ? '\n' : readText(data, context)
+      if (kind === 'text' && context.markstream && !context.final && text.endsWith('(')
+        && !raw.endsWith('\\(') && inlines[index - 1]?.kind === 'softbreak'
+        && ['code', 'emphasis', 'strong', 'strikethrough'].includes(inlines[index + 1]?.kind)) {
+        // In the legacy preview this text merges across a soft break, holding
+        // the last parenthesis in the raw value until the document finishes.
+        const previous = nodes.at(-1)
+        previous.content += text.slice(0, -1)
+        previous.raw += text
+        continue
+      }
       if (!(kind === 'text' && context.markstream && context.final && !literalCodeMarker && !insideLinkLabel
         && Array.isArray(data) && data[0] === span[0] && data[1] === span[1]
         && appendMarkdownFilenameText(nodes, text, center)))
@@ -951,6 +970,18 @@ function projectBlock(block, nodes, context) {
       let projectedRaw = inlineRaw(rawContent, raw.trim(), context, span[1])
       const parsed = block.previewInlines?.parsed
       const last = parsed?.at(-1)
+      const committedEnd = rawContent.fragments?.at(-1)?.[1]
+      if (context.markstream && open && last && last.span[1] > span[1]
+        && committedEnd !== undefined && nodes.get(block.parent)?.kind === 'blockquote') {
+        const breakIndex = parsed.findIndex(node => node.kind === 'softbreak' && node.span[0] === committedEnd)
+        const first = breakIndex < 0 ? undefined : parsed[breakIndex + 1]
+        if (first && first.span[0] >= parsed[breakIndex].span[1]
+          && lineAt(context.lineStarts, first.span[0]) === lineAt(context.lineStarts, last.span[1] - 1)) {
+          // A typed break and the next inline span delimit the source outside the quote prefix.
+          projectedRaw += readText(parsed[breakIndex].span, context)
+            + readText([first.span[0], last.span[1]], context)
+        }
+      }
       if (context.markstream && open && last && last.span[1] < span[1]) {
         const tail = context.read([last.span[1], span[1]])
         if (tail.trimStart().startsWith('<'))

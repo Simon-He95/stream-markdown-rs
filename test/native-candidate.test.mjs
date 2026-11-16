@@ -66,6 +66,28 @@ test('nested paragraph raw keeps line fragments after close and reference backpa
   }
 })
 
+test('blockquote raw includes the last line already carried by its inline preview', () => {
+  const session = createSession()
+  const prefix = '中文 `code`\nsecond paragraph line'
+  try {
+    session.append('> 中文 `code`\r\n> second paragraph line\r\n')
+    session.append('> third `draft')
+    const [quote] = session.snapshot()
+    assert.equal(quote.raw, prefix + '\nthird `draft')
+    assert.equal(quote.children[0].raw, quote.raw)
+    assert.equal(quote.children[0].children.at(-1).code, 'draft')
+
+    session.append('`\r\n')
+    session.finish()
+    const [closed] = session.snapshot()
+    assert.equal(closed.raw, prefix + '\nthird `draft`')
+    assert.equal(closed.children[0].raw, closed.raw)
+  }
+  finally {
+    session.dispose()
+  }
+})
+
 test('native candidate delivers Rust custom tag metadata only after a complete opener', () => {
   const session = createSession({ factoryOptions: { customHtmlTags: ['tool-call'], markstream: false } })
   try {
@@ -626,6 +648,28 @@ test('legacy projection keeps a bare root HTML delimiter as an empty draft', () 
   }
 })
 
+test('legacy projection keeps bare table, heading and code markers at the root', () => {
+  const cases = [
+    ['| ', { type: 'paragraph', children: [], raw: '|' }, 'Column', 'paragraph', '| Column'],
+    ['## ', { type: 'heading', level: 2, text: '', children: [], raw: '' }, 'Title', 'heading', 'Title'],
+    ['``', { type: 'paragraph', children: [{ type: 'text', content: '``', raw: '``' }], raw: '``' }, '`ts', 'code_block', ''],
+  ]
+  for (const [marker, expected, tail, type, raw] of cases) {
+    const session = createSession({ parseOptions: { includeSourceMap: true } })
+    try {
+      session.append('# Start\n\n' + marker)
+      assert.deepEqual(session.snapshot()[1], { ...expected, sourceMap: { startLine: 2, endLine: 3 } })
+      session.append(tail)
+      assert.equal(session.snapshot().length, 2)
+      assert.equal(session.snapshot()[1].type, type)
+      assert.equal(session.snapshot()[1].raw, raw)
+    }
+    finally {
+      session.dispose()
+    }
+  }
+})
+
 test('native candidate retains typed custom tag children alongside the source payload', () => {
   const session = createSession({ parseOptions: { customHtmlTags: ['widget'] } })
   try {
@@ -910,6 +954,32 @@ test('legacy unmatched multi-backticks fold later code while retaining the parag
   finally {
     legacy.dispose()
     standard.dispose()
+  }
+})
+
+test('legacy multiline preview holds the trailing parenthesis before a typed inline', () => {
+  const session = createSession()
+  const sameLine = createSession()
+  const escaped = createSession()
+  try {
+    session.append('Intro\n')
+    session.append('word (`one`) tail\n\n')
+    const [prefix] = session.snapshot()[0].children
+    assert.deepEqual(prefix, {
+      type: 'text', content: 'Intro\nword ', raw: 'Intro\nword (', center: false,
+    })
+    session.finish()
+    assert.equal(session.snapshot()[0].children[0].content, 'Intro\nword (')
+
+    sameLine.append('Intro (`one`) tail')
+    assert.equal(sameLine.snapshot()[0].children[0].content, 'Intro (')
+    escaped.append('Intro\n\\(`one`) tail')
+    assert.equal(escaped.snapshot()[0].children[0].content, 'Intro\n(')
+  }
+  finally {
+    session.dispose()
+    sameLine.dispose()
+    escaped.dispose()
   }
 })
 
