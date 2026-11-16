@@ -1494,6 +1494,48 @@ fn locally_closed_paragraph_keeps_pending_math_until_document_finish() {
 }
 
 #[test]
+fn resolved_reference_also_removes_its_old_pending_math_overlay() {
+    let mut parser = Parser::new(Options {
+        markstream: true,
+        math: true,
+        preview: Preview::Ai,
+        ..Options::default()
+    });
+    let mut changes = Vec::new();
+    parser
+        .append("Read [link][key $x +]\n\n", &mut changes)
+        .unwrap();
+    let id = changes
+        .iter()
+        .find_map(|change| match change {
+            Change::PreviewInlines { id, nodes }
+                if nodes
+                    .iter()
+                    .any(|node| matches!(node.kind, InlineKind::Math { loading: true, .. })) =>
+            {
+                Some(*id)
+            }
+            _ => None,
+        })
+        .expect("the unresolved reference label has a pending math preview");
+    changes.clear();
+    parser
+        .append("[key $x +]: /target\n\n", &mut changes)
+        .unwrap();
+    assert!(changes.iter().any(
+        |change| matches!(change, Change::Replace(block) if block.id == id
+        && matches!(&block.data, BlockData::Paragraph(InlineContent::Parsed(nodes))
+            if nodes.iter().any(|node| matches!(node.kind, InlineKind::Link(_)))))
+    ));
+    changes.clear();
+    parser.finish(&mut changes).unwrap();
+    assert!(
+        changes.is_empty(),
+        "the replacement already cleared the preview: {changes:?}"
+    );
+}
+
+#[test]
 fn append_coalesces_only_insertions_from_its_own_batch() {
     let mut parser = Parser::new(Options::default());
     let mut changes = Vec::new();

@@ -3331,6 +3331,12 @@ impl Engine {
             inline::parse_preview(source, leaf.content, &self.options, &self.refs)
         };
         if !has_pending_math(&nodes) {
+            // The replacement already cleared any earlier overlay for this block.
+            if let Some(state) = &mut self.preview_state
+                && let Ok(index) = state.pending_math.binary_search(&leaf.id)
+            {
+                state.pending_math.remove(index);
+            }
             return;
         }
         if self.options.footnotes {
