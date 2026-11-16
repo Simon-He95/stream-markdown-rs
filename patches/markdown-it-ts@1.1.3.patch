@@ -1,0 +1,51 @@
+diff --git a/dist/index.js b/dist/index.js
+index ec491b926d9f57234ff4a7d1509a66245f51cf34..4ebaa3bbe729d45bb9ff9894ef39132c1aa203c9 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -1206,6 +1206,7 @@ var StreamParser = class {
+ 			return parsed$1.tokens;
+ 		}
+ 		if (src === cached.src) {
++			if (env?.__markstreamChunkUpdate) env.__markstreamChunkUpdate.tokenStart = cached.tokens.length;
+ 			this.stats.total += 1;
+ 			this.stats.cacheHits += 1;
+ 			this.stats.lastMode = "cache";
+@@ -1216,7 +1217,7 @@ var StreamParser = class {
+ 			});
+ 			return cached.tokens;
+ 		}
+-		const appendDelta = knownAppend !== void 0 ? knownAppend : src.startsWith(cached.src) ? src.slice(cached.src.length) : null;
++		const appendDelta = knownAppend !== void 0 ? knownAppend : src.slice(0, cached.src.length) === cached.src ? src.slice(cached.src.length) : null;
+ 		let cachedGlobalStateReason = cached.globalStateReason;
+ 		if (cachedGlobalStateReason === void 0) {
+ 			cachedGlobalStateReason = detectGlobalMarkdownState(cached.src);
+@@ -1360,6 +1361,7 @@ var StreamParser = class {
+ 				}
+ 			}
+ 			const appendStart = cached.tokens.length;
++			if (envProvided?.__markstreamChunkUpdate) envProvided.__markstreamChunkUpdate.tokenStart = appendedTokenStart ? appendStart - 1 : appendStart;
+ 			if (appendedState.tokens.length > appendedTokenStart) {
+ 				const cachedTail = cached.tokens;
+ 				const a = appendedState.tokens;
+@@ -1627,11 +1629,12 @@ var StreamParser = class {
+ 		const prevTail = directAppend ? cached.lastSegmentSource ?? cached.src.slice(lastSegment.srcOffset) : cached.src.slice(lastSegment.srcOffset);
+ 		const nextTail = directAppend ? prevTail + knownAppend : src.slice(lastSegment.srcOffset);
+ 		if (nextTail === prevTail) return null;
+-		const appended = directAppend ? knownAppend : src.startsWith(cached.src) ? src.slice(cached.src.length) : null;
++		const appended = directAppend ? knownAppend : src.slice(0, cached.src.length) === cached.src ? src.slice(cached.src.length) : null;
+ 		const postBlockSrc = directAppend && this.tokenMapsTrusted ? src : this.getNormalizedUpdatedSource(cached, src, knownAppend);
+ 		if (appended) {
+ 			const merged = this.tryContainerTailAppendMerge(src, cached, env, md, lastSegment, appended, postBlockSrc);
+ 			if (merged) {
++				if (env.__markstreamChunkUpdate) env.__markstreamChunkUpdate.tokenStart = lastSegment.tokenStart;
+ 				cached.lastSegmentSource = directAppend ? nextTail : void 0;
+ 				return merged;
+ 			}
+@@ -1653,6 +1656,7 @@ var StreamParser = class {
+ 			cached.env = env;
+ 			cached.globalStateReason = null;
+ 			if (!directAppend || !appended) cached.globalStateCarry = void 0;
++			if (env.__markstreamChunkUpdate) env.__markstreamChunkUpdate.tokenStart = lastSegment.tokenStart;
+ 			cached.tokens.length = lastSegment.tokenStart;
+ 			this.appendTokens(cached.tokens, tailState.tokens);
+ 			cached.lineCount = lastSegment.lineStart + countLines(nextTail);
