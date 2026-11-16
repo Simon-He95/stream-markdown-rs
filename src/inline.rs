@@ -1301,7 +1301,7 @@ fn end_code_span(
 
 fn code_content(source: &str, mut start: usize, mut end: usize) -> Text {
     let raw = &source.as_bytes()[start..end];
-    let contains_line_end = raw.iter().any(|b| matches!(b, b'\r' | b'\n'));
+    let needs_decoding = memchr::memchr3(b'\r', b'\n', 0, raw).is_some();
     let first_space = raw
         .first()
         .is_some_and(|b| matches!(b, b' ' | b'\r' | b'\n'));
@@ -1313,7 +1313,7 @@ fn code_content(source: &str, mut start: usize, mut end: usize) -> Text {
         end -= if raw.ends_with(b"\r\n") { 2 } else { 1 };
     }
     let slice = &source[start..end];
-    if contains_line_end || slice.as_bytes().contains(&0) {
+    if needs_decoding {
         let mut decoded = String::with_capacity(slice.len());
         let mut chars = slice.chars().peekable();
         while let Some(ch) = chars.next() {
