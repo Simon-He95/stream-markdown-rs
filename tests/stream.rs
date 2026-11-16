@@ -1462,6 +1462,53 @@ fn a_bracket_prefix_is_literal_until_the_reference_definition_has_a_destination(
 }
 
 #[test]
+fn a_numeric_prefix_is_visible_once_it_cannot_be_an_ordered_list_marker() {
+    let options = Options {
+        markstream: true,
+        preview: Preview::Ai,
+        ..Options::default()
+    };
+    let mut parser = Parser::new(options.clone());
+    let mut changes = Vec::new();
+    let mut view = View::default();
+    parser.append("- earlier\n\n", &mut changes).unwrap();
+    view.apply(&mut changes);
+    for chunk in ["2", "."] {
+        parser.append(chunk, &mut changes).unwrap();
+        assert!(changes.is_empty());
+    }
+    parser.append("0 ships", &mut changes).unwrap();
+    let Some(Change::Insert {
+        parent: None,
+        block,
+    }) = changes.last()
+    else {
+        panic!("expected a root paragraph: {changes:?}");
+    };
+    assert_eq!(block.status, BlockStatus::Open);
+    assert!(
+        matches!(block.data, BlockData::Paragraph(InlineContent::Plain(span))
+        if parser.source(span) == "2.0 ships")
+    );
+    view.apply(&mut changes);
+    parser.finish(&mut changes).unwrap();
+    view.apply(&mut changes);
+    assert_eq!(
+        view.blocks.into_values().collect::<Vec<_>>(),
+        parse(parser.source_text(), &options).unwrap().nodes
+    );
+
+    let mut parser = Parser::new(options);
+    parser.append("2.", &mut changes).unwrap();
+    assert!(changes.is_empty());
+    parser.append(" item", &mut changes).unwrap();
+    assert!(
+        matches!(changes.first(), Some(Change::Insert { block, parent: None })
+        if matches!(block.data, BlockData::List { ordered: true, start: 2, .. }))
+    );
+}
+
+#[test]
 fn markstream_fence_previews_the_info_and_keeps_the_id_at_the_newline() {
     let options = Options {
         markstream: true,

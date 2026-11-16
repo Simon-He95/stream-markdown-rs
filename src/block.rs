@@ -721,7 +721,12 @@ impl Engine {
                 && !self.containers.is_empty()
                 && self.line_start < self.scan
                 && let Some(&byte) = bytes.get(self.line_start)
-                && (ordinary_start(byte) || byte == b'|')
+                && (ordinary_start(byte)
+                    || byte == b'|'
+                    || self.options.markstream
+                        && self.options.preview == Preview::Ai
+                        && byte.is_ascii_digit()
+                        && numeric_text_prefix(&source[self.line_start..self.scan]))
             {
                 let limit = self
                     .containers
@@ -1788,9 +1793,11 @@ impl Engine {
         }
         let header_text =
             byte == b'|' && self.active.is_none() && (self.draft.is_some() || !blank(&head[1..]));
-        let bracket_preview = self.options.preview == Preview::Ai && self.containers.is_empty();
+        let root_preview = self.options.preview == Preview::Ai && self.containers.is_empty();
         let inline_text = self.options.markstream
-            && (self.draft.is_some() || partial_inline_start(head, bracket_preview));
+            && (self.draft.is_some()
+                || partial_inline_start(head, root_preview)
+                || root_preview && byte.is_ascii_digit() && numeric_text_prefix(head));
         if !(ordinary_start(byte) || header_text || inline_text) || self.has_block_plugin(byte) {
             return;
         }
@@ -4142,6 +4149,21 @@ fn ordinary_start(byte: u8) -> bool {
             | b'<'
             | b'|'
     ) && !byte.is_ascii_digit()
+}
+
+fn numeric_text_prefix(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let digits = bytes
+        .iter()
+        .take(10)
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    digits == 10
+        || match &bytes[digits..] {
+            [b'.' | b')', next, ..] => !matches!(next, b' ' | b'\t'),
+            [b'.' | b')'] | [] => false,
+            _ => true,
+        }
 }
 
 fn atx(text: &str, start: usize) -> Option<(u8, Span)> {
