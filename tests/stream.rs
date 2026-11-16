@@ -1103,14 +1103,10 @@ fn markstream_fence_previews_the_info_and_keeps_the_id_at_the_newline() {
         panic!("expected preview")
     };
     let id = block.id;
-    let BlockData::CodeBlock {
-        info: Some(info),
-        body,
-    } = block.data
-    else {
+    let BlockData::CodeBlock { body, .. } = block.data else {
         panic!("expected a fence")
     };
-    assert_eq!(parser.source(info), "dif");
+    assert_eq!(parser.source(block.data.code_info().unwrap()), "dif");
     assert_eq!(parser.source(body), "");
     changes.clear();
     parser.append("f\n+x\n", &mut changes).unwrap();
@@ -1284,5 +1280,27 @@ fn incomplete_image_link_is_previewed_without_a_destination() {
         matches!(&nodes[0].kind, InlineKind::LinkPreview(link)
             if link.destination.as_str(parser.source_text()).is_empty()
                && matches!(link.children[0].kind, InlineKind::ImagePreview(_))))
+    );
+}
+
+#[test]
+fn fence_info_keeps_absence_and_exact_nonempty_ranges() {
+    use std::ops::Range;
+
+    let source = "``` \t\nplain\n```\n\n> ```  中文 \t\n> fenced\n> ```\n";
+    let document = stream_markdown_rs::parse(source, &Options::default()).unwrap();
+    assert!(matches!(
+        document.nodes[0].data,
+        BlockData::CodeBlock { .. }
+    ));
+    assert_eq!(document.nodes[0].data.code_info(), None);
+    let segmented = document
+        .nodes
+        .iter()
+        .find(|block| matches!(block.data, BlockData::SegmentedCode(_)))
+        .unwrap();
+    assert_eq!(
+        &source[Range::from(segmented.data.code_info().unwrap())],
+        "中文"
     );
 }

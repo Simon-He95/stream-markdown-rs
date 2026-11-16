@@ -95,7 +95,9 @@ pub enum BlockStatus {
 pub enum InlineContent {
     Plain(Span),
     Parsed(Vec<Inline>),
-    Fragments(Vec<Span>),
+    // This provisional view keeps amortized appends and leaves the final variants compact.
+    #[allow(clippy::box_collection)]
+    Fragments(Box<Vec<Span>>),
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -146,6 +148,12 @@ pub struct RawLine {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SegmentedCode {
+    pub info: Option<Span>,
+    pub lines: Vec<RawLine>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BlockData {
     Paragraph(InlineContent),
     Heading {
@@ -153,13 +161,11 @@ pub enum BlockData {
         content: InlineContent,
     },
     CodeBlock {
-        info: Option<Span>,
+        /// A zero-width range denotes an absent info string.
+        info: Span,
         body: Span,
     },
-    SegmentedCode {
-        info: Option<Span>,
-        lines: Vec<RawLine>,
-    },
+    SegmentedCode(Box<SegmentedCode>),
     IndentedCode {
         lines: Vec<RawLine>,
     },
@@ -181,14 +187,14 @@ pub enum BlockData {
     Details(HtmlOpening),
     HtmlWrapper(HtmlOpening),
     Summary {
-        opening: HtmlOpening,
+        opening_end: usize,
         content: InlineContent,
     },
     Math {
         body: Text,
     },
     Footnote {
-        label: Span,
+        label_end: usize,
         content: InlineContent,
     },
     CustomTag(Box<CustomElement>),
@@ -201,12 +207,42 @@ pub enum BlockData {
     },
 }
 
+impl BlockData {
+    pub fn code_info(&self) -> Option<Span> {
+        match self {
+            Self::CodeBlock { info, .. } if info.start < info.end => Some(*info),
+            Self::SegmentedCode(code) => code.info,
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Block {
     pub id: BlockId,
     pub span: Span,
     pub status: BlockStatus,
     pub data: BlockData,
+}
+
+impl Block {
+    pub fn summary_opening(&self) -> Option<HtmlOpening> {
+        match self.data {
+            BlockData::Summary { opening_end, .. } => Some(HtmlOpening {
+                span: Span::new(self.span.start, opening_end),
+            }),
+            _ => None,
+        }
+    }
+
+    pub fn footnote_label(&self) -> Option<Span> {
+        match self.data {
+            BlockData::Footnote { label_end, .. } => {
+                Some(Span::new(self.span.start + 2, label_end))
+            }
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

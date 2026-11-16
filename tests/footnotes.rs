@@ -233,3 +233,31 @@ fn completed_reference_text_and_open_continuations_are_visible_during_streaming(
             .all(|block| block.id != note)
     );
 }
+
+#[test]
+fn footnote_label_keeps_its_source_span_inside_a_quote() {
+    use std::ops::Range;
+
+    let source = "> [^脚注]: Note\r\n";
+    let document = parse(source, &options()).unwrap();
+    let note = document
+        .nodes
+        .iter()
+        .find(|block| matches!(block.data, BlockData::Footnote { .. }))
+        .unwrap();
+    let expected = note.footnote_label().unwrap();
+    assert_eq!(&source[Range::from(expected)], "脚注");
+
+    let mut parser = Parser::new(options());
+    let mut changes = Vec::new();
+    parser.append("> [^脚", &mut changes).unwrap();
+    parser.append("注]: Note\r\n", &mut changes).unwrap();
+    parser.finish(&mut changes).unwrap();
+    let labels: Vec<_> = changes
+        .iter()
+        .filter_map(published)
+        .filter_map(Block::footnote_label)
+        .collect();
+    assert!(!labels.is_empty());
+    assert!(labels.iter().all(|label| *label == expected));
+}

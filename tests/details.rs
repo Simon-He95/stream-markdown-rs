@@ -214,7 +214,7 @@ fn source_owned_fences_shield_details_markers_and_nested_details_keep_parentage(
         .find(|block| {
             matches!(
                 block.data,
-                BlockData::CodeBlock { .. } | BlockData::SegmentedCode { .. }
+                BlockData::CodeBlock { .. } | BlockData::SegmentedCode(_)
             )
         })
         .unwrap();
@@ -379,4 +379,22 @@ fn missing_closers_keep_source_boundaries_and_finish_incomplete() {
     ));
     assert_eq!(document.nodes[0].span.end, source.len());
     assert_eq!(document.nodes[1].span.end, source.len());
+}
+
+#[test]
+fn summary_opening_keeps_exact_source_with_a_container_prefix() {
+    use std::ops::Range;
+
+    let source = "> <details>\n>   <summary data-x='值'>Heading</summary>\n> </details>\n";
+    let document = parse(source, &options()).unwrap();
+    let opening = document
+        .nodes
+        .iter()
+        .find_map(|block| block.summary_opening())
+        .unwrap();
+    assert_eq!(&source[Range::from(opening.span)], "<summary data-x='值'>");
+    assert_eq!(
+        opening.tag(source).attrs(source).next().unwrap().value,
+        Some("值")
+    );
 }

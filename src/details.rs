@@ -466,7 +466,7 @@ impl Engine {
                         BlockData::Details(opening)
                     } else {
                         BlockData::Summary {
-                            opening,
+                            opening_end: opening.span.end,
                             content: InlineContent::Plain(body),
                         }
                     };
@@ -487,7 +487,7 @@ impl Engine {
                             span: opening.span,
                             status: BlockStatus::Open,
                             data: BlockData::Summary {
-                                opening,
+                                opening_end: opening.span.end,
                                 content: InlineContent::Plain(body),
                             },
                         },
@@ -810,7 +810,7 @@ impl Engine {
                 span: body.span,
                 status: body.status,
                 data: BlockData::Summary {
-                    opening: body.opening,
+                    opening_end: body.opening.span.end,
                     content,
                 },
             },

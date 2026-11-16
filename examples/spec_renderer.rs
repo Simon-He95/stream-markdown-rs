@@ -196,7 +196,7 @@ fn apply_changes(blocks: &mut StreamView, changes: &mut Vec<Change>) -> Result<(
                 };
                 match content {
                     InlineContent::Plain(first) => {
-                        *content = InlineContent::Fragments(vec![*first, span]);
+                        *content = InlineContent::Fragments(Box::new(vec![*first, span]));
                     }
                     InlineContent::Fragments(parts) => parts.push(span),
                     _ => return Err(format!("added a text fragment to parsed block {id:?}")),
@@ -206,9 +206,10 @@ fn apply_changes(blocks: &mut StreamView, changes: &mut Vec<Change>) -> Result<(
             Change::AddRawLine { id, line, end } => {
                 let block = existing_block(blocks, id)?;
                 match &mut block.data {
-                    BlockData::SegmentedHtml(lines)
-                    | BlockData::SegmentedCode { lines, .. }
-                    | BlockData::IndentedCode { lines } => lines.push(line),
+                    BlockData::SegmentedHtml(lines) | BlockData::IndentedCode { lines } => {
+                        lines.push(line)
+                    }
+                    BlockData::SegmentedCode(code) => code.lines.push(line),
                     _ => return Err(format!("added a raw line to unsupported block {id:?}")),
                 }
                 block.span.end = end;
@@ -277,17 +278,17 @@ impl Renderer<'_> {
                 self.inline_content(content);
                 writeln!(self.html, "</h{level}>").unwrap();
             }
-            BlockData::CodeBlock { info, body } => {
+            BlockData::CodeBlock { body, .. } => {
                 self.code(
-                    *info,
+                    block.data.code_info(),
                     (body.start != body.end).then_some(RawLine {
                         span: *body,
                         leading_spaces: 0,
                     }),
                 );
             }
-            BlockData::SegmentedCode { info, lines } => {
-                self.code(*info, lines.iter().copied());
+            BlockData::SegmentedCode(code) => {
+                self.code(code.info, code.lines.iter().copied());
             }
             BlockData::IndentedCode { lines } => self.code(None, lines.iter().copied()),
             BlockData::ThematicBreak => self.html.push_str("<hr />\n"),
@@ -308,7 +309,8 @@ impl Renderer<'_> {
                 }
             }
             BlockData::HtmlWrapper(_) => self.raw_html(&self.source[Range::from(block.span)]),
-            BlockData::Summary { opening, content } => {
+            BlockData::Summary { content, .. } => {
+                let opening = block.summary_opening().unwrap();
                 let raw = &self.source[Range::from(opening.span)];
                 self.raw_html(raw);
                 if !raw.ends_with("/>") {
@@ -458,7 +460,7 @@ impl Renderer<'_> {
             InlineContent::Plain(span) => escape(&mut self.html, &self.source[Range::from(*span)]),
             InlineContent::Parsed(nodes) => self.inlines(nodes),
             InlineContent::Fragments(spans) => {
-                for span in spans {
+                for span in spans.iter() {
                     escape(&mut self.html, &self.source[Range::from(*span)]);
                 }
             }

@@ -255,7 +255,7 @@ impl Engine {
                     span: Span::new(start, line.next),
                     status: BlockStatus::Open,
                     data: BlockData::Footnote {
-                        label: opener.label,
+                        label_end: opener.label.end,
                         content: InlineContent::Plain(opener.body),
                     },
                 },
@@ -377,7 +377,7 @@ impl Engine {
                 span: body.span,
                 status: BlockStatus::Closed,
                 data: BlockData::Footnote {
-                    label: body.label,
+                    label_end: body.label.end,
                     content,
                 },
             },

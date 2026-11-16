@@ -41,7 +41,7 @@ fn optional_vmr_preserves_parentage_and_protects_code_body() {
     assert!(matches!(children[0].data, BlockData::Paragraph(_)));
     assert!(matches!(
         children[1].data,
-        BlockData::CodeBlock { .. } | BlockData::SegmentedCode { .. }
+        BlockData::CodeBlock { .. } | BlockData::SegmentedCode(_)
     ));
     let code_source = &source[children[1].span.start..children[1].span.end];
     assert!(code_source.contains("\n:::\n"));

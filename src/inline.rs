@@ -276,9 +276,29 @@ pub(crate) fn parse_content(
     let Some(first) = first else {
         return plain_or_autolink::<false>(source, input, gfm_autolink);
     };
+    let first = input.start + first;
+    if !gfm_autolink {
+        let marker = source.as_bytes()[first];
+        let last = source.as_bytes()[input.end - 1];
+        let terminal = match marker {
+            b'[' => last == b')',
+            b'`' | b'*' | b'_' => last == marker,
+            _ => false,
+        };
+        if terminal
+            && let Some(node) = simple_terminal_inline(source, input, first, marker, options.syntax)
+        {
+            let nodes = if first == input.start {
+                singleton(node)
+            } else {
+                vec![original(input.start, first), node]
+            };
+            return InlineContent::Parsed(nodes);
+        }
+    }
     let lex = LexStart {
         span: input,
-        first: input.start + first,
+        first,
         gfm_autolink,
         preview_end: None,
     };
@@ -288,6 +308,67 @@ pub(crate) fn parse_content(
         parse_scanned::<Heap, false, false>(source, options, refs, unresolved, None, lex)
     };
     InlineContent::Parsed(nodes)
+}
+
+fn simple_terminal_inline(
+    source: &str,
+    input: Span,
+    first: usize,
+    marker: u8,
+    syntax: Syntax,
+) -> Option<Inline> {
+    let bytes = source.as_bytes();
+    let gfm = syntax == Syntax::Gfm;
+    let kind = match marker {
+        b'[' => {
+            let body = first + 1;
+            let bracket = body + first_special_mode::<false, false>(&bytes[body..input.end], gfm)?;
+            if bytes[bracket] != b']' || bytes.get(bracket + 1) != Some(&b'(') {
+                return None;
+            }
+            let (end, destination, title) = link_inline(source, bracket + 1, input.end)?;
+            if end != input.end {
+                return None;
+            }
+            InlineKind::Link(Box::new(Link {
+                destination: decode_span(source, destination),
+                title: title.map(|span| decode_span(source, span)),
+                children: if body == bracket {
+                    Vec::new()
+                } else {
+                    singleton(original(body, bracket))
+                },
+            }))
+        }
+        b'`' | b'*' | b'_' => {
+            let body = run_end(bytes, first, input.end);
+            let width = body - first;
+            if width > 2 || body + width >= input.end {
+                return None;
+            }
+            let close = body + first_special_mode::<false, false>(&bytes[body..input.end], gfm)?;
+            if close != input.end - width
+                || bytes[close..input.end].iter().any(|&byte| byte != marker)
+            {
+                return None;
+            }
+            if marker == b'`' {
+                InlineKind::Code(code_content(source, body, close))
+            } else {
+                let open = flanking::<false>(source, input.start, first, body, input.end);
+                let closer = flanking::<false>(source, input.start, close, input.end, input.end);
+                if !open.opens || !closer.closes || !matching(open, closer) {
+                    return None;
+                }
+                delimiter_kind(marker, width, singleton(original(body, close)))
+            }
+        }
+        _ => return None,
+    };
+    Some(Inline {
+        span: span(first, input.end),
+        kind,
+    })
 }
 
 fn parse_extended_content(
@@ -3564,7 +3645,17 @@ mod tests {
             InlineContent::Plain(span(0, plain.len())),
         );
 
-        for source in ["a*b", "**word**", "www.example.com/path"] {
+        for source in [
+            "a*b",
+            "**word**",
+            "a_b_",
+            "前缀 _强调_",
+            "prefix `` code ``",
+            "prefix [标签](/docs_(one) 'title')",
+            "prefix [**mixed**](/docs)",
+            "prefix [reference](/bad) tail)",
+            "www.example.com/path",
+        ] {
             let parsed = parse_content(source, span(0, source.len()), &options, &refs, None);
             assert_eq!(
                 parsed,

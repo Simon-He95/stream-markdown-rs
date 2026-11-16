@@ -128,7 +128,7 @@ impl Session {
                     };
                     match content {
                         InlineContent::Plain(first) => {
-                            *content = InlineContent::Fragments(vec![*first, span]);
+                            *content = InlineContent::Fragments(Box::new(vec![*first, span]));
                         }
                         InlineContent::Fragments(parts) => parts.push(span),
                         _ => return Err(format!("unexpected text fragment for node {}", id.0)),
@@ -138,9 +138,10 @@ impl Session {
                 Change::AddRawLine { id, line, end } => {
                     let block = node_mut(&mut self.nodes, id)?;
                     let lines = match &mut block.data {
-                        BlockData::SegmentedCode { lines, .. }
-                        | BlockData::IndentedCode { lines }
-                        | BlockData::SegmentedHtml(lines) => lines,
+                        BlockData::SegmentedCode(code) => &mut code.lines,
+                        BlockData::IndentedCode { lines } | BlockData::SegmentedHtml(lines) => {
+                            lines
+                        }
                         _ => return Err(format!("unexpected raw line for node {}", id.0)),
                     };
                     lines.push(line);
@@ -382,16 +383,22 @@ fn blocks<'a>(
                 inlines(&mut trace, source, content)?;
                 trace.end("heading");
             }
-            BlockData::CodeBlock { info, body } => {
+            BlockData::CodeBlock { body, .. } => {
                 trace.start("code-block");
-                trace.field(info.map(|span| read(source, span)).unwrap_or_default());
+                trace.field(
+                    block
+                        .data
+                        .code_info()
+                        .map(|span| read(source, span))
+                        .unwrap_or_default(),
+                );
                 trace.text(read(source, *body));
                 trace.end("code-block");
             }
-            BlockData::SegmentedCode { info, lines } => {
+            BlockData::SegmentedCode(code) => {
                 trace.start("code-block");
-                trace.field(info.map(|span| read(source, span)).unwrap_or_default());
-                raw_lines(&mut trace, source, lines, Trace::text);
+                trace.field(code.info.map(|span| read(source, span)).unwrap_or_default());
+                raw_lines(&mut trace, source, &code.lines, Trace::text);
                 trace.end("code-block");
             }
             BlockData::IndentedCode { lines } => {
@@ -470,7 +477,7 @@ fn inlines(trace: &mut Trace, source: &str, content: &InlineContent) -> Result<(
         InlineContent::Plain(span) => trace.text(read(source, *span)),
         InlineContent::Parsed(nodes) => inline_nodes(trace, source, nodes)?,
         InlineContent::Fragments(parts) => {
-            for &part in parts {
+            for &part in parts.iter() {
                 trace.text(read(source, part));
             }
         }

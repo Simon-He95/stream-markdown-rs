@@ -18,8 +18,8 @@ use crate::custom_inline;
 use crate::{
     Alignment, Block, BlockData, BlockId, BlockStatus, Change, CustomElement, InlineContent,
     Metrics, Options, ParseError, Phase, PluginError, PluginRule, Preview, PreviewHint, RawLine,
-    Reference, References, Rule, RuleInput, RuleResult, Scope, Span, Syntax, TableData, Tag, Text,
-    inline, math_block, tag,
+    Reference, References, Rule, RuleInput, RuleResult, Scope, SegmentedCode, Span, Syntax,
+    TableData, Tag, Text, inline, math_block, tag,
 };
 
 pub(crate) enum Output<'a> {
@@ -860,7 +860,7 @@ impl Engine {
                 span: Span::new(self.line_start, end),
                 status: BlockStatus::Open,
                 data: BlockData::CodeBlock {
-                    info,
+                    info: info.unwrap_or_default(),
                     body: Span::new(end, end),
                 },
             },
@@ -2415,15 +2415,18 @@ impl Engine {
                 body,
                 lines: segmented.then(Vec::new),
             };
-            let data = if segmented {
-                BlockData::SegmentedCode {
-                    info,
-                    lines: Vec::new(),
-                }
-            } else {
-                BlockData::CodeBlock { info, body }
-            };
             if !self.batch {
+                let data = if segmented {
+                    BlockData::SegmentedCode(Box::new(SegmentedCode {
+                        info,
+                        lines: Vec::new(),
+                    }))
+                } else {
+                    BlockData::CodeBlock {
+                        info: info.unwrap_or_default(),
+                        body,
+                    }
+                };
                 output.done(
                     Block {
                         id,
@@ -2894,12 +2897,12 @@ impl Engine {
     fn close_code(&self, fence: Fence, end: usize, status: BlockStatus, output: &mut Output<'_>) {
         if self.batch {
             let data = match fence.lines {
-                Some(lines) => BlockData::SegmentedCode {
+                Some(lines) => BlockData::SegmentedCode(Box::new(SegmentedCode {
                     info: fence.info,
                     lines,
-                },
+                })),
                 None => BlockData::CodeBlock {
-                    info: fence.info,
+                    info: fence.info.unwrap_or_default(),
                     body: fence.body,
                 },
             };

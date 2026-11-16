@@ -181,13 +181,13 @@ fn block(value: &Block, source: &str) -> Value {
             "heading",
             json!({ "level": level, "content": content(value, source) }),
         ),
-        BlockData::CodeBlock { info, body } => (
+        BlockData::CodeBlock { body, .. } => (
             "code_block",
-            json!({ "info": info.map(span), "body": span(*body) }),
+            json!({ "info": value.data.code_info().map(span), "body": span(*body) }),
         ),
-        BlockData::SegmentedCode { info, lines } => (
+        BlockData::SegmentedCode(code) => (
             "code_block",
-            json!({ "info": info.map(span), "lines": lines.iter().copied().map(raw_line).collect::<Vec<_>>() }),
+            json!({ "info": code.info.map(span), "lines": code.lines.iter().copied().map(raw_line).collect::<Vec<_>>() }),
         ),
         BlockData::IndentedCode { lines } => (
             "indented_code",
@@ -196,21 +196,19 @@ fn block(value: &Block, source: &str) -> Value {
         BlockData::Details(opening) => ("details", html_opening_value(*opening, source)),
         BlockData::HtmlWrapper(opening) => ("html_wrapper", html_opening_value(*opening, source)),
         BlockData::Summary {
-            opening,
-            content: value,
+            content: inline, ..
         } => {
-            let mut opening = html_opening_value(*opening, source);
-            opening["content"] = content(value, source);
+            let mut opening = html_opening_value(value.summary_opening().unwrap(), source);
+            opening["content"] = content(inline, source);
             ("summary", opening)
         }
         BlockData::ThematicBreak => ("thematic_break", Value::Null),
         BlockData::Math { body } => ("math_block", json!({ "body": text(body) })),
         BlockData::Footnote {
-            label,
-            content: value,
+            content: inline, ..
         } => (
             "footnote",
-            json!({ "label": span(*label), "content": content(value, source) }),
+            json!({ "label": span(value.footnote_label().unwrap()), "content": content(inline, source) }),
         ),
         BlockData::Vmr(vmr) => {
             let parameters = vmr.parameters(source);
