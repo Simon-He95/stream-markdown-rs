@@ -713,6 +713,29 @@ test('legacy projection keeps bare table, heading and code markers at the root',
   }
 })
 
+test('legacy list preview projects two actual markers until a thematic break is confirmed', () => {
+  const session = createSession()
+  try {
+    session.append('* One\n* Two\n')
+    session.append('* *')
+    const [list] = session.snapshot()
+    assert.equal(list.raw, 'One\nTwo\n')
+    assert.deepEqual(list.items.at(-1), {
+      type: 'list_item', raw: '', children: [{
+        type: 'list', ordered: false, start: undefined, raw: '',
+        items: [{ type: 'list_item', children: [], raw: '' }],
+      }],
+    })
+    session.append(' *\n')
+    const [closed, thematic] = session.snapshot()
+    assert.equal(closed.items.length, 2)
+    assert.equal(thematic.type, 'thematic_break')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
 test('native candidate retains typed custom tag children alongside the source payload', () => {
   const session = createSession({ parseOptions: { customHtmlTags: ['widget'] } })
   try {
@@ -889,6 +912,31 @@ test('locally closed paragraph keeps explicit math preview until the session end
   }
   finally {
     session.dispose()
+  }
+})
+
+test('legacy inline math previews retain the actual opening whitespace', () => {
+  for (const [source, content, raw, markup] of [
+    ['Equation $$ x_1 + 2', ' x_1 + 2', '$$ x_1 + 2$$', '$$'],
+    ['Equation $\tx_1 + 2', '\\tx_1 + 2', '$\tx_1 + 2$', '$'],
+    ['Equation \\( x_1 + 2', ' x_1 + 2', '\\( x_1 + 2\\)', '\\(\\)'],
+  ]) {
+    const session = createSession()
+    try {
+      session.append(source + '  ')
+      session.append('\n\nNext')
+      const [paragraph] = session.snapshot()
+      assert.equal(paragraph.raw, source)
+      assert.deepEqual(paragraph.children[1], {
+        type: 'math_inline', content, raw, markup, loading: true,
+      })
+      session.finish()
+      assert.equal(session.snapshot()[0].raw, source)
+      assert.equal(session.snapshot()[0].children.some(node => node.type === 'math_inline'), false)
+    }
+    finally {
+      session.dispose()
+    }
   }
 })
 
@@ -1091,9 +1139,9 @@ test('legacy inline draft styles a single trailing backtick after actual text', 
     assert.equal(escaped.snapshot()[0].children[0].content, 'Core from `')
     assert.equal(escaped.snapshot()[0].children.length, 1)
 
-    afterCode.append('Try `old` and `')
+    afterCode.append("Try `old` and npm's `")
     assert.deepEqual(afterCode.snapshot()[0].children.slice(-2), [
-      { type: 'text', content: ' and ', raw: ' and ' },
+      { type: 'text', content: ' and npm’s ', raw: ' and npm’s ' },
       { type: 'inline_code', code: '', raw: '' },
     ])
   }
@@ -1296,6 +1344,58 @@ test('only source-validated uppercase Markdown filenames begin legacy literal te
     session.dispose()
     negative.dispose()
     standard.dispose()
+  }
+})
+
+test('legacy preview waits for prose after an uppercase Markdown filename', () => {
+  const plain = createSession()
+  const parsed = createSession()
+  try {
+    plain.append('Read DESIGN.md')
+    assert.deepEqual(plain.snapshot()[0].children, [
+      { type: 'text', content: 'Read DESIGN.md', raw: 'Read DESIGN.md', center: false },
+    ])
+    plain.append(' — ')
+    assert.equal(plain.snapshot()[0].children.length, 1)
+    plain.append('rebuild')
+    assert.deepEqual(plain.snapshot()[0].children, [
+      { type: 'text', content: 'Read ', raw: 'Read ', center: false },
+      { type: 'text', content: 'DESIGN.md — rebuild', raw: 'DESIGN.md — rebuild' },
+    ])
+
+    const source = 'Read README.md first ([change](https://example.org/c))'
+    parsed.append(source.slice(0, -2))
+    assert.deepEqual(parsed.snapshot()[0].children[1], {
+      type: 'text', content: 'README.md first ', raw: 'README.md first (',
+    })
+    assert.equal(parsed.snapshot()[0].children[2].loading, true)
+    parsed.append('))')
+    assert.equal(parsed.snapshot()[0].raw, source)
+    assert.deepEqual(parsed.snapshot()[0].children.slice(0, 2), [
+      { type: 'text', content: 'Read ', raw: 'Read ', center: false },
+      { type: 'text', content: 'README.md first ', raw: 'README.md first (' },
+    ])
+  }
+  finally {
+    plain.dispose()
+    parsed.dispose()
+  }
+
+  for (const source of [
+    'Read src/DESIGN.md to rebuild',
+    'Read DESIGN\\.md to rebuild',
+    'Read DESIGN.md?key=1 to rebuild',
+    'Read DESIGN.md:8080 to rebuild',
+    'Read DESIGN.md.',
+  ]) {
+    const session = createSession()
+    try {
+      session.append(source)
+      assert.equal(session.snapshot()[0].children.length, 1, source)
+    }
+    finally {
+      session.dispose()
+    }
   }
 })
 
@@ -1511,6 +1611,52 @@ test('a draft Markdown link waiting for its href preserves the legacy preceding 
   }
 })
 
+test('legacy preview holds only the evidenced parenthesis before an explicit link', () => {
+  for (const [source, content, raw] of [
+    ['Use rounded ([A](https:', 'Use rounded ', 'Use rounded '],
+    ['Use rounded-* ([A](https://example.org/d', 'Use rounded-* ', 'Use rounded-* ('],
+    ['Use rounded-* ([A](https://example.org/d))', 'Use rounded-* ', 'Use rounded-* ('],
+  ]) {
+    const session = createSession()
+    try {
+      session.append(source)
+      const [paragraph] = session.snapshot()
+      assert.equal(paragraph.raw, source)
+      assert.deepEqual(paragraph.children[0], { type: 'text', content, raw })
+      assert.equal(paragraph.children[1].href, source.endsWith('https:') ? '' : 'https://example.org/d')
+      session.finish()
+      assert.equal(session.snapshot()[0].raw, source)
+      assert.equal(session.snapshot()[0].children[0].content.startsWith(content + '('), true)
+    }
+    finally {
+      session.dispose()
+    }
+  }
+  for (const source of [
+    'Use rounded ([A](https://example.org/d))',
+    'Use rounded-\\* ([A](https://example.org/d))',
+    'Use rounded-* \\([A](https://example.org/d))',
+  ]) {
+    const session = createSession({ factoryOptions: { enableMath: false } })
+    try {
+      session.append(source)
+      assert.equal(session.snapshot()[0].children[0].content.endsWith('('), true, source)
+    }
+    finally {
+      session.dispose()
+    }
+  }
+  const rejected = createSession({ parseOptions: { validateLink: () => false } })
+  try {
+    rejected.append('Use rounded-* ([A](https://example.org/d))')
+    assert.equal(rejected.snapshot()[0].children.some(node => node.type === 'link'), false)
+    assert.equal(rejected.snapshot()[0].children[0].content, 'Use rounded-* (A)')
+  }
+  finally {
+    rejected.dispose()
+  }
+})
+
 test('legacy draft URLs preserve the evidenced code label and same-line code contexts', () => {
   const href = 'https://example.org/docs'
   const source = 'See [`code`](' + href
@@ -1600,6 +1746,41 @@ test('legacy preview keeps adjacent-bracket recovery within unresolved link text
     session.dispose()
     ordinary.dispose()
     confirmed.dispose()
+  }
+})
+
+test('legacy open paragraphs show a validated HTTP host before a domain suffix arrives', () => {
+  const session = createSession()
+  const denied = createSession({ parseOptions: { validateLink: () => false } })
+  const standard = createSession({ parseOptions: { markstream: false } })
+  const table = createSession()
+  try {
+    const prefix = 'See https://'
+    session.append(prefix)
+    assert.deepEqual(session.snapshot()[0].children.map(child => child.type), ['text'])
+    session.append('marks')
+    const [before, link] = session.snapshot()[0].children
+    assert.equal(before.content, 'See ')
+    assert.equal(link.href, 'https://marks')
+    assert.equal(link.markup, 'linkify')
+    assert.equal(session.snapshot()[0].raw, prefix + 'marks')
+    session.append('.example.com')
+    assert.equal(session.snapshot()[0].children[1].href, 'https://marks.example.com')
+
+    for (const other of [denied, standard]) {
+      other.append(prefix + 'marks')
+      assert.deepEqual(other.snapshot()[0].children.map(child => child.type), ['text'])
+    }
+
+    table.append('| Name | URL |\n| --- | --- |\n| Marks | https://marks')
+    const [cell] = table.snapshot()[0].rows[0].cells[1].children
+    assert.equal(cell.href, 'https://marks')
+  }
+  finally {
+    session.dispose()
+    denied.dispose()
+    standard.dispose()
+    table.dispose()
   }
 })
 
@@ -1757,6 +1938,34 @@ test('multiline HTML anchor previews close at the matching tag and exclude follo
 
     commented.append('<a href="/gallery">\n  <!-- not a closer\n</a>')
     assert.equal(commented.snapshot()[0].loading, true)
+  }
+  finally {
+    session.dispose()
+    commented.dispose()
+  }
+})
+
+test('a multiline legacy anchor holds an unfinished nested tag without altering its confirmed prefix', () => {
+  const session = createSession()
+  const commented = createSession()
+  try {
+    const prefix = '<a href="/gallery">\n  <picture>\n    '
+    session.append(prefix)
+    session.append('<source srcset="/draft')
+    const pending = session.snapshot()[0]
+    assert.equal(pending.raw, prefix)
+    assert.equal(pending.content, prefix + '\n</a>')
+    assert.equal(pending.loading, true)
+
+    session.append('\">\n  ')
+    assert.equal(session.snapshot()[0].raw, prefix + '<source srcset="/draft">\n  ')
+    session.append('</picture>\n</a>')
+    const confirmed = session.snapshot()[0]
+    assert.equal(confirmed.raw, prefix + '<source srcset="/draft">\n  </picture>\n</a>')
+    assert.equal(confirmed.loading, false)
+
+    commented.append('<a href="/gallery">\n  <!-- visible literal <img alt="unfinished')
+    assert.match(commented.snapshot()[0].raw, /<!-- visible literal <img/u)
   }
   finally {
     session.dispose()

@@ -28,6 +28,18 @@ export function projectBlocks(nodes, roots, context) {
           blocks.pop()
       }
     }
+    if (start < context.length && last?.kind === 'list' && last.status === 'open' && view?.type === 'list'
+      && !view.ordered && nodes.get(last.children.at(-1))?.span[1] <= start) {
+      const markers = /^([-+*]) {1,4}[-+*][ \t]*$/u.exec(context.read([start, context.length]))
+      if (markers?.[1] === context.read([last.span[0], last.span[0] + 1])) {
+        const map = sourceMap([start, context.length], context)
+        const empty = { type: 'list_item', children: [], raw: '', ...map }
+        const nested = { type: 'list', ordered: false, start: undefined, items: [empty], raw: '', ...map }
+        view.items.push({ type: 'list_item', children: [nested], raw: '', ...map })
+        view.raw += '\n'
+        Object.assign(view, sourceMap([last.span[0], context.length], context))
+      }
+    }
     if (start < context.length && (!last || (last.status !== 'open' && last.span[1] <= start))) {
       const marker = /^ {0,3}(#{1,6}|`{1,2}|\||<\/?)[ \t]*$/u.exec(context.read([start, context.length]))?.[1]
       if (marker) {
@@ -163,13 +175,18 @@ function htmlHeader(raw) {
   return { tag: tag.toLowerCase(), attrs, closed: markup.endsWith('/>') || VOID.has(tag.toLowerCase()) }
 }
 
-function terminalHtmlAnchor(raw) {
-  if (!/<\/a[ \t\n]*>[ \t\n]*$/iu.test(raw))
+function anchorExtent(raw, preview, appendedWhitespace) {
+  const last = preview ? raw.lastIndexOf('<') : -1
+  const held = last > 0 && /[ \t\n]/u.test(raw[last - 1])
+    && /^<\/?[a-z][\w:.-]*(?=$|[ \t\n/])[^<>]*$/iu.test(raw.slice(last))
+  if (!held && !appendedWhitespace && !/<\/a[ \t\n]*>[ \t\n]*$/iu.test(raw))
     return
 
   let depth = 0
   let offset = 0
   while ((offset = raw.indexOf('<', offset)) !== -1) {
+    if (held && offset === last)
+      return { raw: raw.slice(0, offset), closed: false }
     const tail = raw.slice(offset)
     if (tail.startsWith('<!--')) {
       const end = raw.indexOf('-->', offset + 4)
@@ -182,7 +199,7 @@ function terminalHtmlAnchor(raw) {
     if (closer) {
       offset += closer[0].length
       if (closer[1].toLowerCase() === 'a' && --depth === 0)
-        return raw.slice(offset).trim() ? undefined : raw.slice(0, offset)
+        return raw.slice(offset).trim() ? undefined : { raw: raw.slice(0, offset), closed: true }
       continue
     }
     const opener = HTML_START.exec(tail)
@@ -192,6 +209,8 @@ function terminalHtmlAnchor(raw) {
       depth++
     offset += opener[0].length
   }
+  if (appendedWhitespace)
+    return { raw, closed: false }
 }
 
 function displayText(nodes) {
@@ -264,6 +283,24 @@ function linkNode(href, title, children, markup, raw, attrs) {
   }
 }
 
+function projectDraftHttpHost(children, source, context) {
+  const tail = children.at(-1)
+  if (!context.markstream || context.final || tail?.type !== 'text'
+    || tail.content !== tail.raw || !source.endsWith(tail.raw))
+    return
+  const host = /(?<![\w@./])https?:\/\/[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/iu.exec(tail.raw)
+  if (!host)
+    return
+  const [match] = legacyLinkify.match(host[0]) ?? []
+  if (match?.index !== 0 || match.lastIndex !== host[0].length || !allowsLink(match.url, context))
+    return
+  if (host.index)
+    tail.raw = tail.content = tail.raw.slice(0, host.index)
+  else
+    children.pop()
+  children.push(linkNode(match.url, null, [textNode(host[0])], 'linkify'))
+}
+
 function attrValue(attrs, name) {
   for (let i = attrs.length - 1; i >= 0; i--) {
     if (attrs[i][0].toLowerCase() === name)
@@ -278,8 +315,11 @@ function mathNode(type, body, raw, loading, context) {
   ]
   const [open, close] = delimiters.find(([left]) => raw.startsWith(left)) ?? delimiters.at(-1)
   const markup = open === close ? open : open + close
-  const content = readText(body, context).trim()
-  return { type, content, raw: open + content + close, loading, markup }
+  const text = readText(body, context)
+  const draft = type === 'math_inline' && loading && context.markstream && !context.final
+  const content = draft ? text.trimEnd() : text.trim()
+  const rendered = draft && !raw.includes('\n') ? raw.trimEnd() + close : open + content + close
+  return { type, content, raw: rendered, loading, markup }
 }
 
 function needsLegacyCenter(text, context) {
@@ -288,11 +328,13 @@ function needsLegacyCenter(text, context) {
     && context.parseOptions.requireClosingStrong && text.includes('**'))
 }
 
-function appendMarkdownFilenameText(nodes, text, center) {
+function appendMarkdownFilenameText(nodes, text, center, final) {
   const names = /(^|[\s([,"'“‘])([A-Z0-9](?:[A-Z0-9-]*[A-Z0-9])?)\.[mM][dD](?=$|[\s)\],;"'”’]|[.!?:](?:\s|$))/gu
   let previous
   for (const match of text.matchAll(names)) {
     if (!/[A-Z].*[A-Z]/u.test(match[2]))
+      continue
+    if (!final && !/[\p{L}\p{N}]/u.test(text.slice(match.index + match[0].length)))
       continue
     const start = match.index + match[1].length
     if (previous !== undefined)
@@ -323,9 +365,10 @@ function projectInlines(content, context) {
         return [textNode(text.slice(0, -1), false), { type: 'inline_code', code: '', raw: '' }]
     }
     const nodes = []
-    if (text && !(context.markstream && context.final && content.plain
-      && appendMarkdownFilenameText(nodes, text, true)))
-      nodes.push(textNode(text, needsLegacyCenter(text, context)))
+    const center = needsLegacyCenter(text, context)
+    if (text && !(context.markstream && content.plain
+      && appendMarkdownFilenameText(nodes, text, center, context.final)))
+      nodes.push(textNode(text, center))
     return nodes
   }
   return projectInlineNodes(content.parsed, context)
@@ -406,6 +449,31 @@ function recoverAdjacentBracketLabel(inlines, index, nodes, label, context) {
   return adjacent[2] + '[' + label
 }
 
+function projectParenthesisBeforeLink(inlines, index, nodes, waitingForHref, context, filenameSplit = false) {
+  const before = inlines[index - 1]
+  const current = inlines[index]
+  const previous = nodes.at(-1)
+  if (context.final || before?.kind !== 'text' || previous?.type !== 'text'
+    || before.span[1] !== current.span[0] || previous.content.length === 1 || !previous.content.endsWith('(')
+    || previous.raw !== previous.content)
+    return
+  const text = readText(before.data, context)
+  if (filenameSplit ? !text.endsWith(previous.content) : previous.content !== text)
+    return
+  const labelEnd = current.data.children.at(-1).span[1]
+  if (context.read([labelEnd, labelEnd + 2]) !== '](')
+    return
+  const raw = context.read(before.span)
+  if (!raw.endsWith('(') || raw.endsWith('\\(') || /[\r\n]/u.test(raw))
+    return
+  if (!waitingForHref && !filenameSplit && !/(?<!\\)(?:\\\\)*\*/u.test(raw))
+    return
+  previous.content = previous.content.slice(0, -1)
+  if (waitingForHref)
+    previous.raw = previous.content
+  delete previous.center
+}
+
 function projectCodeAdjacentDraftLink(inlines, index, nodes, children, href, context) {
   const { span, data } = inlines[index]
   if (children.length !== 1 || data.children.length !== 1 || data.title !== null
@@ -479,6 +547,7 @@ function escapedBacktickPair(inlines, index, context) {
 
 function projectInlineNodes(inlines, context, insideLoadingLink = false, insideLinkLabel = false) {
   const nodes = []
+  let filenameIndex = -1
   for (let index = 0; index < inlines.length; index++) {
     const { kind, span, data } = inlines[index]
     const raw = normalize(context.read(span))
@@ -539,7 +608,8 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false, insideL
       const center = kind !== 'softbreak' && !literalCodeMarker && !literalAsterisk
       const text = kind === 'softbreak' ? '\n' : readText(data, context)
       const sourceText = kind === 'text' && Array.isArray(data) && data[0] === span[0] && data[1] === span[1]
-      if (sourceText && context.markstream && !context.final && index + 1 === inlines.length && endsInSingleBacktick(text)) {
+      if (kind === 'text' && context.markstream && !context.final && index + 1 === inlines.length
+        && endsInSingleBacktick(raw) && endsInSingleBacktick(text)) {
         mergeText(nodes, textNode(text.slice(0, -1), false))
         nodes.push({ type: 'inline_code', code: '', raw: '' })
         continue
@@ -554,8 +624,10 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false, insideL
         previous.raw += text
         continue
       }
-      if (!(sourceText && context.markstream && context.final && !literalCodeMarker && !insideLinkLabel
-        && appendMarkdownFilenameText(nodes, text, center)))
+      if (sourceText && context.markstream && !literalCodeMarker && !insideLinkLabel
+        && appendMarkdownFilenameText(nodes, text, center, context.final))
+        filenameIndex = index
+      else
         mergeText(nodes, textNode(text, center))
       if (literalCodeMarker && nodes.at(-1)?.type === 'text')
         delete nodes.at(-1).center
@@ -641,6 +713,10 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false, insideL
             visibleChildren = [textNode(text, false)]
           }
         }
+        if (allowed && simpleMarkdownLink && (waitingForHref || visibleHref))
+          projectParenthesisBeforeLink(
+            inlines, index, nodes, waitingForHref, context, !waitingForHref && filenameIndex === index - 1,
+          )
         const previous = nodes.at(-1)
         if (waitingForHref && previous?.type === 'text' && !previous.content.includes('\n'))
           delete previous.center
@@ -687,6 +763,8 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false, insideL
         nodes.push({ type: 'image', src, alt: displayText(children), title, raw: imageRaw, loading: data.loading })
       }
       else {
+        if (simpleMarkdownLink)
+          projectParenthesisBeforeLink(inlines, index, nodes, false, context, filenameIndex === index - 1)
         const markup = raw.startsWith('<') ? 'autolink' : raw.startsWith('[') ? '' : 'linkify'
         const compact =
           ((markup && /^<?https?:\/\//i.test(raw)) || simpleMarkdownLink)
@@ -866,12 +944,14 @@ function displayFence(block, context, followsPhysicalLines) {
   return { ...codeBlock(info, content, loading), ...map, ...map.sourceMap }
 }
 
-function projectTableRow(values, alignments, header, context) {
+function projectTableRow(values, alignments, header, context, provisional = false) {
   const cells = values.map((cell, column) => {
     const raw = inlineRaw(cell, '', context).replace(/(\\+)\|/g, (source, escapes) => (
       escapes.length % 2 ? `${escapes.slice(1)}|` : source
     ))
     const children = projectInlines(cell, context)
+    if (provisional)
+      projectDraftHttpHost(children, raw, context)
     const tail = children.at(-1)
     if (context.markstream && tail?.type === 'text' && tail.content.endsWith('`')) {
       const marker = /(?<!\\)(?:\\\\)*(`+)/u.exec(tail.content)
@@ -894,7 +974,7 @@ function projectTable(data, loading, map, context, provisionalRow) {
   const header = projectTableRow(data.header, data.alignments, true, context)
   const rows = data.rows.map(row => projectTableRow(row, data.alignments, false, context))
   if (provisionalRow)
-    rows.push(projectTableRow(provisionalRow, data.alignments, false, context))
+    rows.push(projectTableRow(provisionalRow, data.alignments, false, context, true))
   return { type: 'table', header, rows, raw: [header, ...rows].map(row => row.raw).join('\n'), loading, ...map }
 }
 
@@ -1197,6 +1277,8 @@ function projectBlock(block, nodes, context) {
       }
       const inlines = block.previewInlines ?? data
       const children = projectInlines(inlines, context)
+      if (open)
+        projectDraftHttpHost(children, projectedRaw, context)
       const imageLink = context.markstream && context.final && inlines.parsed
         ? projectUnclosedImageLink(inlines.parsed, children, context)
         : undefined
@@ -1360,18 +1442,21 @@ function projectBlock(block, nodes, context) {
       const content = data.lines ? rawLines(data.lines, context) : raw
       const header = htmlHeader(content.trimStart())
       // A complete anchor can end before the CommonMark HTML source block does.
-      const anchor = context.markstream && block.parent === null && header?.tag === 'a' && !header.closed
-        ? terminalHtmlAnchor(content)
-        : undefined
-      const loading = !anchor && status === 'open' && !context.final && Boolean(header) && !header.closed
-      const visible = anchor ?? (block.preview?.kind === 'html_content'
+      const preview = open && !context.final
+      let anchor
+      if (context.markstream && block.parent === null && header?.tag === 'a' && !header.closed) {
+        const suffix = preview && span[1] < context.length ? readText([span[1], context.length], context) : ''
+        anchor = anchorExtent(content + suffix, preview, /^[ \t\n]+$/u.test(suffix))
+      }
+      const loading = !anchor?.closed && preview && Boolean(header) && !header.closed
+      const visible = anchor?.raw ?? (block.preview?.kind === 'html_content'
         ? readText(block.preview.span, context)
         : content)
       const display = context.markstream && loading
         ? visible + `\n</${header.tag}>`
         : visible
       return {
-        type: kind, content: display, raw: anchor ?? content, tag: header?.tag ?? '',
+        type: kind, content: display, raw: anchor?.raw ?? content, tag: header?.tag ?? '',
         ...(header?.attrs.length && { attrs: header.attrs }),
         loading,
         ...map,
