@@ -1,5 +1,6 @@
-use std::{borrow::Cow, collections::HashMap};
+use std::{borrow::Cow, collections::HashMap, ops::DerefMut};
 
+use smallvec::{Array, SmallVec};
 use unicode_casefold::UnicodeCaseFold;
 use unicode_general_category::{GeneralCategory, get_general_category};
 
@@ -22,6 +23,10 @@ pub enum InlineKind {
     Image(Box<Link>),
     Html,
     Extension(u32),
+    ExtensionWithFields {
+        kind: u32,
+        fields: Box<[crate::PluginField]>,
+    },
     SoftBreak,
     HardBreak,
 }
@@ -72,7 +77,7 @@ impl Token {
         span: Span,
         kind: InlineKind,
         delimiter: Option<Delimiter>,
-        payloads: &mut Vec<Option<InlineKind>>,
+        payloads: &mut impl Scratch<Option<InlineKind>>,
     ) -> Self {
         let kind = match kind {
             InlineKind::Text(Text::Source(text)) if text == span => {
@@ -115,6 +120,59 @@ impl Token {
             kind,
         }
     }
+}
+
+trait Scratch<T>: Default + DerefMut<Target = [T]> {
+    fn push(&mut self, value: T);
+    fn pop(&mut self) -> Option<T>;
+    fn truncate(&mut self, len: usize);
+}
+
+impl<T> Scratch<T> for Vec<T> {
+    fn push(&mut self, value: T) {
+        Vec::push(self, value);
+    }
+    fn pop(&mut self) -> Option<T> {
+        Vec::pop(self)
+    }
+    fn truncate(&mut self, len: usize) {
+        Vec::truncate(self, len);
+    }
+}
+
+impl<A: Array> Scratch<A::Item> for SmallVec<A> {
+    fn push(&mut self, value: A::Item) {
+        SmallVec::push(self, value);
+    }
+    fn pop(&mut self) -> Option<A::Item> {
+        SmallVec::pop(self)
+    }
+    fn truncate(&mut self, len: usize) {
+        SmallVec::truncate(self, len);
+    }
+}
+
+trait Storage {
+    type Tokens: Scratch<Token>;
+    type Payloads: Scratch<Option<InlineKind>>;
+    type Brackets: Scratch<Bracket>;
+    type Openers: Scratch<usize>;
+}
+
+struct Local;
+impl Storage for Local {
+    type Tokens = SmallVec<[Token; 16]>;
+    type Payloads = SmallVec<[Option<InlineKind>; 4]>;
+    type Brackets = SmallVec<[Bracket; 4]>;
+    type Openers = SmallVec<[usize; 4]>;
+}
+
+struct Heap;
+impl Storage for Heap {
+    type Tokens = Vec<Token>;
+    type Payloads = Vec<Option<InlineKind>>;
+    type Brackets = Vec<Bracket>;
+    type Openers = Vec<usize>;
 }
 
 struct Bracket {
@@ -372,6 +430,23 @@ fn parse_inner(
     input: Span,
     options: &Options,
     refs: &References,
+    unresolved: Option<&mut Vec<String>>,
+    reference_origins: Option<(&str, &mut Vec<usize>)>,
+) -> Vec<Inline> {
+    // Short leaves usually fit without allocating scratch. Use Vec for longer
+    // leaves, where repeatedly checking SmallVec's spill state costs more.
+    if input.end - input.start <= 128 {
+        parse_with::<Local>(source, input, options, refs, unresolved, reference_origins)
+    } else {
+        parse_with::<Heap>(source, input, options, refs, unresolved, reference_origins)
+    }
+}
+
+fn parse_with<S: Storage>(
+    source: &str,
+    input: Span,
+    options: &Options,
+    refs: &References,
     mut unresolved: Option<&mut Vec<String>>,
     reference_origins: Option<(&str, &mut Vec<usize>)>,
 ) -> Vec<Inline> {
@@ -398,9 +473,9 @@ fn parse_inner(
         };
     };
 
-    let mut tokens = Vec::new();
-    let mut payloads = Vec::new();
-    let mut brackets: Vec<Bracket> = Vec::new();
+    let mut tokens = S::Tokens::default();
+    let mut payloads = S::Payloads::default();
+    let mut brackets = S::Brackets::default();
     let mut link_generation = 0;
     let mut backticks = None;
     push_original(&mut tokens, start, start + first);
@@ -414,6 +489,7 @@ fn parse_inner(
         }
         let begin = i;
         let mut delimiter = None;
+        let mut next_special = None;
         let kind = match bytes[i] {
             b'\\' if i + 1 < end && bytes[i + 1].is_ascii_punctuation() => {
                 i += 2;
@@ -464,8 +540,34 @@ fn parse_inner(
             }
             b'*' | b'_' | b'~' if bytes[i] != b'~' || gfm => {
                 i = run_end(bytes, i, end);
-                if bytes[begin] != b'~' || i - begin <= 2 {
-                    delimiter = Some(flanking(source, start, begin, i, end));
+                let marker = bytes[begin];
+                let width = i - begin;
+                if marker != b'~' || width <= 2 {
+                    let opener = flanking(source, start, begin, i, end);
+                    if width <= 2 && opener.opens && !opener.closes {
+                        let candidate =
+                            first_special(&bytes[i..end], gfm).map_or(end, |offset| i + offset);
+                        if candidate < end && bytes[candidate] == marker {
+                            let close_end = run_end(bytes, candidate, end);
+                            if close_end - candidate == width {
+                                let closer = flanking(source, start, candidate, close_end, end);
+                                if closer.closes && !closer.opens {
+                                    // The nearest opener and a closer-only run pair before any outer delimiter.
+                                    let children = vec![original(i, candidate)];
+                                    i = close_end;
+                                    tokens.push(Token::from_inline(
+                                        span(begin, i),
+                                        delimiter_kind(marker, width, children),
+                                        None,
+                                        &mut payloads,
+                                    ));
+                                    continue;
+                                }
+                            }
+                        }
+                        next_special = Some(candidate);
+                    }
+                    delimiter = Some(opener);
                 }
                 InlineKind::Text(Text::Source(span(begin, i)))
             }
@@ -498,9 +600,10 @@ fn parse_inner(
                         let children = if tokens.len() == child_start + 1 && !linkify_image {
                             singleton(tokens.pop().unwrap().into_inline(&mut payloads))
                         } else {
-                            finish_tokens(
+                            finish_tokens::<S>(
                                 source,
-                                tokens.split_off(child_start),
+                                &mut tokens,
+                                child_start,
                                 &mut payloads,
                                 linkify_image,
                             )
@@ -572,15 +675,16 @@ fn parse_inner(
             delimiter,
             &mut payloads,
         ));
-        let next = first_special(&bytes[i..end], gfm).map_or(end, |offset| i + offset);
+        let next = next_special
+            .unwrap_or_else(|| first_special(&bytes[i..end], gfm).map_or(end, |offset| i + offset));
         push_original(&mut tokens, i, next);
         i = next;
     }
 
-    finish_tokens(source, tokens, &mut payloads, gfm_autolink)
+    finish_tokens::<S>(source, &mut tokens, 0, &mut payloads, gfm_autolink)
 }
 
-fn push_original(tokens: &mut Vec<Token>, start: usize, end: usize) {
+fn push_original(tokens: &mut impl Scratch<Token>, start: usize, end: usize) {
     if start < end {
         tokens.push(Token::new(span(start, end), TokenKind::Plain));
     }
@@ -741,33 +845,37 @@ fn matching(open: Delimiter, close: Delimiter) -> bool {
         }
 }
 
-fn finish_tokens(
+fn finish_tokens<S: Storage>(
     source: &str,
-    mut tokens: Vec<Token>,
-    payloads: &mut Vec<Option<InlineKind>>,
+    tokens: &mut S::Tokens,
+    start: usize,
+    payloads: &mut S::Payloads,
     gfm_autolink: bool,
 ) -> Vec<Inline> {
-    if tokens.len() == 1 && !gfm_autolink {
+    let head = tokens.len();
+    if head == start {
+        return Vec::new();
+    }
+    if head == start + 1 && !gfm_autolink {
         return singleton(tokens.pop().unwrap().into_inline(payloads));
     }
     let mut output = Vec::new();
-    if !tokens
+    if !tokens[start..]
         .iter()
         .any(|token| token.delimiter().is_some_and(|d| d.opens || d.closes))
     {
-        for token in tokens {
+        for &token in &tokens[start..] {
             push_inline(&mut output, token.into_inline(payloads));
         }
     } else {
-        let head = tokens.len();
-        for (i, token) in tokens[..head - 1].iter_mut().enumerate() {
-            token.next = i + 1;
+        for (i, token) in tokens[start..head - 1].iter_mut().enumerate() {
+            token.next = start + i + 1;
         }
         tokens[head - 1].next = usize::MAX;
-        let mut openers: Vec<usize> = Vec::new();
+        let mut openers = S::Openers::default();
         let mut lower_bound = [0; 15];
 
-        for i in 0..head {
+        for i in start..head {
             let Some(close) = tokens[i].delimiter() else {
                 continue;
             };
@@ -817,11 +925,7 @@ fn finish_tokens(
                         children
                     };
 
-                    let kind = match close.marker {
-                        b'~' => InlineKind::Strikethrough(children),
-                        _ if used == 2 => InlineKind::Strong(children),
-                        _ => InlineKind::Emphasis(children),
-                    };
+                    let kind = delimiter_kind(close.marker, used, children);
                     tokens[opener].span.end -= used;
                     tokens[i].span.start += used;
                     tokens[opener].next = tokens.len();
@@ -843,17 +947,26 @@ fn finish_tokens(
             }
         }
 
-        let mut cursor = 0;
+        let mut cursor = start;
         while cursor != usize::MAX {
             let token = tokens[cursor];
             push_inline(&mut output, token.into_inline(payloads));
             cursor = token.next;
         }
     }
+    tokens.truncate(start);
     if gfm_autolink {
         return gfm_linkify(source, output);
     }
     output
+}
+
+fn delimiter_kind(marker: u8, width: usize, children: Vec<Inline>) -> InlineKind {
+    match marker {
+        b'~' => InlineKind::Strikethrough(children),
+        _ if width == 2 => InlineKind::Strong(children),
+        _ => InlineKind::Emphasis(children),
+    }
 }
 
 fn singleton(inline: Inline) -> Vec<Inline> {

@@ -148,3 +148,47 @@ fn a_rule_cannot_execute_beyond_its_fuel_limit() {
         Err(error) if error.message.contains("fuel")
     ));
 }
+
+#[test]
+fn a_v2_rule_accepting_without_fields_does_not_call_the_field_export() {
+    let source = include_str!("fixtures/typed.wat")
+        .replace("    i64.const 12884901888)", "    unreachable)")
+        .replace(
+            "(i64.or (i64.const 12884901888)",
+            "(i64.or (i64.const 8589934592)",
+        );
+    let wasm = wat::parse_str(source).unwrap();
+    let plugin = WasmPlugin::load(&wasm, descriptor(Scope::Block), Limits::default()).unwrap();
+    let mut guest = plugin.instantiate().unwrap();
+    assert!(matches!(
+        guest.step(input(Phase::Probe, "@中!")).unwrap(),
+        RuleResult::Accept { consumed: 5 }
+    ));
+}
+
+#[test]
+fn malformed_wasm_field_tables_fail_at_the_host_boundary() {
+    let typed = include_str!("fixtures/typed.wat");
+    for (source, diagnostic) in [
+        (
+            typed.replace("    i64.const 12884901888)", "    i64.const 4402341478400)"),
+            "too many fields",
+        ),
+        (
+            typed.replace("    i64.const 12884901888)", "    i64.const 12884967423)"),
+            "outside linear memory",
+        ),
+        (
+            typed.replace(r"\09\00\02\00\01", r"\09\00\02\00\02"),
+            "invalid field record",
+        ),
+    ] {
+        let wasm = wat::parse_str(source).unwrap();
+        let plugin = WasmPlugin::load(&wasm, descriptor(Scope::Inline), Limits::default()).unwrap();
+        let mut guest = plugin.instantiate().unwrap();
+        assert!(matches!(
+            guest.step(input(Phase::Probe, "@中!")),
+            Err(error) if error.message.contains(diagnostic)
+        ));
+    }
+}

@@ -4,7 +4,7 @@ use crate::container::{self, Frame, Kind, Style};
 use crate::{
     Alignment, Block, BlockData, BlockId, BlockStatus, Change, InlineContent, Metrics, Options,
     ParseError, Phase, PluginError, PluginRule, Preview, PreviewHint, RawLine, Reference,
-    References, Rule, RuleInput, RuleResult, Scope, Span, Syntax, Tag, inline, tag,
+    References, Rule, RuleInput, RuleResult, Scope, Span, Syntax, TableData, Tag, inline, tag,
 };
 
 pub(crate) enum Output<'a> {
@@ -157,9 +157,78 @@ struct Fence {
 struct Table {
     id: BlockId,
     span: Span,
-    alignments: Vec<Alignment>,
-    header: Vec<InlineContent>,
-    rows: Vec<Vec<InlineContent>>,
+    columns: usize,
+    next_cell: usize,
+    batch_data: Option<Box<TableData>>,
+}
+
+#[derive(Clone, Copy)]
+enum SeparatorStage {
+    Start,
+    LeadingColon,
+    Dashes,
+    TrailingColon,
+    Spaces,
+    Invalid,
+}
+
+struct SeparatorProbe {
+    start: usize,
+    scanned: usize,
+    columns: usize,
+    completed: usize,
+    saw_dash: bool,
+    stage: SeparatorStage,
+}
+
+impl SeparatorProbe {
+    fn new(source: &str, start: usize, header: Span) -> Self {
+        let columns = if source[Range::from(header)].contains('|') {
+            cell_spans(source, header).count()
+        } else {
+            0
+        };
+        Self {
+            start,
+            scanned: start + 1,
+            columns,
+            completed: 0,
+            saw_dash: false,
+            stage: SeparatorStage::Start,
+        }
+    }
+
+    fn update(&mut self, source: &str, end: usize) -> bool {
+        use SeparatorStage::*;
+        for byte in source.as_bytes()[self.scanned..end].iter().copied() {
+            if matches!(self.stage, Invalid) {
+                break;
+            }
+            if self.completed == self.columns {
+                if !matches!(byte, b' ' | b'\t') {
+                    self.stage = Invalid;
+                }
+                continue;
+            }
+            self.stage = match (self.stage, byte) {
+                (Start, b' ' | b'\t') => Start,
+                (Start, b':') => LeadingColon,
+                (Start | LeadingColon | Dashes, b'-') => {
+                    self.saw_dash = true;
+                    Dashes
+                }
+                (Dashes, b':') => TrailingColon,
+                (Dashes | TrailingColon | Spaces, b' ' | b'\t') => Spaces,
+                (Dashes | TrailingColon | Spaces, b'|') => {
+                    self.completed += 1;
+                    Start
+                }
+                _ => Invalid,
+            };
+        }
+        self.scanned = end;
+        self.saw_dash && !matches!(self.stage, Invalid)
+    }
 }
 
 struct Html {
@@ -230,6 +299,25 @@ struct Dependent {
     parts: Option<Arc<[Span]>>,
 }
 
+#[derive(Clone)]
+enum Dependency {
+    Leaf(Dependent),
+    Cell {
+        id: BlockId,
+        index: usize,
+        span: Span,
+    },
+}
+
+impl Dependency {
+    fn key(&self) -> (BlockId, Option<usize>) {
+        match self {
+            Self::Leaf(leaf) => (leaf.id, None),
+            Self::Cell { id, index, .. } => (*id, Some(*index)),
+        }
+    }
+}
+
 struct Registered {
     rule: Rule,
     implementation: Box<dyn PluginRule>,
@@ -251,8 +339,10 @@ pub(crate) struct Engine {
     containers: Vec<Frame>,
     draft: Option<Draft>,
     preview: Option<BlockId>,
+    separator: Option<SeparatorProbe>,
+    tag_probe: Option<tag::OpeningProbe>,
     refs: References,
-    waiting: HashMap<String, Vec<Dependent>>,
+    waiting: HashMap<String, Vec<Dependency>>,
     batch_parts: HashMap<BlockId, Arc<[Span]>>,
     plugins: Vec<Registered>,
     block_triggers: [bool; 128],
@@ -273,6 +363,8 @@ impl Engine {
             containers: Vec::new(),
             draft: None,
             preview: None,
+            separator: None,
+            tag_probe: None,
             refs: References::default(),
             waiting: HashMap::new(),
             batch_parts: HashMap::new(),
@@ -345,6 +437,9 @@ impl Engine {
                 self.close_code(fence, end, status, &mut output);
                 continue;
             }
+            if !self.batch && !final_input && self.stream_fence_text(bytes, &mut output) {
+                break;
+            }
             let Some(distance) = memchr::memchr2(b'\n', b'\r', &bytes[self.scan..]) else {
                 self.metrics.scanned_bytes += source.len() - self.scan;
                 self.scan = source.len();
@@ -379,9 +474,41 @@ impl Engine {
             self.close_containers(0, &mut output);
             self.clear_preview(&mut output);
         } else {
+            if self.running.is_none()
+                && self.containers.is_empty()
+                && !self.options.custom_tags.is_empty()
+            {
+                while self.open_partial_tag(source, &mut output)? {}
+            }
             self.partial(source, &mut output);
         }
         Ok(())
+    }
+
+    fn stream_fence_text(&mut self, bytes: &[u8], output: &mut Output<'_>) -> bool {
+        let Some(Active::Fence(fence)) = &mut self.active else {
+            return false;
+        };
+        if fence.lines.is_some()
+            || !(self.scan == self.line_start || self.scan == fence.body.end)
+            || memchr::memchr(fence.marker, &bytes[self.scan..]).is_some()
+        {
+            return false;
+        }
+        let end = bytes.len() - usize::from(bytes.last() == Some(&b'\r'));
+        if let Some(at) = memchr::memrchr2(b'\n', b'\r', &bytes[self.scan..end]) {
+            self.line_start = self.scan + at + 1;
+        }
+        let line = &bytes[self.line_start..end];
+        let published = if line.len() <= 3 && line.iter().all(|&byte| byte == b' ') {
+            self.line_start
+        } else {
+            end
+        };
+        emit_append(output, fence.id, &mut fence.body.end, published);
+        self.metrics.scanned_bytes += end - self.scan;
+        self.scan = end;
+        true
     }
 
     fn id(&mut self) -> BlockId {
@@ -394,6 +521,50 @@ impl Engine {
         if let Some(id) = self.preview.take() {
             output.update(Change::Preview { id, hint: None });
         }
+    }
+
+    fn open_partial_tag(
+        &mut self,
+        source: &str,
+        output: &mut Output<'_>,
+    ) -> Result<bool, ParseError> {
+        if !matches!(self.active, None | Some(Active::Paragraph(_))) {
+            return Ok(false);
+        }
+        let head = unindent(&source[self.line_start..self.scan]);
+        let start = self.scan - head.len();
+        if self
+            .tag_probe
+            .as_ref()
+            .is_none_or(|probe| probe.start != start)
+        {
+            let Some(name) = head.strip_prefix('<') else {
+                return Ok(false);
+            };
+            let Some(width) = self.options.custom_tags.iter().find_map(|registered| {
+                let suffix = name.strip_prefix(registered)?;
+                suffix
+                    .as_bytes()
+                    .first()
+                    .filter(|byte| matches!(byte, b' ' | b'\t' | b'/' | b'>'))
+                    .map(|_| registered.len())
+            }) else {
+                return Ok(false);
+            };
+            self.tag_probe = Some(tag::OpeningProbe::new(start, start + 1 + width));
+        }
+        let probe = self.tag_probe.as_mut().unwrap();
+        let Some(end) = probe.update(source, self.scan) else {
+            return Ok(false);
+        };
+        if tag::opening(source, start, end).is_none() {
+            probe.reject();
+            return Ok(false);
+        }
+        self.line(source, Line::new(self.line_start, end, end), output)?;
+        self.line_start = end;
+        self.tag_probe = None;
+        Ok(true)
     }
 
     fn partial(&mut self, source: &str, output: &mut Output<'_>) {
@@ -410,26 +581,76 @@ impl Engine {
             }
             return;
         }
+        if let Some(Active::Element(element)) = &mut self.active {
+            let start = element.body.end.max(self.line_start);
+            let text_end =
+                memchr::memchr(b'<', &source.as_bytes()[start..end]).map_or(end, |at| start + at);
+            emit_append(output, element.id, &mut element.body.end, text_end);
+            return;
+        }
         if let Some(Active::Paragraph(paragraph)) = &self.active
             && self.options.preview == Preview::Ai
             && self.options.syntax == Syntax::Gfm
             && paragraph.lines == 1
             && paragraph.visible
             && byte == b'|'
-            && separator_prefix(head)
-            && source[Range::from(paragraph.first)].contains('|')
         {
-            if self.preview != Some(paragraph.id) {
-                self.preview = Some(paragraph.id);
-                output.update(Change::Preview {
-                    id: paragraph.id,
-                    hint: Some(PreviewHint::Table),
-                });
+            let start = end - head.len();
+            if self
+                .separator
+                .as_ref()
+                .is_none_or(|separator| separator.start != start)
+            {
+                self.separator = Some(SeparatorProbe::new(source, start, paragraph.first));
+            }
+            let pending = self.separator.as_mut().unwrap().update(source, end);
+            if pending {
+                if self.preview != Some(paragraph.id) {
+                    self.preview = Some(paragraph.id);
+                    output.update(Change::Preview {
+                        id: paragraph.id,
+                        hint: Some(PreviewHint::Table),
+                    });
+                }
+            } else {
+                self.clear_preview(output);
             }
             return;
         }
         self.clear_preview(output);
-        if !ordinary_start(byte)
+        if byte == b'#' && self.active.is_none() {
+            if let Some(draft) = &mut self.draft {
+                emit_append(output, draft.id, &mut draft.published, end);
+            } else {
+                let start = end - head.len();
+                if let Some((level, content)) = atx(head, start)
+                    && content.start < content.end
+                {
+                    let id = self.id();
+                    self.draft = Some(Draft {
+                        id,
+                        start,
+                        published: end,
+                    });
+                    output.open(
+                        Block {
+                            id,
+                            span: Span::new(self.line_start, end),
+                            status: BlockStatus::Open,
+                            data: BlockData::Heading {
+                                level,
+                                content: InlineContent::Plain(Span::new(content.start, end)),
+                            },
+                        },
+                        None,
+                    );
+                }
+            }
+            return;
+        }
+        let header_text =
+            byte == b'|' && self.active.is_none() && (self.draft.is_some() || !blank(&head[1..]));
+        if !(ordinary_start(byte) || header_text)
             || self
                 .block_triggers
                 .get(usize::from(byte))
@@ -868,21 +1089,30 @@ impl Engine {
             }
             Some(Active::Table(mut table)) => {
                 if !head.trim_matches([' ', '\t']).is_empty() && !interrupts_paragraph(head) {
-                    let mut cells = self.cells(source, line.span())?;
-                    cells.truncate(table.alignments.len());
-                    cells.resize_with(table.alignments.len(), || {
-                        InlineContent::Plain(Span::new(line.end, line.end))
-                    });
+                    let spans = cell_spans(source, line.span())
+                        .take(table.columns)
+                        .chain(std::iter::repeat(Span::new(line.end, line.end)))
+                        .take(table.columns);
                     table.span.end = line.next;
-                    if self.batch {
-                        table.rows.push(cells);
+                    if let Some(data) = &mut table.batch_data {
+                        data.cells.extend(spans.map(InlineContent::Plain));
                     } else {
+                        let mut cells = Vec::with_capacity(table.columns);
+                        for (column, span) in spans.enumerate() {
+                            cells.push(self.stream_cell(
+                                source,
+                                table.id,
+                                table.next_cell + column,
+                                span,
+                            )?);
+                        }
                         output.update(Change::AddRow {
                             id: table.id,
                             end: line.next,
                             cells,
                         });
                     }
+                    table.next_cell += table.columns;
                     self.active = Some(Active::Table(table));
                     return Ok(());
                 }
@@ -909,38 +1139,43 @@ impl Engine {
                 {
                     let head_cells = cell_spans(source, paragraph.first);
                     if let Some(alignments) = separator_alignments(source, line.span())
-                        && alignments.len() == head_cells.len()
+                        && alignments.len() == head_cells.clone().count()
                     {
                         self.clear_preview(output);
-                        let header = head_cells
-                            .into_iter()
-                            .map(|span| self.table_cell(source, span, false))
-                            .collect::<Result<_, _>>()?;
+                        let columns = alignments.len();
+                        let mut cells = Vec::with_capacity(columns);
+                        for (index, span) in head_cells.enumerate() {
+                            cells.push(if self.batch {
+                                InlineContent::Plain(span)
+                            } else {
+                                self.stream_cell(source, paragraph.id, index, span)?
+                            });
+                        }
                         let span = Span::new(paragraph.span.start, line.next);
-                        let mut table = Table {
-                            id: paragraph.id,
-                            span,
-                            alignments,
-                            header,
-                            rows: Vec::new(),
-                        };
-                        if !self.batch {
+                        let data = Box::new(TableData { alignments, cells });
+                        let batch_data = if self.batch {
+                            Some(data)
+                        } else {
                             let block = Block {
-                                id: table.id,
+                                id: paragraph.id,
                                 span,
                                 status: BlockStatus::Open,
-                                data: BlockData::Table {
-                                    alignments: table.alignments.clone(),
-                                    header: std::mem::take(&mut table.header),
-                                    rows: Vec::new(),
-                                },
+                                data: BlockData::Table(data),
                             };
                             if paragraph.visible {
                                 output.update(Change::Replace(block));
                             } else {
                                 output.open(block, self.parent());
                             }
-                        }
+                            None
+                        };
+                        let table = Table {
+                            id: paragraph.id,
+                            span,
+                            columns,
+                            next_cell: columns,
+                            batch_data,
+                        };
                         self.active = Some(Active::Table(table));
                         return Ok(());
                     }
@@ -1285,17 +1520,13 @@ impl Engine {
             }
             Active::Indented(code) => self.close_indented(code, output),
             Active::Table(table) => {
-                if self.batch {
+                if let Some(data) = table.batch_data {
                     output.done(
                         Block {
                             id: table.id,
                             span: table.span,
                             status: BlockStatus::Closed,
-                            data: BlockData::Table {
-                                alignments: table.alignments,
-                                header: table.header,
-                                rows: table.rows,
-                            },
+                            data: BlockData::Table(data),
                         },
                         true,
                         self.parent(),
@@ -1458,9 +1689,20 @@ impl Engine {
             && !self.batch
             && let Some(waiters) = self.waiting.remove(label.as_ref())
         {
+            let mut previous = None;
             for dependent in waiters {
-                self.metrics.invalidated_blocks += 1;
-                self.finish_leaf(source, dependent, true, output)?;
+                let id = dependent.key().0;
+                if previous != Some(id) {
+                    self.metrics.invalidated_blocks += 1;
+                    previous = Some(id);
+                }
+                match dependent {
+                    Dependency::Leaf(leaf) => self.finish_leaf(source, leaf, true, output)?,
+                    Dependency::Cell { id, index, span } => {
+                        let content = self.stream_cell(source, id, index, span)?;
+                        output.update(Change::ReplaceTableCell { id, index, content });
+                    }
+                }
             }
         }
         Ok(())
@@ -1482,13 +1724,8 @@ impl Engine {
             Some(parts) => self.parse_parts(source, parts, true)?,
             None => self.inline(source, leaf.content)?,
         };
-        self.unresolved.sort_unstable();
-        self.unresolved.dedup();
-        for label in self.unresolved.drain(..) {
-            let waiters = self.waiting.entry(label).or_default();
-            if let Err(index) = waiters.binary_search_by_key(&leaf.id, |waiting| waiting.id) {
-                waiters.insert(index, leaf.clone());
-            }
+        if !self.unresolved.is_empty() {
+            self.track_dependency(Dependency::Leaf(leaf.clone()));
         }
         output.done(
             Block {
@@ -1504,6 +1741,18 @@ impl Engine {
             self.parent(),
         );
         Ok(())
+    }
+
+    fn track_dependency(&mut self, dependency: Dependency) {
+        let key = dependency.key();
+        self.unresolved.sort_unstable();
+        self.unresolved.dedup();
+        for label in self.unresolved.drain(..) {
+            let waiters = self.waiting.entry(label).or_default();
+            if let Err(index) = waiters.binary_search_by_key(&key, Dependency::key) {
+                waiters.insert(index, dependency.clone());
+            }
+        }
     }
 
     fn inline(&mut self, source: &str, span: Span) -> Result<InlineContent, ParseError> {
@@ -1574,22 +1823,27 @@ impl Engine {
         Ok(InlineContent::Parsed(nodes))
     }
 
-    fn cells(&mut self, source: &str, span: Span) -> Result<Vec<InlineContent>, ParseError> {
-        cell_spans(source, span)
-            .into_iter()
-            .map(|cell| self.table_cell(source, cell, false))
-            .collect()
+    fn stream_cell(
+        &mut self,
+        source: &str,
+        id: BlockId,
+        index: usize,
+        span: Span,
+    ) -> Result<InlineContent, ParseError> {
+        self.unresolved.clear();
+        let content = self.table_cell(source, span, true)?;
+        if !self.unresolved.is_empty() {
+            self.track_dependency(Dependency::Cell { id, index, span });
+        }
+        Ok(content)
     }
 
     fn table_cell(
         &mut self,
         source: &str,
         span: Span,
-        resolving_batch: bool,
+        track: bool,
     ) -> Result<InlineContent, ParseError> {
-        if self.batch && !resolving_batch {
-            return Ok(InlineContent::Plain(span));
-        }
         let mut start = span.start;
         let mut parts = Vec::new();
         for at in memchr::memchr_iter(b'|', &source.as_bytes()[span.start..span.end]) {
@@ -1605,10 +1859,10 @@ impl Engine {
             }
         }
         if parts.is_empty() {
-            return self.parse_inline(source, span, false);
+            return self.parse_inline(source, span, track);
         }
         parts.push(Span::new(start, span.end));
-        self.parse_parts(source, &parts, false)
+        self.parse_parts(source, &parts, track)
     }
 
     pub(crate) fn resolve_batch(
@@ -1634,12 +1888,10 @@ impl Engine {
                         _ => unreachable!(),
                     }
                 }
-                BlockData::Table { header, rows, .. } => {
-                    for row in std::iter::once(header).chain(rows) {
-                        for cell in row {
-                            if let InlineContent::Plain(span) = cell {
-                                *cell = self.table_cell(source, *span, true)?;
-                            }
+                BlockData::Table(data) => {
+                    for cell in &mut data.cells {
+                        if let InlineContent::Plain(span) = cell {
+                            *cell = self.table_cell(source, *span, false)?;
                         }
                     }
                 }
@@ -1711,14 +1963,23 @@ impl Engine {
             probe = false;
             let result = plugin_step(plugin, source, running.cursor, end, phase)?;
             match result {
-                RuleResult::Accept { consumed } => {
+                accepted @ (RuleResult::Accept { consumed }
+                | RuleResult::AcceptWithFields { consumed, .. }) => {
                     let stop = running.cursor + consumed;
                     if stop == running.start {
                         return Err(
                             PluginError::new("plugin accepted without consuming input").into()
                         );
                     }
-                    self.emit_extension(kind, Span::new(running.start, stop), output);
+                    let span = Span::new(running.start, stop);
+                    let data = match accepted {
+                        RuleResult::AcceptWithFields { fields, .. } if !fields.is_empty() => {
+                            crate::plugin::validate_fields(&fields, &source[Range::from(span)])?;
+                            BlockData::ExtensionWithFields { kind, fields }
+                        }
+                        _ => BlockData::Extension { kind },
+                    };
+                    self.emit_extension(data, span, output);
                     if !source[stop..end].trim().is_empty() {
                         let end_of_line = source[..end].trim_end_matches(['\r', '\n']).len();
                         self.line(source, Line::new(stop, end_of_line, end), output)?;
@@ -1754,14 +2015,14 @@ impl Engine {
         }
     }
 
-    fn emit_extension(&mut self, kind: u32, span: Span, output: &mut Output<'_>) {
+    fn emit_extension(&mut self, data: BlockData, span: Span, output: &mut Output<'_>) {
         let id = self.id();
         output.done(
             Block {
                 id,
                 span,
                 status: BlockStatus::Closed,
-                data: BlockData::Extension { kind },
+                data,
             },
             false,
             self.parent(),
@@ -1801,7 +2062,15 @@ impl Engine {
                             plugin_step(entry, source, position + consumed_total, span.end, phase)?;
                         match result {
                             RuleResult::Accept { consumed } => {
-                                matched = Some((entry.rule.kind, consumed_total + consumed));
+                                matched = Some((entry.rule.kind, consumed_total + consumed, None));
+                                break;
+                            }
+                            RuleResult::AcceptWithFields { consumed, fields } => {
+                                matched = Some((
+                                    entry.rule.kind,
+                                    consumed_total + consumed,
+                                    Some(fields),
+                                ));
                                 break;
                             }
                             RuleResult::Reject => break,
@@ -1821,7 +2090,8 @@ impl Engine {
                     }
                 }
 
-                if let Some((kind, consumed)) = matched.filter(|(_, width)| *width != 0) {
+                if let Some((kind, consumed, fields)) = matched.filter(|(_, width, _)| *width != 0)
+                {
                     if retained != position {
                         let span = Span::new(retained, position);
                         output.push(Inline {
@@ -1830,10 +2100,14 @@ impl Engine {
                         });
                     }
                     let span = Span::new(position, position + consumed);
-                    output.push(Inline {
-                        span,
-                        kind: InlineKind::Extension(kind),
-                    });
+                    let kind = match fields {
+                        Some(fields) if !fields.is_empty() => {
+                            crate::plugin::validate_fields(&fields, &source[Range::from(span)])?;
+                            InlineKind::ExtensionWithFields { kind, fields }
+                        }
+                        _ => InlineKind::Extension(kind),
+                    };
+                    output.push(Inline { span, kind });
                     position = span.end;
                     retained = position;
                 } else {
@@ -1877,7 +2151,9 @@ fn plugin_step(
     let text = &source[start..stop];
     let result = entry.implementation.step(RuleInput { phase, text })?;
     let consumed = match result {
-        RuleResult::Accept { consumed } | RuleResult::NeedMore { consumed } => consumed,
+        RuleResult::Accept { consumed }
+        | RuleResult::AcceptWithFields { consumed, .. }
+        | RuleResult::NeedMore { consumed } => consumed,
         RuleResult::Reject => return Ok(result),
     };
     if consumed > text.len() || !text.is_char_boundary(consumed) {
@@ -1885,7 +2161,13 @@ fn plugin_step(
             "plugin returned an invalid source boundary",
         ));
     }
-    if consumed == 0 && phase == Phase::Probe && matches!(result, RuleResult::Accept { .. }) {
+    if consumed == 0
+        && phase == Phase::Probe
+        && matches!(
+            result,
+            RuleResult::Accept { .. } | RuleResult::AcceptWithFields { .. }
+        )
+    {
         return Err(PluginError::new("plugin accepted without consuming input"));
     }
     if consumed == 0 && stop != end && matches!(result, RuleResult::NeedMore { .. }) {
@@ -2312,32 +2594,40 @@ fn line_break(bytes: &[u8], start: usize, end: usize) -> Option<usize> {
     }
 }
 
-fn cell_spans(source: &str, span: Span) -> Vec<Span> {
+fn cell_spans(source: &str, span: Span) -> impl Iterator<Item = Span> + Clone + '_ {
     let span = trim_span(source, span);
-    let raw = &source[Range::from(span)];
-    let mut start = span.start + usize::from(raw.starts_with('|'));
-    let mut cells = Vec::new();
-    for relative in memchr::memchr_iter(b'|', &source.as_bytes()[start..span.end]) {
-        let position = span.start + usize::from(raw.starts_with('|')) + relative;
-        let escapes = source.as_bytes()[start..position]
-            .iter()
-            .rev()
-            .take_while(|&&byte| byte == b'\\')
-            .count();
-        if escapes % 2 == 0 {
-            cells.push(trim_span(source, Span::new(start, position)));
-            start = position + 1;
+    let bytes = source.as_bytes();
+    let base =
+        span.start + usize::from(bytes.get(span.start) == Some(&b'|') && span.start < span.end);
+    let mut pipes = memchr::memchr_iter(b'|', &bytes[base..span.end]);
+    let mut start = base;
+    let mut emitted = false;
+    let mut done = false;
+    std::iter::from_fn(move || {
+        if done {
+            return None;
         }
-    }
-    if start < span.end || cells.is_empty() {
-        cells.push(trim_span(source, Span::new(start, span.end)));
-    }
-    cells
+        for relative in pipes.by_ref() {
+            let position = base + relative;
+            let escapes = bytes[start..position]
+                .iter()
+                .rev()
+                .take_while(|&&byte| byte == b'\\')
+                .count();
+            if escapes % 2 == 0 {
+                let cell = trim_span(source, Span::new(start, position));
+                start = position + 1;
+                emitted = true;
+                return Some(cell);
+            }
+        }
+        done = true;
+        (start < span.end || !emitted).then(|| trim_span(source, Span::new(start, span.end)))
+    })
 }
 
 fn separator_alignments(source: &str, span: Span) -> Option<Vec<Alignment>> {
     cell_spans(source, span)
-        .into_iter()
         .map(|span| {
             let marker = &source[Range::from(span)];
             let starts = marker.starts_with(':');
@@ -2355,11 +2645,4 @@ fn separator_alignments(source: &str, span: Span) -> Option<Vec<Alignment>> {
             })
         })
         .collect()
-}
-
-fn separator_prefix(text: &str) -> bool {
-    text.contains('-')
-        && text
-            .bytes()
-            .all(|byte| matches!(byte, b'|' | b':' | b'-' | b' ' | b'\t'))
 }

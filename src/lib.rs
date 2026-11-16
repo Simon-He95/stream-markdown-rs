@@ -9,7 +9,10 @@ mod tag;
 use std::{borrow::Cow, collections::HashMap, fmt, ops::Range};
 
 pub use inline::{Inline, InlineKind, Link};
-pub use plugin::{Phase, PluginError, PluginRule, Rule, RuleInput, RuleResult, Scope};
+pub use plugin::{
+    Phase, PluginError, PluginField, PluginFieldValue, PluginRule, Rule, RuleInput, RuleResult,
+    Scope,
+};
 pub use tag::{Attribute, Attributes, Tag};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -93,6 +96,38 @@ pub enum Alignment {
     Right,
 }
 
+/// Row-major storage. The first row is the header.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TableData {
+    pub(crate) alignments: Vec<Alignment>,
+    pub(crate) cells: Vec<InlineContent>,
+}
+
+impl TableData {
+    pub fn alignments(&self) -> &[Alignment] {
+        &self.alignments
+    }
+
+    pub fn header(&self) -> &[InlineContent] {
+        &self.cells[..self.alignments.len()]
+    }
+
+    pub fn rows(&self) -> std::slice::ChunksExact<'_, InlineContent> {
+        self.cells[self.alignments.len()..].chunks_exact(self.alignments.len())
+    }
+
+    /// Applies an emitted row to a materialized table view.
+    pub fn add_row(&mut self, cells: Vec<InlineContent>) {
+        assert_eq!(cells.len(), self.alignments.len());
+        self.cells.extend(cells);
+    }
+
+    /// Applies a cell correction. The flat index includes the header.
+    pub fn replace_cell(&mut self, index: usize, content: InlineContent) {
+        self.cells[index] = content;
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RawLine {
     pub span: Span,
@@ -129,17 +164,17 @@ pub enum BlockData {
     },
     Html,
     SegmentedHtml(Vec<RawLine>),
-    Table {
-        alignments: Vec<Alignment>,
-        header: Vec<InlineContent>,
-        rows: Vec<Vec<InlineContent>>,
-    },
+    Table(Box<TableData>),
     CustomTag {
         tag: Tag,
         body: Span,
     },
     Extension {
         kind: u32,
+    },
+    ExtensionWithFields {
+        kind: u32,
+        fields: Box<[PluginField]>,
     },
 }
 
@@ -180,6 +215,11 @@ pub enum Change {
         id: BlockId,
         end: usize,
         cells: Vec<InlineContent>,
+    },
+    ReplaceTableCell {
+        id: BlockId,
+        index: usize,
+        content: InlineContent,
     },
     SetStatus {
         id: BlockId,

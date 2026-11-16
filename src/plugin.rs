@@ -26,11 +26,62 @@ pub struct RuleInput<'a> {
     pub text: &'a str,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RuleResult {
     Reject,
-    NeedMore { consumed: usize },
-    Accept { consumed: usize },
+    NeedMore {
+        consumed: usize,
+    },
+    Accept {
+        consumed: usize,
+    },
+    AcceptWithFields {
+        consumed: usize,
+        fields: Box<[PluginField]>,
+    },
+}
+
+/// A value exposed to consumers of the registered extension kind.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PluginField {
+    /// Field identifier defined by the extension kind.
+    pub id: u16,
+    pub value: PluginFieldValue,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PluginFieldValue {
+    /// A UTF-8 byte range relative to the start of the complete source match.
+    Text {
+        start: u32,
+        end: u32,
+    },
+    Integer(i64),
+    Bool(bool),
+}
+
+impl PluginFieldValue {
+    /// Retrieves the original text by supplying the complete extension match.
+    pub fn as_text(self, matched: &str) -> Option<&str> {
+        match self {
+            Self::Text { start, end } => matched.get(start as usize..end as usize),
+            Self::Integer(_) | Self::Bool(_) => None,
+        }
+    }
+}
+
+pub(crate) fn validate_fields(fields: &[PluginField], matched: &str) -> Result<(), PluginError> {
+    for field in fields {
+        if matches!(field.value, PluginFieldValue::Text { .. })
+            && field.value.as_text(matched).is_none()
+        {
+            return Err(PluginError::new(format!(
+                "plugin field {} does not refer to valid UTF-8 within the matched source",
+                field.id
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

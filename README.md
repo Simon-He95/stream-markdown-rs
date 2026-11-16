@@ -28,6 +28,16 @@ pnpm test:spec --list
 
 ## 接入候选实现
 
+用本仓库的 Rust 候选运行兼容性测试：
+
+```sh
+cargo build --locked --release --example node_candidate
+node --test test/native-candidate.test.mjs
+PARSER_CANDIDATE=./scripts/native-candidate.mjs pnpm test:candidate
+```
+
+Node 验证桥在同一个 Rust 会话上逐段追加，并把 Rust 变化应用到旧版节点视图。此桥用于兼容性测试，Rust TUI 和原生性能基准直接调用 Rust API。
+
 ```sh
 PARSER_CANDIDATE=./path/to/adapter.mjs pnpm test:candidate
 PARSER_CANDIDATE=./path/to/adapter.mjs pnpm test:spec

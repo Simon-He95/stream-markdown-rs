@@ -1,12 +1,15 @@
 #![forbid(unsafe_code)]
 #![doc = include_str!("../README.md")]
 
-use stream_markdown_rs::{Phase, PluginError, PluginRule, Rule, RuleInput, RuleResult};
+use stream_markdown_rs::{
+    Phase, PluginError, PluginField, PluginFieldValue, PluginRule, Rule, RuleInput, RuleResult,
+};
 use wasmi::{
     Config, Engine, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, TypedFunc,
 };
 
-const ABI_VERSION: i32 = 1;
+const MAX_FIELDS: usize = 1024;
+const FIELD_BYTES: usize = 12;
 
 /// Per-module and per-invocation limits for a Wasm rule.
 #[derive(Clone, Copy, Debug)]
@@ -107,11 +110,19 @@ impl WasmPlugin {
             .set_fuel(self.limits.fuel_per_call)
             .map_err(execution_error)?;
         let version = version.call(&mut store, ()).map_err(execution_error)?;
-        if version != ABI_VERSION {
-            return Err(PluginError::new(format!(
-                "unsupported WASM rule ABI version {version}"
-            )));
-        }
+        let fields = match version {
+            1 => None,
+            2 => Some(
+                instance
+                    .get_typed_func::<(), i64>(&store, "ms_fields")
+                    .map_err(|_| PluginError::new("WASM rule ABI v2 requires ms_fields"))?,
+            ),
+            _ => {
+                return Err(PluginError::new(format!(
+                    "unsupported WASM rule ABI version {version}"
+                )));
+            }
+        };
         store
             .set_fuel(self.limits.fuel_per_call)
             .map_err(execution_error)?;
@@ -135,6 +146,7 @@ impl WasmPlugin {
             memory,
             input_pointer,
             step,
+            fields,
             failed: false,
         })
     }
@@ -148,6 +160,7 @@ pub struct WasmRule {
     memory: Memory,
     input_pointer: i32,
     step: TypedFunc<(i32, i32, i32), i64>,
+    fields: Option<TypedFunc<(), i64>>,
     failed: bool,
 }
 
@@ -205,16 +218,65 @@ impl WasmRule {
             ));
         }
 
-        match packed >> 32 {
+        let disposition = packed >> 32;
+        match disposition {
             0 if consumed == 0 => Ok(RuleResult::Reject),
             1 => Ok(RuleResult::NeedMore { consumed }),
             2 if consumed > 0 || !matches!(input.phase, Phase::Probe) => {
                 Ok(RuleResult::Accept { consumed })
             }
+            3 if consumed > 0 || !matches!(input.phase, Phase::Probe) => {
+                let fields = self.read_fields()?;
+                if fields.is_empty() {
+                    return Ok(RuleResult::Accept { consumed });
+                }
+                Ok(RuleResult::AcceptWithFields { consumed, fields })
+            }
             _ => Err(PluginError::new(
                 "WASM rule returned an invalid disposition",
             )),
         }
+    }
+
+    fn read_fields(&mut self) -> Result<Box<[PluginField]>, PluginError> {
+        let fields = self
+            .fields
+            .ok_or_else(|| PluginError::new("WASM rule ABI v1 cannot return typed fields"))?;
+        let packed = fields.call(&mut self.store, ()).map_err(execution_error)? as u64;
+        let count = (packed >> 32) as usize;
+        if count == 0 {
+            return Ok(Box::default());
+        }
+        if count > MAX_FIELDS {
+            return Err(PluginError::new("WASM rule returned too many fields"));
+        }
+        let offset = packed as u32 as usize;
+        let size = count * FIELD_BYTES;
+        let mut records = offset
+            .checked_add(size)
+            .and_then(|end| self.memory.data(&self.store).get(offset..end))
+            .ok_or_else(|| PluginError::new("WASM rule fields are outside linear memory"))?;
+        let mut decoded = Vec::with_capacity(count);
+        while let Some((record, rest)) = records.split_first_chunk::<FIELD_BYTES>() {
+            let id = u16::from_le_bytes([record[0], record[1]]);
+            let payload = u64::from_le_bytes(record[4..].try_into().unwrap());
+            let value = match (record[2], record[3]) {
+                (0, 0) => PluginFieldValue::Text {
+                    start: payload as u32,
+                    end: (payload >> 32) as u32,
+                },
+                (1, 0) => PluginFieldValue::Integer(payload as i64),
+                (2, 0) if payload <= 1 => PluginFieldValue::Bool(payload == 1),
+                _ => {
+                    return Err(PluginError::new(
+                        "WASM rule returned an invalid field record",
+                    ));
+                }
+            };
+            decoded.push(PluginField { id, value });
+            records = rest;
+        }
+        Ok(decoded.into_boxed_slice())
     }
 }
 

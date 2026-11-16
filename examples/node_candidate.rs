@@ -1,0 +1,272 @@
+//! JSON-lines transport for the JavaScript compatibility tests.
+
+use serde_json::{Value, json};
+use std::{
+    collections::{HashMap, hash_map::Entry},
+    io::{self, BufRead, BufWriter, Write},
+};
+use stream_markdown_rs::{
+    Alignment, Block, BlockData, Change, Inline, InlineContent, InlineKind, Options, Parser,
+    PluginField, PluginFieldValue, Preview, PreviewHint, RawLine, Span, Syntax, Text,
+};
+
+fn main() -> io::Result<()> {
+    let mut sessions = HashMap::new();
+    let input = io::stdin().lock();
+    let mut output = BufWriter::new(io::stdout().lock());
+    for line in input.lines() {
+        let line = line?;
+        let response = match serde_json::from_str(&line) {
+            Ok(input) => match request(&mut sessions, &input) {
+                Ok(value) => json!({ "value": value }),
+                Err(message) => json!({ "error": message }),
+            },
+            Err(error) => json!({ "error": error.to_string() }),
+        };
+        serde_json::to_writer(&mut output, &response)?;
+        output.write_all(b"\n")?;
+        output.flush()?;
+    }
+    Ok(())
+}
+
+fn request(sessions: &mut HashMap<u64, Parser>, input: &Value) -> Result<Value, String> {
+    let session = input["session"].as_u64().ok_or("invalid session ID")?;
+    let operation = input["op"].as_str().ok_or("invalid operation")?;
+    if operation == "create" {
+        let Entry::Vacant(slot) = sessions.entry(session) else {
+            return Err("session already exists".into());
+        };
+        let custom_tags = input["customTags"]
+            .as_array()
+            .ok_or("expected customTags array")?
+            .iter()
+            .map(|tag| tag.as_str().map(str::to_owned).ok_or("invalid custom tag"))
+            .collect::<Result<_, _>>()?;
+        slot.insert(Parser::new(Options {
+            syntax: Syntax::Gfm,
+            preview: Preview::Ai,
+            custom_tags,
+        }));
+        return Ok(Value::Null);
+    }
+    if operation == "dispose" {
+        sessions.remove(&session);
+        return Ok(Value::Null);
+    }
+    let parser = sessions.get_mut(&session).ok_or("unknown session")?;
+    let mut changes = Vec::new();
+    match operation {
+        "append" => {
+            let chunk = input["chunk"].as_str().ok_or("expected chunk string")?;
+            parser.append(chunk, &mut changes)
+        }
+        "finish" => parser.finish(&mut changes),
+        _ => return Err("unknown operation".into()),
+    }
+    .map_err(|error| error.to_string())?;
+    let source = parser.source_text();
+    let metrics = parser.metrics();
+    Ok(json!({
+        "changes": changes.iter().map(|change| change_value(change, source)).collect::<Vec<_>>(),
+        "metrics": {
+            "inputBytes": metrics.input_bytes,
+            "scannedBytes": metrics.scanned_bytes,
+            "inlineBytes": metrics.inline_bytes,
+            "invalidatedBlocks": metrics.invalidated_blocks,
+        },
+    }))
+}
+
+fn span(value: Span) -> [usize; 2] {
+    [value.start, value.end]
+}
+
+fn text(value: &Text) -> Value {
+    match value {
+        Text::Source(range) => json!(span(*range)),
+        Text::Decoded(value) => json!(value.as_ref()),
+    }
+}
+
+fn inline(value: &Inline) -> Value {
+    let (kind, data) = match &value.kind {
+        InlineKind::Text(value) => ("text", text(value)),
+        InlineKind::Code(value) => ("code", text(value)),
+        InlineKind::Emphasis(children) => ("emphasis", json!(inlines(children))),
+        InlineKind::Strong(children) => ("strong", json!(inlines(children))),
+        InlineKind::Strikethrough(children) => ("strikethrough", json!(inlines(children))),
+        InlineKind::Link(link) | InlineKind::Image(link) => {
+            let kind = if matches!(value.kind, InlineKind::Link(_)) {
+                "link"
+            } else {
+                "image"
+            };
+            (
+                kind,
+                json!({
+                    "destination": text(&link.destination),
+                    "title": link.title.as_ref().map(text),
+                    "children": inlines(&link.children),
+                }),
+            )
+        }
+        InlineKind::Html => ("html", Value::Null),
+        InlineKind::SoftBreak => ("softbreak", Value::Null),
+        InlineKind::HardBreak => ("hardbreak", Value::Null),
+        InlineKind::Extension(kind) => ("extension", json!({ "kind": kind })),
+        InlineKind::ExtensionWithFields { kind, fields } => (
+            "extension",
+            json!({
+                "kind": kind,
+                "fields": fields_value(fields, value.span),
+            }),
+        ),
+    };
+    json!({ "kind": kind, "span": span(value.span), "data": data })
+}
+
+fn inlines(values: &[Inline]) -> Vec<Value> {
+    values.iter().map(inline).collect()
+}
+
+fn content(value: &InlineContent) -> Value {
+    match value {
+        InlineContent::Plain(range) => json!({ "plain": span(*range) }),
+        InlineContent::Fragments(ranges) => {
+            json!({ "fragments": ranges.iter().copied().map(span).collect::<Vec<_>>() })
+        }
+        InlineContent::Parsed(values) => json!({ "parsed": inlines(values) }),
+    }
+}
+
+fn raw_line(value: RawLine) -> Value {
+    json!({ "span": span(value.span), "leading": value.leading_spaces })
+}
+
+fn block(value: &Block, source: &str) -> Value {
+    let (kind, data) = match &value.data {
+        BlockData::Paragraph(value) => ("paragraph", content(value)),
+        BlockData::Heading {
+            level,
+            content: value,
+        } => (
+            "heading",
+            json!({ "level": level, "content": content(value) }),
+        ),
+        BlockData::CodeBlock { info, body } => (
+            "code_block",
+            json!({ "info": info.map(span), "body": span(*body) }),
+        ),
+        BlockData::SegmentedCode { info, lines } => (
+            "code_block",
+            json!({ "info": info.map(span), "lines": lines.iter().copied().map(raw_line).collect::<Vec<_>>() }),
+        ),
+        BlockData::IndentedCode { lines } => (
+            "indented_code",
+            json!({ "lines": lines.iter().copied().map(raw_line).collect::<Vec<_>>() }),
+        ),
+        BlockData::ThematicBreak => ("thematic_break", Value::Null),
+        BlockData::Quote => ("blockquote", Value::Null),
+        BlockData::List { ordered, start, .. } => {
+            ("list", json!({ "ordered": ordered, "start": start }))
+        }
+        BlockData::ListItem { task } => ("list_item", json!({ "task": task })),
+        BlockData::Html => ("html_block", json!({})),
+        BlockData::SegmentedHtml(lines) => (
+            "html_block",
+            json!({ "lines": lines.iter().copied().map(raw_line).collect::<Vec<_>>() }),
+        ),
+        BlockData::Table(table) => (
+            "table",
+            json!({
+                "alignments": table.alignments().iter().map(|align| match align {
+                    Alignment::None | Alignment::Left => "left",
+                    Alignment::Center => "center",
+                    Alignment::Right => "right",
+                }).collect::<Vec<_>>(),
+                "header": table.header().iter().map(content).collect::<Vec<_>>(),
+                "rows": table.rows().map(|row| row.iter().map(content).collect::<Vec<_>>()).collect::<Vec<_>>(),
+            }),
+        ),
+        BlockData::CustomTag { tag, body } => (
+            "custom",
+            json!({
+                "name": tag.tag_name(source),
+                "attrs": tag.attrs(source).map(|attr| (attr.name, attr.value.unwrap_or_default())).collect::<Vec<_>>(),
+                "body": span(*body),
+            }),
+        ),
+        BlockData::Extension { kind } => ("extension", json!({ "kind": kind })),
+        BlockData::ExtensionWithFields { kind, fields } => (
+            "extension",
+            json!({
+                "kind": kind,
+                "fields": fields_value(fields, value.span),
+            }),
+        ),
+    };
+    json!({
+        "id": value.id.0,
+        "span": span(value.span),
+        "open": value.status == stream_markdown_rs::BlockStatus::Open,
+        "kind": kind,
+        "data": data,
+    })
+}
+
+fn fields_value(fields: &[PluginField], matched: Span) -> Vec<Value> {
+    fields
+        .iter()
+        .map(|field| {
+            let value = match field.value {
+                PluginFieldValue::Text { start, end } => {
+                    json!([matched.start + start as usize, matched.start + end as usize,])
+                }
+                PluginFieldValue::Integer(value) => json!(value),
+                PluginFieldValue::Bool(value) => json!(value),
+            };
+            json!([field.id, value])
+        })
+        .collect()
+}
+
+fn change_value(change: &Change, source: &str) -> Value {
+    match change {
+        Change::Insert {
+            parent,
+            block: value,
+        } => {
+            json!({ "op": "insert", "parent": parent.map(|id| id.0), "block": block(value, source) })
+        }
+        Change::Replace(value) => json!({ "op": "replace", "block": block(value, source) }),
+        Change::AppendText { id, span: range } => {
+            json!({ "op": "append_text", "id": id.0, "span": span(*range) })
+        }
+        Change::AddTextFragment { id, span: range } => {
+            json!({ "op": "add_text_fragment", "id": id.0, "span": span(*range) })
+        }
+        Change::AddRawLine { id, line, end } => {
+            json!({ "op": "add_raw_line", "id": id.0, "line": raw_line(*line), "end": end })
+        }
+        Change::AddRow { id, end, cells } => {
+            json!({ "op": "add_row", "id": id.0, "end": end, "cells": cells.iter().map(content).collect::<Vec<_>>() })
+        }
+        Change::ReplaceTableCell {
+            id,
+            index,
+            content: value,
+        } => {
+            json!({ "op": "replace_cell", "id": id.0, "index": index, "cell": content(value) })
+        }
+        Change::SetStatus { id, status, end } => {
+            json!({ "op": "status", "id": id.0, "open": *status == stream_markdown_rs::BlockStatus::Open, "end": end })
+        }
+        Change::Remove { id } => json!({ "op": "remove", "id": id.0 }),
+        Change::Preview { id, hint } => {
+            json!({ "op": "preview", "id": id.0, "hint": hint.map(|hint| match hint {
+                PreviewHint::Table => "table",
+            }) })
+        }
+    }
+}

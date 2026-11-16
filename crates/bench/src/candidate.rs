@@ -102,6 +102,10 @@ impl Session {
                         match &mut block.data {
                             BlockData::CodeBlock { body, .. }
                             | BlockData::Paragraph(InlineContent::Plain(body))
+                            | BlockData::Heading {
+                                content: InlineContent::Plain(body),
+                                ..
+                            }
                             | BlockData::CustomTag { body, .. } => body,
                             BlockData::Html => &mut block.span,
                             BlockData::Paragraph(InlineContent::Fragments(parts)) => parts
@@ -140,15 +144,22 @@ impl Session {
                     lines.push(line);
                     block.span.end = end;
                 }
+                Change::ReplaceTableCell { id, index, content } => {
+                    let block = node_mut(&mut self.nodes, id)?;
+                    let BlockData::Table(table) = &mut block.data else {
+                        return Err(format!("replaced a cell in non-table block {id:?}"));
+                    };
+                    table.replace_cell(index, content);
+                }
                 Change::AddRow { id, end, cells } => {
                     let block = node_mut(&mut self.nodes, id)?;
-                    let BlockData::Table { rows, .. } = &mut block.data else {
+                    let BlockData::Table(table) = &mut block.data else {
                         return Err(format!(
                             "candidate appended a row to non-table node {}",
                             id.0
                         ));
                     };
-                    rows.push(cells);
+                    table.add_row(cells);
                     block.span.end = end;
                 }
                 Change::Preview { hint: None, .. } => {}
@@ -380,11 +391,10 @@ fn blocks<'a>(
                 trace.end("code-block");
             }
             BlockData::ThematicBreak => trace.marker("thematic-break"),
-            BlockData::Table {
-                alignments,
-                header,
-                rows,
-            } => {
+            BlockData::Table(table) => {
+                let alignments = table.alignments();
+                let header = table.header();
+                let rows = table.rows();
                 trace.start("table");
                 for alignment in alignments {
                     trace.field(match alignment {

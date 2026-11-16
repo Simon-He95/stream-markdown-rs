@@ -21,7 +21,7 @@ fn parser(module: &WasmPlugin) -> Result<Parser, ParseError> {
 }
 ```
 
-The application provides the non-whitespace ASCII trigger, the block or inline scope, and the numeric extension kind. The core decides which candidate positions are valid in the current Markdown context. The accepted original source range becomes the extension payload. Grammar rules can interpret that range, and its kind lets the application select a renderer.
+The application provides the non-whitespace ASCII trigger, the block or inline scope, and the numeric extension kind. The core decides which candidate positions are valid in the current Markdown context. The accepted original source range becomes the extension payload. ABI v2 rules can also return typed fields. The application interprets field IDs according to the extension kind.
 
 ## Guest ABI version 1
 
@@ -48,6 +48,23 @@ The host copies only the current input window into the reserved buffer. Guest co
 | Accept | 2 | Bytes consumed from this window through the match. Probe must consume at least one byte. Advance and Finish may consume zero if a prior call already advanced the rule. |
 
 All counts are relative to the current window and must land on UTF-8 character boundaries. A rule can accept a prefix and leave the rest for the Markdown core. Compiling the same rule for static and incremental input should produce the same accepted source with different chunk boundaries.
+
+## Guest ABI version 2
+
+Return `2` from `ms_abi_version` and export `ms_fields() -> i64`. Existing phase codes, disposition codes and input buffer rules carry over. Use disposition `3` in `ms_step` to accept with fields. The consumed byte count stays relative to the current window. When the host sees disposition `3`, it calls `ms_fields` with the remaining fuel budget for the step. Return the record count in the high 32 bits and the wasm32 memory offset in the low 32 bits.
+
+Each 12-byte field record uses little-endian encoding.
+
+| Offset | Size | Meaning |
+| ---: | ---: | --- |
+| 0 | 2 | Unsigned field ID |
+| 2 | 1 | Type code |
+| 3 | 1 | Reserved, zero |
+| 4 | 8 | Type-specific payload |
+
+Type `0` is text. Its payload consists of unsigned 32-bit start and end offsets relative to the **entire accepted match**, with the end excluded. Text can point into an earlier input window. The parser validates UTF-8 boundaries against the matched source, and consumers can borrow the text through `PluginFieldValue::as_text(matched)`. Type `1` is a signed 64-bit integer. Type `2` is a boolean stored as the 64-bit integer `0` or `1`.
+
+The host accepts up to 1,024 records per match and validates the full record table against guest memory. Disposition `2` remains available on either ABI and keeps the original no-fields output without calling `ms_fields`. The [typed fixture](tests/fixtures/typed.wat) accepts a span containing a Unicode character and emits one of each field type.
 
 ## Limits and failure
 

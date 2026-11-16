@@ -160,6 +160,10 @@ fn apply_changes(blocks: &mut StreamView, changes: &mut Vec<Change>) -> Result<(
                 let block = existing_block(blocks, id)?;
                 let body = match &mut block.data {
                     BlockData::Paragraph(InlineContent::Plain(body))
+                    | BlockData::Heading {
+                        content: InlineContent::Plain(body),
+                        ..
+                    }
                     | BlockData::CustomTag { body, .. }
                     | BlockData::CodeBlock { body, .. } => body,
                     BlockData::Paragraph(InlineContent::Fragments(parts)) => parts
@@ -198,12 +202,19 @@ fn apply_changes(blocks: &mut StreamView, changes: &mut Vec<Change>) -> Result<(
                 }
                 block.span.end = end;
             }
+            Change::ReplaceTableCell { id, index, content } => {
+                let block = existing_block(blocks, id)?;
+                let BlockData::Table(table) = &mut block.data else {
+                    return Err(format!("replaced a cell in non-table block {id:?}"));
+                };
+                table.replace_cell(index, content);
+            }
             Change::AddRow { id, end, cells } => {
                 let block = existing_block(blocks, id)?;
-                let BlockData::Table { rows, .. } = &mut block.data else {
+                let BlockData::Table(table) = &mut block.data else {
                     return Err(format!("added a table row to non-table block {id:?}"));
                 };
-                rows.push(cells);
+                table.add_row(cells);
                 block.span.end = end;
             }
             Change::Preview { .. } => {}
@@ -295,15 +306,14 @@ impl Renderer<'_> {
                 }
                 self.html_block(&raw);
             }
-            BlockData::Table {
-                alignments,
-                header,
-                rows,
-            } => {
+            BlockData::Table(table) => {
+                let alignments = table.alignments();
+                let header = table.header();
+                let rows = table.rows();
                 self.html.push_str("<table>\n<thead>\n");
                 self.row("th", alignments, header);
                 self.html.push_str("</thead>\n");
-                if !rows.is_empty() {
+                if rows.len() != 0 {
                     self.html.push_str("<tbody>\n");
                     for row in rows {
                         self.row("td", alignments, row);
@@ -313,7 +323,7 @@ impl Renderer<'_> {
                 self.html.push_str("</table>\n");
             }
             BlockData::CustomTag { .. } => self.raw_html(&self.source[Range::from(block.span)]),
-            BlockData::Extension { .. } => {
+            BlockData::Extension { .. } | BlockData::ExtensionWithFields { .. } => {
                 escape(&mut self.html, &self.source[Range::from(block.span)])
             }
         }
@@ -462,7 +472,7 @@ impl Renderer<'_> {
                     self.html.push_str(" />");
                 }
                 InlineKind::Html => self.raw_html(&self.source[Range::from(inline.span)]),
-                InlineKind::Extension(_) => {
+                InlineKind::Extension(_) | InlineKind::ExtensionWithFields { .. } => {
                     escape(&mut self.html, &self.source[Range::from(inline.span)])
                 }
                 InlineKind::SoftBreak => self.html.push('\n'),
@@ -488,7 +498,9 @@ impl Renderer<'_> {
                 | InlineKind::Strikethrough(children) => self.image_alt(children),
                 InlineKind::Link(link) | InlineKind::Image(link) => self.image_alt(&link.children),
                 InlineKind::SoftBreak | InlineKind::HardBreak => self.html.push(' '),
-                InlineKind::Html | InlineKind::Extension(_) => {}
+                InlineKind::Html
+                | InlineKind::Extension(_)
+                | InlineKind::ExtensionWithFields { .. } => {}
             }
         }
     }

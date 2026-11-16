@@ -45,6 +45,51 @@ pub(crate) struct Opening {
     pub self_closing: bool,
 }
 
+pub(crate) struct OpeningProbe {
+    pub start: usize,
+    checked: usize,
+    quote: Option<u8>,
+    rejected: bool,
+}
+
+impl OpeningProbe {
+    pub fn new(start: usize, attributes: usize) -> Self {
+        Self {
+            start,
+            checked: attributes,
+            quote: None,
+            rejected: false,
+        }
+    }
+
+    pub fn update(&mut self, source: &str, end: usize) -> Option<usize> {
+        if self.rejected {
+            return None;
+        }
+        let bytes = source.as_bytes();
+        while self.checked < end {
+            let byte = bytes[self.checked];
+            self.checked += 1;
+            match self.quote {
+                Some(quote) if quote == byte => self.quote = None,
+                Some(_) => {}
+                None if matches!(byte, b'\'' | b'"') => self.quote = Some(byte),
+                None if byte == b'>' => return Some(self.checked),
+                None if byte == b'<' => {
+                    self.rejected = true;
+                    return None;
+                }
+                None => {}
+            }
+        }
+        None
+    }
+
+    pub fn reject(&mut self) {
+        self.rejected = true;
+    }
+}
+
 pub(crate) fn opening(source: &str, start: usize, end: usize) -> Option<Opening> {
     let input = &source[start..end];
     let after_lt = input.strip_prefix('<')?;
