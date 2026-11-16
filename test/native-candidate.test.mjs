@@ -1014,6 +1014,36 @@ test('legacy inline draft styles a single trailing backtick after actual text', 
   }
 })
 
+test('legacy draft code keeps a recognized bare domain outside the provisional code span', () => {
+  const session = createSession()
+  const denied = createSession({ parseOptions: { validateLink: () => false } })
+  const unknown = createSession()
+  try {
+    session.append('Try `metrics')
+    session.append('.to')
+    assert.deepEqual(session.snapshot()[0].children.slice(1), [
+      { type: 'inline_code', code: '', raw: '' },
+      {
+        type: 'link', href: 'http://metrics.to', title: null, text: 'metrics.to', markup: 'linkify',
+        children: [{ type: 'text', content: 'metrics.to', raw: 'metrics.to', center: false }],
+        loading: false, raw: '[metrics.to](http://metrics.to)', attrs: [['href', 'http://metrics.to']],
+      },
+    ])
+    session.append('`')
+    assert.deepEqual(session.snapshot()[0].children.slice(1), [{ type: 'inline_code', code: 'metrics.to', raw: 'metrics.to' }])
+
+    denied.append('Try `metrics.to')
+    assert.deepEqual(denied.snapshot()[0].children.at(-1), { type: 'text', content: 'metrics.to', raw: 'metrics.to' })
+    unknown.append('Try `metrics.test')
+    assert.equal(unknown.snapshot()[0].children.at(-1).code, 'metrics.test')
+  }
+  finally {
+    session.dispose()
+    denied.dispose()
+    unknown.dispose()
+  }
+})
+
 test('complete unregistered self-closing components keep their literal text boundary', () => {
   const tag = '<PrereqChips :items="[\n  { text: \'Vue Quick Start\', link: \'/guide/quick-start\' },\n]" />'
   const legacy = createSession()

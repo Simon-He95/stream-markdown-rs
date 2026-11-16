@@ -1,10 +1,12 @@
 // Converts the native delta view to the legacy ParsedNode test contract.
 // This module never tokenizes Markdown or calls the reference parser.
 import { domainToASCII } from 'node:url'
+import { LinkifyIt } from 'linkify-it'
 
 const VOID = new Set('area base br col embed hr img input link meta param source track wbr'.split(' '))
 const HTML_START = /^<([A-Z][\w:.-]*)(\s(?:[^"'<>]|"[^"]*"|'[^']*')*)?\s*\/?>/i
 const HTML_ATTRIBUTE = /([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g
+const legacyLinkify = new LinkifyIt({ fuzzyLink: true })
 
 export function projectBlocks(nodes, roots, context) {
   const blocks = projectChildren(nodes, roots, context)
@@ -454,6 +456,16 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false, insideL
       if (kind === 'code_preview' && previous?.type === 'text')
         delete previous.center
       const code = readText(data, context)
+      if (kind === 'code_preview' && context.markstream && !context.final && /^[a-z0-9.-]+$/u.test(code)) {
+        const [match] = legacyLinkify.match(code) ?? []
+        if (match?.schema === '' && match.index === 0 && match.lastIndex === code.length) {
+          nodes.push({ type: 'inline_code', code: '', raw: '' })
+          nodes.push(allowsLink(match.url, context)
+            ? linkNode(match.url, null, [textNode(code)], 'linkify')
+            : textNode(code, false))
+          continue
+        }
+      }
       nodes.push({ type: 'inline_code', code, raw: code })
     }
     else if (kind === 'emphasis' || kind === 'strong' || kind === 'strikethrough') {
