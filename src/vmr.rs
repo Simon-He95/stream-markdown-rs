@@ -155,6 +155,13 @@ impl Engine {
         output: &mut Output<'_>,
     ) -> Result<(), crate::ParseError> {
         self.stop_leaf(source, output)?;
+        if let Some(draft) = self
+            .draft
+            .filter(|draft| (line.start..=line.end).contains(&draft.start))
+        {
+            self.draft = None;
+            output.update(Change::Remove { id: draft.id });
+        }
         let frame = &mut self.containers[index];
         if let Kind::Vmr {
             closed,

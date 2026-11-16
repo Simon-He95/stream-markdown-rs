@@ -565,6 +565,22 @@ test('legacy custom block projection renders a same-line open payload on its own
   }
 })
 
+test('a split colon closer keeps the next HTML block outside its nested admonition', () => {
+  const session = createSession()
+  try {
+    for (const character of '<details>\n::: note\n:::\n<!-- outside note -->\n</details>\n')
+      session.append(character)
+    session.finish()
+    const [details] = session.snapshot()
+    assert.deepEqual(details.children.map(node => node.type), ['admonition', 'html_block'])
+    assert.deepEqual(details.children[0].children, [])
+    assert.match(details.children[1].raw, /<!-- outside note -->/)
+  }
+  finally {
+    session.dispose()
+  }
+})
+
 test('native candidate projects the admonition title and actual child blocks', () => {
   const session = createSession()
   try {
