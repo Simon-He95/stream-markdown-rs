@@ -983,6 +983,37 @@ test('legacy multiline preview holds the trailing parenthesis before a typed inl
   }
 })
 
+test('legacy inline draft styles a single trailing backtick after actual text', () => {
+  const session = createSession()
+  const literal = createSession()
+  const escaped = createSession()
+  try {
+    session.append('Core from `')
+    assert.deepEqual(session.snapshot()[0], {
+      type: 'paragraph', raw: 'Core from `', children: [
+        { type: 'text', content: 'Core from ', raw: 'Core from ' },
+        { type: 'inline_code', code: '', raw: '' },
+      ],
+    })
+    session.append('rust`')
+    assert.equal(session.snapshot()[0].children[1].code, 'rust')
+
+    literal.append('Core from `')
+    literal.finish()
+    assert.equal(literal.snapshot()[0].children[0].content, 'Core from `')
+    assert.equal(literal.snapshot()[0].children.length, 1)
+
+    escaped.append('Core from \\`')
+    assert.equal(escaped.snapshot()[0].children[0].content, 'Core from `')
+    assert.equal(escaped.snapshot()[0].children.length, 1)
+  }
+  finally {
+    session.dispose()
+    literal.dispose()
+    escaped.dispose()
+  }
+})
+
 test('complete unregistered self-closing components keep their literal text boundary', () => {
   const tag = '<PrereqChips :items="[\n  { text: \'Vue Quick Start\', link: \'/guide/quick-start\' },\n]" />'
   const legacy = createSession()

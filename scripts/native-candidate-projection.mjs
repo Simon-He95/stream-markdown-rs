@@ -293,6 +293,10 @@ function appendMarkdownFilenameText(nodes, text, center) {
 function projectInlines(content, context) {
   if (content.plain || content.fragments) {
     const text = inlineRaw(content, '', context)
+    if (context.markstream && !context.final && content.plain && text.length > 1
+      && text.indexOf('`') === text.length - 1 && !text.endsWith('\\`')) {
+      return [textNode(text.slice(0, -1), false), { type: 'inline_code', code: '', raw: '' }]
+    }
     const nodes = []
     if (text && !(context.markstream && context.final && content.plain
       && appendMarkdownFilenameText(nodes, text, true)))
