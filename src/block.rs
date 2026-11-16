@@ -527,7 +527,7 @@ pub(crate) struct Engine {
     draft: Option<Draft>,
     non_inline_draft: Option<BlockId>,
     html_draft: Option<Box<HtmlDraft>>,
-    partial_list: Option<container::Prefix>,
+    partial_container: Option<container::Prefix>,
     preview: Option<BlockId>,
     row_preview_end: usize,
     inline_preview: Option<(BlockId, usize)>,
@@ -563,7 +563,7 @@ impl Engine {
             draft: None,
             non_inline_draft: None,
             html_draft: None,
-            partial_list: None,
+            partial_container: None,
             preview: None,
             row_preview_end: 0,
             inline_preview: None,
@@ -785,7 +785,7 @@ impl Engine {
                 return Ok(());
             }
             if self.options.markstream {
-                self.open_partial_list(source, &mut output)?;
+                self.open_partial_container(source, &mut output)?;
             }
             if self.options.markstream
                 && self.options.preview == Preview::Ai
@@ -1507,12 +1507,12 @@ impl Engine {
         true
     }
 
-    fn open_partial_list(
+    fn open_partial_container(
         &mut self,
         source: &str,
         output: &mut Output<'_>,
     ) -> Result<(), ParseError> {
-        if self.partial_list.is_some() {
+        if self.partial_container.is_some() {
             for frame in &mut self.containers {
                 if frame.end < self.scan {
                     frame.end = self.scan;
@@ -1534,6 +1534,12 @@ impl Engine {
             return Ok(());
         }
         let raw = &source[self.line_start..self.scan];
+        if self.active.is_none()
+            && self.options.preview == Preview::Ai
+            && self.open_partial_quote(raw, output)
+        {
+            return Ok(());
+        }
         let Some((marker, prefix)) = container::list_at(raw, 0, 0) else {
             return Ok(());
         };
@@ -1624,8 +1630,52 @@ impl Engine {
             self.scan,
             output,
         );
-        self.partial_list = Some(prefix);
+        self.partial_container = Some(prefix);
         Ok(())
+    }
+
+    fn open_partial_quote(&mut self, raw: &str, output: &mut Output<'_>) -> bool {
+        if !matches!(raw.as_bytes().first(), Some(b'>' | b' ')) {
+            return false;
+        }
+        match self.containers.as_slice() {
+            [] => {}
+            [
+                Frame {
+                    kind: Kind::List { .. },
+                    ..
+                },
+                Frame {
+                    kind:
+                        Kind::Item {
+                            blank: true,
+                            task: None,
+                            ..
+                        },
+                    ..
+                },
+            ] if raw.starts_with('>') => {}
+            _ => return false,
+        }
+        let Some(prefix) = container::quote_at(raw, 0, 0).filter(|prefix| prefix.padding == 0)
+        else {
+            return false;
+        };
+        let body = unindent(&raw[prefix.bytes..]);
+        let Some(&byte) = body.as_bytes().first() else {
+            return false;
+        };
+        if !ordinary_start(byte)
+            || matches!(byte, b':' | b'\\')
+            || self.options.math && byte == b'$'
+            || self.has_block_plugin(byte)
+        {
+            return false;
+        }
+        self.close_containers(0, output);
+        self.open_container(Kind::Quote, self.line_start, self.scan, output);
+        self.partial_container = Some(prefix);
+        true
     }
 
     fn partial_table_row(
@@ -1675,10 +1725,10 @@ impl Engine {
 
     fn partial(&mut self, source: &str, output: &mut Output<'_>) {
         let end = self.scan;
-        let start = self.line_start + self.partial_list.map_or(0, |prefix| prefix.bytes);
+        let start = self.line_start + self.partial_container.map_or(0, |prefix| prefix.bytes);
         if self.running.is_some()
             || start >= end
-            || (self.partial_list.is_none()
+            || (self.partial_container.is_none()
                 && self.containers.iter().any(|frame| {
                     !(frame.kind.is_colon_container() || matches!(frame.kind, Kind::Html { .. }))
                 }))
@@ -1813,7 +1863,7 @@ impl Engine {
             byte == b'|' && self.active.is_none() && (self.draft.is_some() || !blank(&head[1..]));
         let root_preview = self.options.preview == Preview::Ai && self.containers.is_empty();
         let bracket_preview =
-            root_preview || self.options.preview == Preview::Ai && self.partial_list.is_some();
+            root_preview || self.options.preview == Preview::Ai && self.partial_container.is_some();
         let inline_text = self.options.markstream
             && (self.draft.is_some()
                 || partial_inline_start(head, bracket_preview)
@@ -1864,7 +1914,7 @@ impl Engine {
         output: &mut Output<'_>,
     ) -> Result<(), ParseError> {
         let physical = line;
-        if let Some(prefix) = self.partial_list.take() {
+        if let Some(prefix) = self.partial_container.take() {
             line.advance(prefix);
             self.extend_containers(line.next);
             return self.line(source, line, output);

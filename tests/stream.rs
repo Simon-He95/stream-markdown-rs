@@ -116,6 +116,156 @@ fn every_character_boundary_produces_the_same_final_view() {
 }
 
 #[test]
+fn quote_preview_requires_body_and_keeps_its_block_and_leaf_ids() {
+    let options = Options {
+        preview: Preview::Ai,
+        markstream: true,
+        ..Options::default()
+    };
+    let mut parser = Parser::new(options.clone());
+    let mut changes = Vec::new();
+    let mut view = View::default();
+    parser
+        .append("Introduction\r\n\r\n>", &mut changes)
+        .unwrap();
+    assert!(changes.iter().all(|change| !matches!(
+        change,
+        Change::Insert { block, .. } if matches!(block.data, BlockData::Quote)
+    )));
+    view.apply(&mut changes);
+    parser.append(" ", &mut changes).unwrap();
+    assert!(changes.is_empty());
+    let body = "ℹ️ We now build on top of [`markdown-it-ts`](https://www.npmjs.com/package/mar";
+    parser.append(body, &mut changes).unwrap();
+    let [
+        Change::Insert {
+            block: quote,
+            parent: None,
+        },
+        Change::Insert {
+            block: paragraph,
+            parent: Some(parent),
+        },
+        Change::PreviewInlines { id, nodes },
+    ] = changes.as_slice()
+    else {
+        panic!("expected a quote, its draft paragraph and inlines: {changes:?}");
+    };
+    assert!(matches!(quote.data, BlockData::Quote));
+    assert_eq!(*parent, quote.id);
+    assert_eq!(*id, paragraph.id);
+    assert_eq!(parser.source(paragraph.span), body);
+    assert!(
+        nodes
+            .iter()
+            .any(|node| matches!(&node.kind, InlineKind::LinkPreview(_)))
+    );
+    let (quote_id, paragraph_id) = (quote.id, paragraph.id);
+    view.apply(&mut changes);
+
+    for chunk in ["kdown-it-ts)", "\r", "\n"] {
+        parser.append(chunk, &mut changes).unwrap();
+        assert!(
+            changes
+                .iter()
+                .all(|change| !matches!(change, Change::Insert { .. }))
+        );
+        view.apply(&mut changes);
+    }
+    parser.finish(&mut changes).unwrap();
+    view.apply(&mut changes);
+    assert!(view.blocks.contains_key(&quote_id));
+    assert!(view.blocks.contains_key(&paragraph_id));
+    assert_eq!(
+        view.blocks.into_values().collect::<Vec<_>>(),
+        parse(parser.source_text(), &options).unwrap().nodes
+    );
+}
+
+#[test]
+fn quote_preview_does_not_preempt_ambiguous_or_active_containers() {
+    for (before, prefix) in [
+        ("", ">"),
+        ("", "  >  "),
+        ("", ">\tcode"),
+        ("", ">     code"),
+        ("", "> > nested"),
+        ("", "> [!NOTE]"),
+        ("", "> [^1]: note"),
+        ("", "> :::warning"),
+        ("", "> $$"),
+        ("", "> \\["),
+        ("- item\nlazy continuation\n", "> Next"),
+        ("- item\n\n", "  > Nested after a list"),
+        ("- [x] task\n\n", "> Following a task list"),
+    ] {
+        let mut parser = Parser::new(Options {
+            preview: Preview::Ai,
+            markstream: true,
+            math: true,
+            ..Options::default()
+        });
+        let mut changes = Vec::new();
+        parser.append(before, &mut changes).unwrap();
+        changes.clear();
+        parser.append(prefix, &mut changes).unwrap();
+        assert!(
+            !changes.iter().any(|change| matches!(
+                change,
+                Change::Insert { block, .. } if matches!(block.data, BlockData::Quote)
+            )),
+            "{before:?} + {prefix:?}: {changes:?}"
+        );
+    }
+}
+
+#[test]
+fn quote_preview_after_dormant_list_has_packet_final_parity() {
+    let options = Options {
+        preview: Preview::Ai,
+        markstream: true,
+        ..Options::default()
+    };
+    let mut parser = Parser::new(options.clone());
+    let mut changes = Vec::new();
+    parser.append("- item\r\n\r\n", &mut changes).unwrap();
+    changes.clear();
+    parser.append(">", &mut changes).unwrap();
+    assert!(changes.is_empty());
+    parser.append(" 文本", &mut changes).unwrap();
+    assert!(changes.iter().any(|change| matches!(
+        change,
+        Change::Insert { block, parent: None } if matches!(block.data, BlockData::Quote)
+    )));
+
+    for source in [
+        "- item\r\n\r\n> 文本 [link](https://example.org)\r\n\r\nAfter",
+        "  > 中文 and `code`\r\n\r\nNext",
+        "- item\nlazy continuation\n> Next",
+        "> [!NOTE]\n> message",
+        "> > nested quote",
+    ] {
+        let expected = parse(source, &options).unwrap().nodes;
+        for (split, _) in source.char_indices() {
+            let mut parser = Parser::new(options.clone());
+            let mut view = View::default();
+            let mut changes = Vec::new();
+            for chunk in [&source[..split], &source[split..]] {
+                parser.append(chunk, &mut changes).unwrap();
+                view.apply(&mut changes);
+            }
+            parser.finish(&mut changes).unwrap();
+            view.apply(&mut changes);
+            assert_eq!(
+                view.blocks.into_values().collect::<Vec<_>>(),
+                expected,
+                "{source:?} split {split}"
+            );
+        }
+    }
+}
+
+#[test]
 fn growing_paragraph_scans_each_input_byte_once() {
     let mut parser = Parser::new(Options::default());
     let mut changes = Vec::new();
