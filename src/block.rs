@@ -620,6 +620,7 @@ impl Engine {
         mut output: Output<'_>,
     ) -> Result<(), ParseError> {
         self.finalizing = final_input;
+        let appended_bytes = source.len() - self.metrics.input_bytes;
         self.metrics.input_bytes = source.len();
         if self.options.markstream {
             self.resume_html_line_ending(source, final_input, &mut output);
@@ -828,7 +829,7 @@ impl Engine {
             }
             self.partial(source, &mut output);
             if self.options.preview == Preview::Ai {
-                self.preview_inline(source, &mut output);
+                self.preview_inline(source, appended_bytes, &mut output);
             }
         }
         Ok(())
@@ -1101,7 +1102,7 @@ impl Engine {
         self.inline_preview = None;
     }
 
-    fn preview_inline(&mut self, source: &str, output: &mut Output<'_>) {
+    fn preview_inline(&mut self, source: &str, appended_bytes: usize, output: &mut Output<'_>) {
         const MAX_PREVIEW_BYTES: usize = 1024;
         if self.options.markstream && self.preview_container_paragraph(source, output) {
             return;
@@ -1133,7 +1134,17 @@ impl Engine {
             self.inline_preview = None;
             return;
         };
-        if body.end - body.start <= MAX_PREVIEW_BYTES {
+        let size = body.end - body.start;
+        // Refresh an existing root preview on the append that crosses the budget.
+        // Only that append supplies extra work, and the total is still capped.
+        let crossing_budget = size > MAX_PREVIEW_BYTES
+            && size <= MAX_PREVIEW_BYTES + appended_bytes.min(MAX_PREVIEW_BYTES)
+            && self.options.markstream
+            && self.containers.is_empty()
+            && self.inline_preview.is_some_and(|(previous, end)| {
+                previous == id && end.saturating_sub(body.start) <= MAX_PREVIEW_BYTES
+            });
+        if size <= MAX_PREVIEW_BYTES || crossing_budget {
             if self.inline_preview == Some((id, body.end)) {
                 return;
             }

@@ -1202,6 +1202,37 @@ fn inline_math_preview_is_temporary_and_bounded() {
 }
 
 #[test]
+fn an_existing_root_preview_can_refresh_once_when_an_append_crosses_its_budget() {
+    let mut parser = Parser::new(Options {
+        markstream: true,
+        preview: Preview::Ai,
+        ..Options::default()
+    });
+    let mut changes = Vec::new();
+    let first = format!("First `one`{}", " text".repeat(201));
+    assert!(first.len() < 1024);
+    parser.append(&first, &mut changes).unwrap();
+    assert!(
+        matches!(changes.last(), Some(Change::PreviewInlines { nodes, .. }) if nodes.iter().any(|node| matches!(node.kind, InlineKind::Code(_))))
+    );
+
+    changes.clear();
+    parser
+        .append(" and `two` with more text", &mut changes)
+        .unwrap();
+    assert!(parser.source_text().len() > 1024);
+    assert!(
+        matches!(changes.last(), Some(Change::PreviewInlines { nodes, .. }) if nodes.iter().filter(|node| matches!(node.kind, InlineKind::Code(_))).count() == 2)
+    );
+
+    changes.clear();
+    parser.append(" further", &mut changes).unwrap();
+    assert!(
+        matches!(changes.last(), Some(Change::PreviewInlines { nodes, .. }) if nodes.is_empty())
+    );
+}
+
+#[test]
 fn a_partial_unindented_header_can_follow_a_completed_list() {
     let options = Options {
         preview: Preview::Ai,
