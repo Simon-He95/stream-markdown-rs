@@ -234,7 +234,7 @@ impl LiteralKind {
             .find(|kind| bytes.starts_with(kind.opening()))
     }
 
-    fn pending(bytes: &[u8]) -> bool {
+    pub(crate) fn pending(bytes: &[u8]) -> bool {
         Self::Comment.opening().starts_with(bytes) || Self::Cdata.opening().starts_with(bytes)
     }
 

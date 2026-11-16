@@ -108,6 +108,8 @@ fn find_end(
                 return (position, None);
             };
             start = close;
+        } else if tag::LiteralKind::pending(tail.as_bytes()) {
+            return (position, None);
         } else if let Some(opening) = tag::opening(source, position, end) {
             start = opening.end;
         } else {

@@ -716,6 +716,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn split_literal_opener_preserves_the_native_html_raw_line() {
+        let source = "\r\n    continuation [^x]\n<div>\n\r\n$x$\n-->\n</tool-call>\n**closed**\n<!-- </div> -->\n";
+        let options = Options {
+            markstream: true,
+            math: true,
+            footnotes: true,
+            preview: Preview::Ai,
+            custom_tags: vec!["tool-call".into()],
+            ..Options::default()
+        };
+        let document = parse(source, &options).unwrap();
+        let start = source.find("<!--").unwrap();
+        let expected = document
+            .nodes
+            .iter()
+            .find(|block| block.span.start == start)
+            .unwrap();
+        assert!(matches!(&expected.data, BlockData::SegmentedHtml(lines) if lines.len() == 1));
+        let streamed = stream_view(source, options).unwrap();
+        let actual = streamed
+            .values()
+            .map(|(_, block)| block)
+            .find(|block| block.span.start == start)
+            .unwrap();
+        assert_eq!(actual.span, expected.span);
+        assert_eq!(actual.data, expected.data);
+    }
+
+    #[test]
     fn streamed_footnote_fragments_reconstruct_the_full_body() {
         let source = "[^note]: First.\n    Second [label][ref].\n\n[ref]: /destination\n";
         let options = Options {
