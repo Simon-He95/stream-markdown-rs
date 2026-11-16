@@ -1994,6 +1994,60 @@ fn a_partial_sibling_item_reuses_the_list_and_publishes_its_first_paragraph() {
 }
 
 #[test]
+fn nested_list_starters_publish_under_the_existing_parent_before_newline() {
+    let options = Options {
+        preview: Preview::Ai,
+        markstream: true,
+        ..Options::default()
+    };
+    let mut parser = Parser::new(options.clone());
+    let mut changes = Vec::new();
+    let mut view = View::default();
+    parser.append("- outer\r\n", &mut changes).unwrap();
+    let outer = changes
+        .iter()
+        .find_map(|change| match change {
+            Change::Insert { block, .. } if matches!(block.data, BlockData::ListItem { .. }) => {
+                Some(block.id)
+            }
+            _ => None,
+        })
+        .unwrap();
+    view.apply(&mut changes);
+
+    parser.append("  - 内层", &mut changes).unwrap();
+    let nested = changes
+        .iter()
+        .find_map(|change| match change {
+            Change::Insert {
+                block,
+                parent: Some(parent),
+            } if *parent == outer && matches!(block.data, BlockData::List { .. }) => Some(block.id),
+            _ => None,
+        })
+        .expect("expected the nested list under the outer item");
+    view.apply(&mut changes);
+    parser.append("\r\n", &mut changes).unwrap();
+    assert!(
+        !changes
+            .iter()
+            .any(|change| matches!(change, Change::Insert { .. }))
+    );
+    view.apply(&mut changes);
+
+    parser.append("  - \"sibling\"", &mut changes).unwrap();
+    assert!(changes.iter().any(|change| matches!(change,
+        Change::Insert { block, parent: Some(parent) } if *parent == nested && matches!(block.data, BlockData::ListItem { .. }))));
+    view.apply(&mut changes);
+    parser.finish(&mut changes).unwrap();
+    view.apply(&mut changes);
+    assert_eq!(
+        view.blocks.into_values().collect::<Vec<_>>(),
+        parse(parser.source_text(), &options).unwrap().nodes
+    );
+}
+
+#[test]
 fn a_list_item_with_a_bare_code_marker_publishes_literal_text_first() {
     let options = Options {
         preview: Preview::Ai,

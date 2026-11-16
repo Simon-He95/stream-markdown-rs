@@ -1563,16 +1563,58 @@ impl Engine {
         {
             return Ok(());
         }
-        let Some((marker, prefix)) = container::list_at(raw, 0, 0) else {
-            return Ok(());
-        };
-        let depth = self
+        let mut depth = self
             .containers
             .iter()
             .take_while(|frame| {
                 frame.kind.is_colon_container() || matches!(frame.kind, Kind::Html { .. })
             })
             .count();
+        let mut line = Line::new(self.line_start, self.scan, self.scan);
+        if depth == 0 && self.options.preview == Preview::Ai {
+            // These parent items can accept another child without changing their state.
+            while let [
+                Frame {
+                    kind: Kind::List { .. },
+                    ..
+                },
+                Frame {
+                    kind:
+                        Kind::Item {
+                            indent,
+                            blank: false,
+                            has_content: true,
+                            task: None,
+                        },
+                    ..
+                },
+                ..,
+            ] = &self.containers[depth..]
+            {
+                let prefix = container::whitespace(
+                    &source.as_bytes()[line.start..line.end],
+                    line.column,
+                    line.padding,
+                    *indent,
+                );
+                if prefix.columns < *indent {
+                    break;
+                }
+                if prefix.padding != 0 {
+                    return Ok(());
+                }
+                line.advance(prefix);
+                depth += 2;
+            }
+        }
+        let raw = &source[line.start..line.end];
+        let Some((marker, prefix)) = container::list_at(raw, line.column, line.padding) else {
+            return Ok(());
+        };
+        let nested = line.start != self.line_start;
+        if nested && prefix.padding != 0 {
+            return Ok(());
+        }
         let previous_blank = match &self.containers[depth..] {
             [] if self.active.is_none() || marker.interrupts(raw) => None,
             [
@@ -1585,7 +1627,9 @@ impl Engine {
                     ..
                 },
             ] if *style == marker.style
-                && container::whitespace(raw.as_bytes(), 0, 0, *indent).columns < *indent
+                && container::whitespace(raw.as_bytes(), line.column, line.padding, *indent)
+                    .columns
+                    < *indent
                 && !thematic(unindent(raw)) =>
             {
                 Some(*blank)
@@ -1604,11 +1648,20 @@ impl Engine {
             return Ok(());
         }
         let bracket_preview = self.options.preview == Preview::Ai && !content.starts_with("[!");
-        if !content.as_bytes().first().is_some_and(|&byte| {
-            ordinary_start(byte)
-                || partial_inline_start(content, bracket_preview)
-                || self.options.preview == Preview::Ai && bare_code_marker(content)
-        }) {
+        let Some(&byte) = content.as_bytes().first() else {
+            return Ok(());
+        };
+        if nested
+            && (matches!(byte, b':' | b'\\')
+                || self.options.math && byte == b'$'
+                || self.has_block_plugin(byte))
+        {
+            return Ok(());
+        }
+        if !(ordinary_start(byte)
+            || partial_inline_start(content, bracket_preview)
+            || self.options.preview == Preview::Ai && bare_code_marker(content))
+        {
             return Ok(());
         }
         self.stop_leaf(source, output)?;
@@ -1629,7 +1682,7 @@ impl Engine {
                     ordinal: marker.ordinal,
                     tight: true,
                 },
-                self.line_start,
+                line.start,
                 self.scan,
                 output,
             );
@@ -1651,11 +1704,16 @@ impl Engine {
                 has_content: true,
                 task: None,
             },
-            self.line_start,
+            line.start,
             self.scan,
             output,
         );
-        self.partial_container = Some(prefix);
+        line.advance(prefix);
+        self.partial_container = Some(container::Prefix {
+            bytes: line.start - self.line_start,
+            columns: line.column,
+            padding: line.padding,
+        });
         Ok(())
     }
 
