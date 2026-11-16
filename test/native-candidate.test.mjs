@@ -48,7 +48,7 @@ test('native candidate applies reference backpatch and nested fence deltas', () 
 })
 
 test('native candidate delivers Rust custom tag metadata only after a complete opener', () => {
-  const session = createSession({ factoryOptions: { customHtmlTags: ['tool-call'] } })
+  const session = createSession({ factoryOptions: { customHtmlTags: ['tool-call'], markstream: false } })
   try {
     session.append('<tool-call title="a >')
     assert.equal(session.snapshot().some(node => node.type === 'tool-call'), false)
@@ -353,6 +353,103 @@ test('native candidate projects typed details and summary hierarchy separately f
     assert.ok(details.content.includes('<ul>'))
     assert.ok(details.content.includes('data-lang="js"'))
     assert.ok(details.content.endsWith('</details>\n'))
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('native candidate retains typed custom tag children alongside the source payload', () => {
+  const session = createSession({ parseOptions: { customHtmlTags: ['widget'] } })
+  try {
+    session.append('prefix <widget title="a > b">**value**</widget> tail\n\n<widget>\n**second**\n</widget>\n')
+    session.finish()
+
+    const [paragraph, block] = session.snapshot()
+    const inline = paragraph.children.find(child => child.type === 'widget')
+    assert.deepEqual(inline.attrs, [['title', 'a > b']])
+    assert.equal(inline.content, '**value**')
+    assert.equal(inline.children[0].type, 'strong')
+    assert.equal(block.content, '**second**')
+    assert.equal(block.raw, '<widget>\n**second**\n</widget>')
+    assert.equal(block.children[0].type, 'strong')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('legacy custom block projection renders a same-line open payload on its own line', () => {
+  const session = createSession({ parseOptions: { customHtmlTags: ['thinking'] } })
+  try {
+    session.append('<thinking>  text')
+    assert.equal(session.snapshot()[0].content, 'text')
+    assert.equal(session.snapshot()[0].raw, '<thinking>\ntext')
+    assert.equal(session.snapshot()[0].loading, true)
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('native candidate projects the admonition title and actual child blocks', () => {
+  const session = createSession()
+  try {
+    session.append('::: note Headline\n')
+    session.append('**bold**\n:::\n')
+    session.finish()
+    const [note] = session.snapshot()
+    assert.equal(note.type, 'admonition')
+    assert.equal(note.kind, 'note')
+    assert.equal(note.title, 'Headline')
+    assert.equal(note.raw, ':::note Headline\n**bold**\n:::')
+    assert.equal(note.children[0].children[0].type, 'strong')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('legacy paragraph raw follows a typed preview that holds an unfinished HTML tag', () => {
+  const session = createSession()
+  try {
+    session.append('see <fo')
+    const paragraph = session.snapshot()[0]
+    assert.equal(paragraph.raw, 'see')
+    assert.equal(paragraph.children[0].content, 'see')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('legacy closed same-line custom content keeps its inline view after streaming', () => {
+  const session = createSession({ parseOptions: { customHtmlTags: ['widget'] } })
+  try {
+    session.append('<widget title="quote > works">')
+    session.append('**value**</widget>')
+    session.finish()
+    const paragraph = session.snapshot()[0]
+    assert.equal(paragraph.type, 'paragraph')
+    assert.equal(paragraph.raw, '<widget title="quote > works">**value**</widget>')
+    assert.deepEqual(paragraph.children[0].attrs, [['title', 'quote > works']])
+    assert.equal(paragraph.children[0].children[0].type, 'strong')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('legacy custom closure keeps the preserved same-line suffix next to the typed inline node', () => {
+  const session = createSession({ parseOptions: { customHtmlTags: ['widget'] } })
+  try {
+    const source = '<widget>{"text":"literal </widget> in json"}</widget>'
+    session.append(source)
+    session.finish()
+    const [paragraph] = session.snapshot()
+    assert.equal(paragraph.raw, source)
+    assert.equal(paragraph.children[0].content, '{"text":"literal ')
+    assert.ok(paragraph.children[1].content.startsWith(' in json'))
   }
   finally {
     session.dispose()

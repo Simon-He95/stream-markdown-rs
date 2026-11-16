@@ -107,8 +107,8 @@ impl Session {
                             | BlockData::Heading {
                                 content: InlineContent::Plain(body),
                                 ..
-                            }
-                            | BlockData::CustomTag { body, .. } => body,
+                            } => body,
+                            BlockData::CustomTag(element) => &mut element.body,
                             BlockData::Html => &mut block.span,
                             BlockData::Paragraph(InlineContent::Fragments(parts)) => parts
                                 .last_mut()

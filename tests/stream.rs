@@ -41,8 +41,8 @@ impl View {
                         | BlockData::Math {
                             body: stream_markdown_rs::Text::Source(body),
                         }
-                        | BlockData::CodeBlock { body, .. }
-                        | BlockData::CustomTag { body, .. } => body,
+                        | BlockData::CodeBlock { body, .. } => body,
+                        BlockData::CustomTag(element) => &mut element.body,
                         _ => panic!("unexpected text update: {block:?}"),
                     };
                     assert_eq!(span.start, body.end);
@@ -226,12 +226,14 @@ fn registered_tag_attributes_borrow_the_original_source() {
     let source = "<tool-call name=\"search\" title=\"a > b\" empty=\"\" />\n";
     let document = parse(source, &options).unwrap();
     let block = &document.nodes[0];
-    let BlockData::CustomTag { tag, .. } = block.data else {
+    let BlockData::CustomTag(element) = &block.data else {
         panic!("expected custom element");
     };
-    assert_eq!(tag.tag_name(source), "tool-call");
+    assert_eq!(element.tag.tag_name(source), "tool-call");
     assert_eq!(
-        tag.attrs(source)
+        element
+            .tag
+            .attrs(source)
             .map(|attr| (attr.name, attr.value))
             .collect::<Vec<_>>(),
         [
@@ -359,12 +361,17 @@ fn registered_opening_is_emitted_without_waiting_for_a_newline() {
         panic!("expected the complete opening tag");
     };
     assert_eq!(block.status, BlockStatus::Open);
-    let BlockData::CustomTag { tag, .. } = block.data else {
+    let BlockData::CustomTag(element) = &block.data else {
         panic!("expected custom element");
     };
-    assert_eq!(tag.tag_name(parser.source_text()), "tool-call");
+    assert_eq!(element.tag.tag_name(parser.source_text()), "tool-call");
     assert_eq!(
-        tag.attrs(parser.source_text()).last().unwrap().value,
+        element
+            .tag
+            .attrs(parser.source_text())
+            .last()
+            .unwrap()
+            .value,
         Some("a > b")
     );
     let mut view = View::default();
@@ -634,17 +641,17 @@ fn custom_tag_body_streams_nested_markup_until_its_own_closer() {
         .unwrap();
     view.apply(&mut changes);
     let id = *view.blocks.keys().next().unwrap();
-    let BlockData::CustomTag { body, .. } = view.blocks[&id].data else {
+    let BlockData::CustomTag(element) = &view.blocks[&id].data else {
         panic!("expected tag")
     };
-    assert_eq!(parser.source(body), "分析 <em>中</e");
+    assert_eq!(parser.source(element.body), "分析 <em>中</e");
 
     parser.append("m></thi", &mut changes).unwrap();
     view.apply(&mut changes);
-    let BlockData::CustomTag { body, .. } = view.blocks[&id].data else {
+    let BlockData::CustomTag(element) = &view.blocks[&id].data else {
         panic!("expected tag")
     };
-    assert_eq!(parser.source(body), "分析 <em>中</em>");
+    assert_eq!(parser.source(element.body), "分析 <em>中</em>");
     parser.append("nking>\n", &mut changes).unwrap();
     view.apply(&mut changes);
     assert_eq!(view.blocks[&id].status, BlockStatus::Closed);
@@ -677,11 +684,11 @@ fn a_custom_tag_closes_in_the_same_chunk_without_waiting_for_newline() {
     view.apply(&mut changes);
     let root = view.blocks.values().next().unwrap();
     assert_eq!(root.status, BlockStatus::Closed);
-    let BlockData::CustomTag { body, .. } = root.data else {
+    let BlockData::CustomTag(element) = &root.data else {
         panic!("expected a tag")
     };
     assert_eq!(
-        parser.source(body),
+        parser.source(element.body),
         "before <thinking title=\"literal </thinking>\">nested</thinking> remaining"
     );
     parser.finish(&mut changes).unwrap();
@@ -921,5 +928,113 @@ fn markstream_html_drafts_keep_source_and_ids_at_same_line_closure() {
     assert_eq!(
         view.blocks.into_values().collect::<Vec<_>>(),
         parse(parser.source_text(), &options).unwrap().nodes
+    );
+}
+
+#[test]
+fn registered_inline_custom_tags_keep_raw_payload_and_parsed_children() {
+    let source = "before <custom_data title=\"x>y\">{\"title\":\"**Report**\"}</custom_data> after";
+    let options = Options {
+        custom_tags: vec!["custom_data".into()],
+        markstream: true,
+        ..Options::default()
+    };
+    let document = parse(source, &options).unwrap();
+    let BlockData::Paragraph(InlineContent::Parsed(nodes)) = &document.nodes[0].data else {
+        panic!("expected parsed paragraph");
+    };
+    let InlineKind::CustomTag(element) = &nodes[1].kind else {
+        panic!("expected registered inline tag");
+    };
+    assert_eq!(element.tag.tag_name(source), "custom_data");
+    assert_eq!(element.tag.attrs(source).next().unwrap().value, Some("x>y"));
+    assert_eq!(
+        &source[element.body.start..element.body.end],
+        "{\"title\":\"**Report**\"}"
+    );
+    assert!(
+        element
+            .children
+            .iter()
+            .any(|node| matches!(node.kind, InlineKind::Strong(_)))
+    );
+}
+
+#[test]
+fn a_markstream_break_promotes_the_following_nonempty_custom_element() {
+    let options = Options {
+        custom_tags: vec!["usrhead".into(), "aihead".into(), "thinking".into()],
+        markstream: true,
+        preview: Preview::Ai,
+        ..Options::default()
+    };
+    let first = "<usrhead></usrhead><br>前缀<aihead></aihead><thinking>分析";
+    let rest = "\n\n### 推理\n</thinking>";
+    let source = format!("{first}{rest}");
+    let full = parse(&source, &options).unwrap();
+    assert_eq!(full.nodes.len(), 2);
+    let BlockData::Paragraph(InlineContent::Parsed(prefix)) = &full.nodes[0].data else {
+        panic!("expected the preceding inline paragraph");
+    };
+    assert!(
+        prefix
+            .iter()
+            .any(|node| matches!(node.kind, InlineKind::HardBreak))
+    );
+    let BlockData::CustomTag(element) = &full.nodes[1].data else {
+        panic!("expected one promoted custom element");
+    };
+    assert!(element.promoted);
+    assert_eq!(
+        &source[element.body.start..element.body.end],
+        "分析\n\n### 推理\n"
+    );
+
+    let mut parser = Parser::new(options);
+    let mut changes = Vec::new();
+    let mut view = View::default();
+    parser.append(first, &mut changes).unwrap();
+    view.apply(&mut changes);
+    assert_eq!(view.blocks.len(), 2);
+    assert_eq!(
+        view.blocks.values().last().unwrap().status,
+        BlockStatus::Open
+    );
+    parser.append(rest, &mut changes).unwrap();
+    parser.finish(&mut changes).unwrap();
+    view.apply(&mut changes);
+    assert_eq!(view.blocks.into_values().collect::<Vec<_>>(), full.nodes);
+}
+
+#[test]
+fn a_partial_reference_definition_previews_only_waiting_text() {
+    let options = Options {
+        markstream: true,
+        preview: Preview::Ai,
+        ..Options::default()
+    };
+    let mut parser = Parser::new(options);
+    let mut view = View::default();
+    let mut changes = Vec::new();
+    parser
+        .append("请看 [1][source]\n\nUnaffected\n\n", &mut changes)
+        .unwrap();
+    view.apply(&mut changes);
+    let id = *view.blocks.keys().next().unwrap();
+    parser
+        .append("[source]: https://example.com", &mut changes)
+        .unwrap();
+    assert!(
+        matches!(changes.as_slice(), [Change::PreviewInlines { id: updated, nodes }]
+        if *updated == id && nodes.iter().any(|node| matches!(node.kind, InlineKind::Link(_))))
+    );
+    assert_eq!(parser.metrics().invalidated_blocks, 0);
+    changes.clear();
+    parser.append("\n\n", &mut changes).unwrap();
+    assert_eq!(parser.metrics().invalidated_blocks, 1);
+    assert!(
+        changes
+            .iter()
+            .any(|change| matches!(change, Change::Replace(block) if block.id == id))
     );
 }

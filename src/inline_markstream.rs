@@ -413,3 +413,266 @@ pub(super) fn escaped_code(source: &str, start: usize, end: usize) -> Option<(us
     }
     (body < line).then(|| (line, Text::Source(Span::new(body, line))))
 }
+
+const HTML_TAGS: &[&str] = &[
+    "a",
+    "abbr",
+    "area",
+    "article",
+    "aside",
+    "b",
+    "base",
+    "bdi",
+    "bdo",
+    "blockquote",
+    "br",
+    "button",
+    "cite",
+    "code",
+    "col",
+    "data",
+    "del",
+    "details",
+    "dfn",
+    "div",
+    "em",
+    "embed",
+    "figcaption",
+    "figure",
+    "font",
+    "footer",
+    "g",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "header",
+    "hr",
+    "i",
+    "img",
+    "input",
+    "ins",
+    "kbd",
+    "label",
+    "li",
+    "link",
+    "main",
+    "mark",
+    "meta",
+    "nav",
+    "ol",
+    "p",
+    "param",
+    "path",
+    "pre",
+    "q",
+    "s",
+    "samp",
+    "section",
+    "small",
+    "source",
+    "span",
+    "strong",
+    "sub",
+    "summary",
+    "sup",
+    "svg",
+    "table",
+    "tbody",
+    "td",
+    "th",
+    "thead",
+    "time",
+    "tr",
+    "track",
+    "u",
+    "ul",
+    "var",
+    "wbr",
+];
+
+fn name_cmp(left: &str, right: &str) -> std::cmp::Ordering {
+    left.bytes()
+        .cmp(right.bytes().map(|byte| byte.to_ascii_lowercase()))
+}
+
+fn configured_html(name: &str, custom: &[String]) -> bool {
+    HTML_TAGS
+        .binary_search_by(|candidate| name_cmp(candidate, name))
+        .is_ok()
+        || custom.iter().any(|tag| tag.eq_ignore_ascii_case(name))
+}
+
+fn configured_html_prefix(name: &str, custom: &[String]) -> bool {
+    let ascii_prefix = |tag: &str| {
+        tag.get(..name.len())
+            .is_some_and(|part| part.eq_ignore_ascii_case(name))
+    };
+    let index = HTML_TAGS.partition_point(|candidate| name_cmp(candidate, name).is_lt());
+    HTML_TAGS.get(index).is_some_and(|tag| ascii_prefix(tag))
+        || custom.iter().any(|tag| ascii_prefix(tag))
+}
+
+fn tag_name(value: &str) -> Option<(&str, bool, &str)> {
+    let tail = value.strip_prefix('<')?;
+    let (closing, tail) = tail
+        .strip_prefix('/')
+        .map_or((false, tail), |rest| (true, rest));
+    if !tail.as_bytes().first().is_some_and(u8::is_ascii_alphabetic) {
+        return None;
+    }
+    let end = tail
+        .bytes()
+        .take_while(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.')
+        })
+        .count();
+    Some((&tail[..end], closing, &tail[end..]))
+}
+
+fn tag_space(input: &str) -> &str {
+    input.trim_start_matches(|ch: char| ch.is_ascii_whitespace())
+}
+
+pub(super) fn pending_html_tail(
+    source: &str,
+    leaf_start: usize,
+    start: usize,
+    end: usize,
+    custom: &[String],
+) -> bool {
+    let raw = &source[start..end];
+    if matches!(raw, "<" | "</") {
+        return true;
+    }
+    let Some((name, closing, mut rest)) = tag_name(raw) else {
+        return false;
+    };
+    let prefix = &source[leaf_start..start];
+    let separated = start == leaf_start
+        || source.as_bytes()[start - 1].is_ascii_whitespace()
+        || prefix.ends_with(r"\n")
+        || prefix.ends_with(r"\r");
+    if rest.is_empty() {
+        return separated || configured_html_prefix(name, custom);
+    }
+    if !separated && !configured_html(name, custom) {
+        return false;
+    }
+    if closing {
+        return tag_space(rest).is_empty();
+    }
+    if rest == "/" {
+        return true;
+    }
+    if !rest.as_bytes()[0].is_ascii_whitespace() {
+        return false;
+    }
+    loop {
+        rest = tag_space(rest);
+        if matches!(rest, "" | "/") {
+            return true;
+        }
+        let mut bytes = rest.bytes();
+        let Some(first) = bytes.next() else {
+            unreachable!()
+        };
+        if !(first.is_ascii_alphabetic() || matches!(first, b':' | b'_')) {
+            return false;
+        }
+        let name_end = 1 + bytes
+            .take_while(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'.' | b'-' | b'_')
+            })
+            .count();
+        rest = &rest[name_end..];
+        if let Some(value) = tag_space(rest).strip_prefix('=') {
+            let value = tag_space(value);
+            let Some(first) = value.as_bytes().first().copied() else {
+                return true;
+            };
+            if matches!(first, b'\'' | b'"') {
+                let Some(close) = memchr::memchr(first, &value.as_bytes()[1..]) else {
+                    return true;
+                };
+                rest = &value[close + 2..];
+            } else {
+                let finish = value
+                    .bytes()
+                    .take_while(|byte| {
+                        !byte.is_ascii_whitespace()
+                            && !matches!(byte, b'\'' | b'"' | b'=' | b'<' | b'>' | b'`')
+                    })
+                    .count();
+                if finish == 0 {
+                    return false;
+                }
+                rest = &value[finish..];
+            }
+        }
+        if !rest.is_empty() && !rest.as_bytes()[0].is_ascii_whitespace() {
+            return rest == "/";
+        }
+    }
+}
+
+pub(super) fn normalize_html(source: &str, nodes: &mut [super::Inline], custom: &[String]) {
+    use super::InlineKind;
+    use std::{
+        borrow::Cow,
+        collections::{HashMap, HashSet},
+    };
+
+    let unnamed = |node: &super::Inline| {
+        if !matches!(node.kind, InlineKind::Html) {
+            return None;
+        }
+        let raw = &source[node.span.start..node.span.end];
+        tag_name(raw).filter(|&(name, _, _)| !configured_html(name, custom))
+    };
+    let mut paired = HashSet::new();
+    if nodes
+        .iter()
+        .any(|node| unnamed(node).is_some_and(|(_, closing, _)| closing))
+    {
+        let mut openings = HashMap::<Cow<str>, Vec<usize>>::new();
+        for (index, node) in nodes.iter().enumerate() {
+            let Some((name, closing, rest)) = unnamed(node) else {
+                continue;
+            };
+            let key = if name.bytes().any(|byte| byte.is_ascii_uppercase()) {
+                Cow::Owned(name.to_ascii_lowercase())
+            } else {
+                Cow::Borrowed(name)
+            };
+            if closing {
+                if let Some(opening) = openings.get_mut(&key).and_then(Vec::pop) {
+                    paired.insert(opening);
+                    paired.insert(index);
+                }
+            } else if !rest.ends_with("/>") {
+                openings.entry(key).or_default().push(index);
+            }
+        }
+    }
+
+    for (index, node) in nodes.iter_mut().enumerate() {
+        if unnamed(node).is_some() && !paired.contains(&index) {
+            node.kind = InlineKind::Text(Text::Source(node.span));
+        }
+        match &mut node.kind {
+            InlineKind::Emphasis(children)
+            | InlineKind::Strong(children)
+            | InlineKind::Strikethrough(children)
+            | InlineKind::Highlight(children)
+            | InlineKind::Insert(children) => normalize_html(source, children, custom),
+            InlineKind::Link(link)
+            | InlineKind::LinkPreview(link)
+            | InlineKind::Image(link)
+            | InlineKind::ImagePreview(link) => normalize_html(source, &mut link.children, custom),
+            _ => {}
+        }
+    }
+}

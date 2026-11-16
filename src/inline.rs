@@ -39,6 +39,7 @@ pub enum InlineKind {
     ImagePreview(Box<Link>),
     NumericReference(Span),
     Html,
+    CustomTag(Box<crate::InlineElement>),
     FootnoteReference {
         label: Span,
         definition: crate::BlockId,
@@ -572,6 +573,9 @@ fn parse_inner(
     if options.markstream && markstream::needs_quotes(content(source, input)) {
         markstream::smart_quotes(source, &mut nodes);
     }
+    if options.markstream && content(source, input).as_bytes().contains(&b'<') {
+        markstream::normalize_html(source, &mut nodes, &options.custom_tags);
+    }
     nodes
 }
 
@@ -667,15 +671,12 @@ fn parse_with<S: Storage, const MATH: bool, const MARKSTREAM: bool>(
         }
         if math
             && (bytes[i] == b'$' || bytes[i..end].starts_with(b"\\("))
-            && let Some(formula) = math_scanner.read(source, i, math_end, preview)
+            && let Some(formula) =
+                math_scanner.read(source, i, math_end, preview, MARKSTREAM.then_some(start))
         {
-            let kind = InlineKind::Math {
-                body: formula.body,
-                loading: formula.loading,
-            };
             tokens.push(Token::from_inline(
                 span(i, formula.end),
-                kind,
+                formula.kind,
                 None,
                 &mut payloads,
             ));
@@ -954,9 +955,32 @@ fn parse_with<S: Storage, const MATH: bool, const MARKSTREAM: bool>(
                         title: None,
                         children: vec![original(label.start, label.end)],
                     }))
+                } else if !options.custom_tags.is_empty()
+                    && let Some(finish) =
+                        crate::custom_inline::tag_boundary(source, begin, end, &options.custom_tags)
+                {
+                    i = finish;
+                    InlineKind::Html
                 } else if let Some(finish) = html_end(source, i, end) {
                     i = finish;
                     InlineKind::Html
+                } else if MARKSTREAM
+                    && preview
+                    && markstream::pending_html_tail(source, start, i, end, &options.custom_tags)
+                {
+                    let tail = &source[i..end];
+                    if !matches!(tail, "<" | "</")
+                        && !tail.as_bytes().contains(&b'>')
+                        && let Some(last) = tokens.last_mut()
+                        && matches!(last.kind, TokenKind::Plain)
+                        && last.span.end == i
+                    {
+                        last.span.end = last.span.start
+                            + content(source, last.span)
+                                .trim_end_matches([' ', '\t'])
+                                .len();
+                    }
+                    break;
                 } else {
                     i += 1;
                     InlineKind::Text(Text::Source(span(begin, i)))
@@ -3013,5 +3037,130 @@ mod tests {
         let source = "**word**";
         let nodes = parse_preview(source, span(0, source.len()), &options, &refs);
         assert!(matches!(nodes[0].kind, InlineKind::Strong(_)));
+    }
+
+    #[test]
+    fn markstream_preview_holds_tag_tails_until_comparison_is_decidable() {
+        let options = Options {
+            markstream: true,
+            ..Options::default()
+        };
+        let refs = References::default();
+        for (source, expected) in [
+            ("see <fo", "see"),
+            ("a<b", "a"),
+            ("a </", "a "),
+            ("a <", "a "),
+            ("a <b x=\"a > b", "a "),
+            (r"Hello\n<think", r"Hello\n"),
+            ("a<b && c>d", "a<b && c>d"),
+            ("score < baseline", "score < baseline"),
+            ("a<b/c>d", "a<b/c>d"),
+        ] {
+            let nodes = parse_preview(source, span(0, source.len()), &options, &refs);
+            let actual = nodes
+                .iter()
+                .filter_map(|node| match &node.kind {
+                    InlineKind::Text(text) => Some(text.as_str(source)),
+                    _ => None,
+                })
+                .collect::<String>();
+            assert_eq!(actual, expected, "{source}");
+            let finalized = parse(source, span(0, source.len()), &options, &refs);
+            assert_eq!(finalized, [original(0, source.len())], "{source}");
+        }
+
+        let source = "`a <fo`";
+        let nodes = parse_preview(source, span(0, source.len()), &options, &refs);
+        assert!(matches!(&nodes[0].kind, InlineKind::Code(code) if code.as_str(source) == "a <fo"));
+    }
+
+    #[test]
+    fn markstream_demotes_unknown_angle_types_and_preserves_paired_or_registered_tags() {
+        let options = Options {
+            markstream: true,
+            ..Options::default()
+        };
+        let refs = References::default();
+        let source = "Array<T>";
+        let nodes = parse(source, span(0, source.len()), &options, &refs);
+        assert!(
+            nodes
+                .iter()
+                .all(|node| matches!(node.kind, InlineKind::Text(_)))
+        );
+        let ordinary = parse(source, span(0, source.len()), &Options::default(), &refs);
+        assert!(matches!(ordinary[1].kind, InlineKind::Html));
+
+        let source = "a <unknown>text</unknown>";
+        let nodes = parse(source, span(0, source.len()), &options, &refs);
+        assert_eq!(
+            nodes
+                .iter()
+                .filter(|node| matches!(node.kind, InlineKind::Html))
+                .count(),
+            2
+        );
+
+        let source = "a <b class=\"x\">ok</b> z";
+        let nodes = parse(source, span(0, source.len()), &options, &refs);
+        assert_eq!(
+            nodes
+                .iter()
+                .filter(|node| matches!(node.kind, InlineKind::Html))
+                .count(),
+            2
+        );
+
+        let source = "a <custom-renderer />";
+        let options = Options {
+            custom_tags: vec!["custom-renderer".into()],
+            ..options
+        };
+        let nodes = parse(source, span(0, source.len()), &options, &refs);
+        assert!(matches!(nodes[1].kind, InlineKind::Html));
+    }
+
+    #[test]
+    fn markstream_escaped_percent_after_strong_is_literal_without_hiding_real_math() {
+        let options = Options {
+            math: true,
+            markstream: true,
+            ..Options::default()
+        };
+        let refs = References::default();
+        let source = r"**A** \(0.0002\%\)";
+        for preview in [false, true] {
+            let nodes = if preview {
+                parse_preview(source, span(0, source.len()), &options, &refs)
+            } else {
+                parse(source, span(0, source.len()), &options, &refs)
+            };
+            assert!(matches!(nodes[0].kind, InlineKind::Strong(_)));
+            let text = nodes[1..]
+                .iter()
+                .map(|node| match &node.kind {
+                    InlineKind::Text(text) => text.as_str(source),
+                    _ => panic!("percent should be literal after strong"),
+                })
+                .collect::<String>();
+            assert_eq!(text, r" (0.0002\%)");
+        }
+        let source = r"\(x=0.2\%\)";
+        let nodes = parse(source, span(0, source.len()), &options, &refs);
+        assert!(
+            matches!(&nodes[0].kind, InlineKind::Math { body, .. } if body.as_str(source) == r"x=0.2\%")
+        );
+
+        let source = r"Value \(12\%\)";
+        let nodes = parse(source, span(0, source.len()), &options, &refs);
+        let visible = nodes
+            .iter()
+            .map(|node| match &node.kind {
+                InlineKind::Text(text) => text.as_str(source),
+                _ => panic!("percent should be literal in prose"),
+            })
+            .collect::<String>();
+        assert_eq!(visible, "Value (12%)");
     }
 }

@@ -8,7 +8,7 @@ use std::{
 use stream_markdown_rs::{
     Alignment, Block, BlockData, BlockStatus, Change, HtmlOpening, Inline, InlineContent,
     InlineKind, Options, Parser, PluginField, PluginFieldValue, Preview, PreviewHint, RawLine,
-    Span, Syntax, TableData, Text,
+    Span, Syntax, TableData, Tag, Text,
 };
 
 fn main() -> io::Result<()> {
@@ -94,7 +94,7 @@ fn text(value: &Text) -> Value {
     }
 }
 
-fn inline(value: &Inline) -> Value {
+fn inline(value: &Inline, source: &str) -> Value {
     let (kind, data) = match &value.kind {
         InlineKind::Text(value) => ("text", text(value)),
         InlineKind::Code(value) => ("code", text(value)),
@@ -106,13 +106,13 @@ fn inline(value: &Inline) -> Value {
         InlineKind::FootnoteReference { label, .. } => {
             ("footnote_reference", json!({ "label": span(*label) }))
         }
-        InlineKind::Emphasis(children) => ("emphasis", json!(inlines(children))),
-        InlineKind::Strong(children) => ("strong", json!(inlines(children))),
-        InlineKind::Strikethrough(children) => ("strikethrough", json!(inlines(children))),
+        InlineKind::Emphasis(children) => ("emphasis", json!(inlines(children, source))),
+        InlineKind::Strong(children) => ("strong", json!(inlines(children, source))),
+        InlineKind::Strikethrough(children) => ("strikethrough", json!(inlines(children, source))),
         InlineKind::Subscript(body) => ("subscript", text(body)),
         InlineKind::Superscript(body) => ("superscript", text(body)),
-        InlineKind::Highlight(children) => ("highlight", json!(inlines(children))),
-        InlineKind::Insert(children) => ("insert", json!(inlines(children))),
+        InlineKind::Highlight(children) => ("highlight", json!(inlines(children, source))),
+        InlineKind::Insert(children) => ("insert", json!(inlines(children, source))),
         InlineKind::Link(link)
         | InlineKind::LinkPreview(link)
         | InlineKind::Image(link)
@@ -128,9 +128,14 @@ fn inline(value: &Inline) -> Value {
                     "destination": text(&link.destination),
                     "title": link.title.as_ref().map(text),
                     "loading": matches!(value.kind, InlineKind::ImagePreview(_) | InlineKind::LinkPreview(_)),
-                    "children": inlines(&link.children),
+                    "children": inlines(&link.children, source),
                 }),
             )
+        }
+        InlineKind::CustomTag(element) => {
+            let mut value = custom_value(element.tag, element.body, &element.children, source);
+            value["status"] = json!(status_name(element.status));
+            ("custom_inline", value)
         }
         InlineKind::Html => ("html", Value::Null),
         InlineKind::SoftBreak => ("softbreak", Value::Null),
@@ -147,17 +152,17 @@ fn inline(value: &Inline) -> Value {
     json!({ "kind": kind, "span": span(value.span), "data": data })
 }
 
-fn inlines(values: &[Inline]) -> Vec<Value> {
-    values.iter().map(inline).collect()
+fn inlines(values: &[Inline], source: &str) -> Vec<Value> {
+    values.iter().map(|value| inline(value, source)).collect()
 }
 
-fn content(value: &InlineContent) -> Value {
+fn content(value: &InlineContent, source: &str) -> Value {
     match value {
         InlineContent::Plain(range) => json!({ "plain": span(*range) }),
         InlineContent::Fragments(ranges) => {
             json!({ "fragments": ranges.iter().copied().map(span).collect::<Vec<_>>() })
         }
-        InlineContent::Parsed(values) => json!({ "parsed": inlines(values) }),
+        InlineContent::Parsed(values) => json!({ "parsed": inlines(values, source) }),
     }
 }
 
@@ -167,13 +172,13 @@ fn raw_line(value: RawLine) -> Value {
 
 fn block(value: &Block, source: &str) -> Value {
     let (kind, data) = match &value.data {
-        BlockData::Paragraph(value) => ("paragraph", content(value)),
+        BlockData::Paragraph(value) => ("paragraph", content(value, source)),
         BlockData::Heading {
             level,
             content: value,
         } => (
             "heading",
-            json!({ "level": level, "content": content(value) }),
+            json!({ "level": level, "content": content(value, source) }),
         ),
         BlockData::CodeBlock { info, body } => (
             "code_block",
@@ -193,7 +198,7 @@ fn block(value: &Block, source: &str) -> Value {
             content: value,
         } => {
             let mut opening = html_opening_value(*opening, source);
-            opening["content"] = content(value);
+            opening["content"] = content(value, source);
             ("summary", opening)
         }
         BlockData::ThematicBreak => ("thematic_break", Value::Null),
@@ -203,7 +208,7 @@ fn block(value: &Block, source: &str) -> Value {
             content: value,
         } => (
             "footnote",
-            json!({ "label": span(*label), "content": content(value) }),
+            json!({ "label": span(*label), "content": content(value, source) }),
         ),
         BlockData::Vmr(vmr) => {
             let parameters = vmr.parameters(source);
@@ -217,6 +222,13 @@ fn block(value: &Block, source: &str) -> Value {
                 }),
             )
         }
+        BlockData::Admonition(admonition) => (
+            "admonition",
+            json!({
+                "kind": admonition.kind.as_str(),
+                "title": admonition.title(source).map(span),
+            }),
+        ),
         BlockData::Quote => ("blockquote", Value::Null),
         BlockData::List { ordered, start, .. } => {
             ("list", json!({ "ordered": ordered, "start": start }))
@@ -227,15 +239,12 @@ fn block(value: &Block, source: &str) -> Value {
             "html_block",
             json!({ "lines": lines.iter().copied().map(raw_line).collect::<Vec<_>>() }),
         ),
-        BlockData::Table(table) => ("table", table_value(table)),
-        BlockData::CustomTag { tag, body } => (
-            "custom",
-            json!({
-                "name": tag.tag_name(source),
-                "attrs": tag.attrs(source).map(|attr| (attr.name, attr.value.unwrap_or_default())).collect::<Vec<_>>(),
-                "body": span(*body),
-            }),
-        ),
+        BlockData::Table(table) => ("table", table_value(table, source)),
+        BlockData::CustomTag(element) => {
+            let mut value = custom_value(element.tag, element.body, &element.children, source);
+            value["promoted"] = json!(element.promoted);
+            ("custom", value)
+        }
         BlockData::Extension { kind } => ("extension", json!({ "kind": kind })),
         BlockData::ExtensionWithFields { kind, fields } => (
             "extension",
@@ -251,6 +260,17 @@ fn block(value: &Block, source: &str) -> Value {
         "status": status_name(value.status),
         "kind": kind,
         "data": data,
+    })
+}
+
+fn custom_value(tag: Tag, body: Span, children: &[Inline], source: &str) -> Value {
+    json!({
+        "name": tag.tag_name(source),
+        "attrs": tag.attrs(source)
+            .map(|attr| (attr.name, attr.value.unwrap_or_default()))
+            .collect::<Vec<_>>(),
+        "body": span(body),
+        "children": inlines(children, source),
     })
 }
 
@@ -271,15 +291,15 @@ fn status_name(status: BlockStatus) -> &'static str {
     }
 }
 
-fn table_value(table: &TableData) -> Value {
+fn table_value(table: &TableData, source: &str) -> Value {
     json!({
         "alignments": table.alignments().iter().map(|align| match align {
             Alignment::None | Alignment::Left => "left",
             Alignment::Center => "center",
             Alignment::Right => "right",
         }).collect::<Vec<_>>(),
-        "header": table.header().iter().map(content).collect::<Vec<_>>(),
-        "rows": table.rows().map(|row| row.iter().map(content).collect::<Vec<_>>()).collect::<Vec<_>>(),
+        "header": table.header().iter().map(|value| content(value, source)).collect::<Vec<_>>(),
+        "rows": table.rows().map(|row| row.iter().map(|value| content(value, source)).collect::<Vec<_>>()).collect::<Vec<_>>(),
     })
 }
 
@@ -318,26 +338,26 @@ fn change_value(change: &Change, source: &str) -> Value {
             json!({ "op": "add_raw_line", "id": id.0, "line": raw_line(*line), "end": end })
         }
         Change::AddRow { id, end, cells } => {
-            json!({ "op": "add_row", "id": id.0, "end": end, "cells": cells.iter().map(content).collect::<Vec<_>>() })
+            json!({ "op": "add_row", "id": id.0, "end": end, "cells": cells.iter().map(|value| content(value, source)).collect::<Vec<_>>() })
         }
         Change::ReplaceTableCell {
             id,
             index,
             content: value,
         } => {
-            json!({ "op": "replace_cell", "id": id.0, "index": index, "cell": content(value) })
+            json!({ "op": "replace_cell", "id": id.0, "index": index, "cell": content(value, source) })
         }
         Change::SetStatus { id, status, end } => {
             json!({ "op": "status", "id": id.0, "status": status_name(*status), "end": end })
         }
         Change::Remove { id } => json!({ "op": "remove", "id": id.0 }),
         Change::PreviewInlines { id, nodes } => {
-            json!({ "op": "preview_inlines", "id": id.0, "nodes": inlines(nodes) })
+            json!({ "op": "preview_inlines", "id": id.0, "nodes": inlines(nodes, source) })
         }
         Change::Preview { id, hint } => {
             json!({ "op": "preview", "id": id.0, "hint": hint.as_ref().map(|hint| match hint {
-                PreviewHint::Table { table, loading } => json!({ "kind": "table", "data": table_value(table), "loading": loading }),
-                PreviewHint::TableRow(cells) => json!({ "kind": "table_row", "cells": cells.iter().map(content).collect::<Vec<_>>() }),
+                PreviewHint::Table { table, loading } => json!({ "kind": "table", "data": table_value(table, source), "loading": loading }),
+                PreviewHint::TableRow(cells) => json!({ "kind": "table_row", "cells": cells.iter().map(|value| content(value, source)).collect::<Vec<_>>() }),
             }) })
         }
     }

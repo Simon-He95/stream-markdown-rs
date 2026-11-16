@@ -172,7 +172,6 @@ fn apply_changes(blocks: &mut StreamView, changes: &mut Vec<Change>) -> Result<(
                         content: InlineContent::Plain(body),
                         ..
                     }
-                    | BlockData::CustomTag { body, .. }
                     | BlockData::Math {
                         body: Text::Source(body),
                     }
@@ -181,6 +180,7 @@ fn apply_changes(blocks: &mut StreamView, changes: &mut Vec<Change>) -> Result<(
                         .last_mut()
                         .ok_or_else(|| format!("appended to empty text fragments in {id:?}"))?,
                     BlockData::Html => &mut block.span,
+                    BlockData::CustomTag(element) => &mut element.body,
                     _ => return Err(format!("appended to non-text block {id:?}")),
                 };
                 if body.end != span.start {
@@ -288,7 +288,7 @@ impl Renderer<'_> {
                 self.children(Some(block.id), false);
                 self.html.push_str("</blockquote>\n");
             }
-            BlockData::Vmr(_) => self.children(Some(block.id), false),
+            BlockData::Vmr(_) | BlockData::Admonition(_) => self.children(Some(block.id), false),
             BlockData::Details(opening) => {
                 let raw = &self.source[Range::from(opening.span)];
                 self.raw_html(raw);
@@ -355,7 +355,7 @@ impl Renderer<'_> {
                 }
                 self.html.push_str("</table>\n");
             }
-            BlockData::CustomTag { .. } => self.raw_html(&self.source[Range::from(block.span)]),
+            BlockData::CustomTag(_) => self.raw_html(&self.source[Range::from(block.span)]),
             BlockData::Math { body } => {
                 escape(&mut self.html, body.as_str(self.source));
             }
@@ -522,7 +522,9 @@ impl Renderer<'_> {
                     }
                     self.html.push_str(" />");
                 }
-                InlineKind::Html => self.raw_html(&self.source[Range::from(inline.span)]),
+                InlineKind::Html | InlineKind::CustomTag(_) => {
+                    self.raw_html(&self.source[Range::from(inline.span)])
+                }
                 InlineKind::Extension(_) | InlineKind::ExtensionWithFields { .. } => {
                     escape(&mut self.html, &self.source[Range::from(inline.span)])
                 }
@@ -571,6 +573,7 @@ impl Renderer<'_> {
                     escape(&mut self.html, &self.source[Range::from(*label)])
                 }
                 InlineKind::Html
+                | InlineKind::CustomTag(_)
                 | InlineKind::Extension(_)
                 | InlineKind::ExtensionWithFields { .. } => {}
             }

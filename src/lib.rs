@@ -2,6 +2,7 @@
 
 mod block;
 mod container;
+mod custom_inline;
 mod inline;
 mod math_block;
 mod plugin;
@@ -9,8 +10,10 @@ mod tag;
 
 use std::{borrow::Cow, collections::HashMap, fmt, num::NonZeroUsize, ops::Range};
 
+pub use block::admonition::{Admonition, AdmonitionKind};
 pub use block::details::HtmlOpening;
 pub use block::vmr::{Vmr, VmrParameters};
+pub use custom_inline::{CustomElement, InlineElement};
 pub use inline::{Inline, InlineKind, Link};
 pub use plugin::{
     Phase, PluginError, PluginField, PluginFieldValue, PluginRule, Rule, RuleInput, RuleResult,
@@ -174,6 +177,7 @@ pub enum BlockData {
     SegmentedHtml(Vec<RawLine>),
     Table(Box<TableData>),
     Vmr(Vmr),
+    Admonition(Admonition),
     Details(HtmlOpening),
     Summary {
         opening: HtmlOpening,
@@ -186,10 +190,7 @@ pub enum BlockData {
         label: Span,
         content: InlineContent,
     },
-    CustomTag {
-        tag: Tag,
-        body: Span,
-    },
+    CustomTag(Box<CustomElement>),
     Extension {
         kind: u32,
     },
@@ -258,7 +259,7 @@ pub enum Change {
         id: BlockId,
         hint: Option<PreviewHint>,
     },
-    /// Temporary inline overlay for an open paragraph or heading.
+    /// Temporary inline overlay for a visible paragraph or heading.
     /// An empty vector clears it. Replacement or closure also clears it.
     PreviewInlines {
         id: BlockId,
@@ -318,6 +319,10 @@ pub(crate) struct References(HashMap<String, Reference>);
 impl References {
     pub(crate) fn get(&self, label: &str) -> Option<&Reference> {
         self.0.get(label)
+    }
+
+    fn remove(&mut self, label: &str) {
+        self.0.remove(label);
     }
 
     fn insert(&mut self, label: Cow<'_, str>, reference: Reference) -> bool {

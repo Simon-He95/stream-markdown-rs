@@ -1,4 +1,4 @@
-use super::{Active, Engine, Line, Output, container};
+use super::{Active, Engine, Line, Output, admonition, container};
 use crate::{
     BlockStatus, Change, Span,
     container::{Frame, Kind},
@@ -122,8 +122,14 @@ impl Engine {
         if line.lazy {
             return false;
         }
-        let Kind::Vmr { header_end, .. } = frame.kind else {
-            return false;
+        let header_end = match frame.kind {
+            Kind::Vmr { header_end, .. }
+            | Kind::Admonition {
+                header_end,
+                quoted: false,
+                ..
+            } => header_end,
+            _ => return false,
         };
         let Some(start) = header_start(source, line) else {
             return false;
@@ -154,6 +160,12 @@ impl Engine {
             closed,
             preview_closed,
             ..
+        }
+        | Kind::Admonition {
+            closed,
+            preview_closed,
+            quoted: false,
+            ..
         } = &mut frame.kind
         {
             *closed = true;
@@ -178,12 +190,32 @@ impl Engine {
         let Some(vmr) = opening(source, line) else {
             return Ok(false);
         };
+        let kind = if let Some(kind) = admonition::colon_kind(source, vmr.header) {
+            Kind::Admonition {
+                header_end: vmr.header.end,
+                kind,
+                quoted: false,
+                closed: false,
+                preview_closed: false,
+            }
+        } else {
+            Kind::Vmr {
+                header_end: vmr.header.end,
+                closed: false,
+                preview_closed: false,
+            }
+        };
         if let Some(frame) = self.containers.last_mut()
             && frame.start == vmr.header.start
-            && let Kind::Vmr { header_end, .. } = &mut frame.kind
+            && let Kind::Vmr { header_end, .. }
+            | Kind::Admonition {
+                header_end,
+                quoted: false,
+                ..
+            } = frame.kind
         {
-            if *header_end != vmr.header.end || frame.end != line.next {
-                *header_end = vmr.header.end;
+            if header_end != vmr.header.end || frame.end != line.next {
+                frame.kind = kind;
                 frame.end = line.next;
                 output.close_container(
                     frame.batch_index,
@@ -198,16 +230,7 @@ impl Engine {
             output.update(Change::Remove { id: draft.id });
         }
         self.extend_containers(line.next);
-        self.open_container(
-            Kind::Vmr {
-                header_end: vmr.header.end,
-                closed: false,
-                preview_closed: false,
-            },
-            vmr.header.start,
-            line.next,
-            output,
-        );
+        self.open_container(kind, vmr.header.start, line.next, output);
         Ok(true)
     }
 
@@ -227,14 +250,20 @@ impl Engine {
         let direct = self
             .containers
             .iter()
-            .take_while(|frame| matches!(frame.kind, Kind::Vmr { .. }))
+            .take_while(|frame| frame.kind.is_colon_container())
             .count();
         if let Some(index) = direct.checked_sub(1)
             && let Some(frame) = self.containers.get(index).copied()
             && frame.start < self.line_start
         {
             if self.vmr_closer(source, line, frame) {
-                let Kind::Vmr { preview_closed, .. } = &mut self.containers[index].kind else {
+                let (Kind::Vmr { preview_closed, .. }
+                | Kind::Admonition {
+                    preview_closed,
+                    quoted: false,
+                    ..
+                }) = &mut self.containers[index].kind
+                else {
                     unreachable!();
                 };
                 if !*preview_closed {
@@ -263,9 +292,14 @@ impl Engine {
         if let Some(frame) = self
             .containers
             .iter_mut()
-            .take_while(|frame| matches!(frame.kind, Kind::Vmr { .. }))
+            .take_while(|frame| frame.kind.is_colon_container())
             .last()
-            && let Kind::Vmr { preview_closed, .. } = &mut frame.kind
+            && let Kind::Vmr { preview_closed, .. }
+            | Kind::Admonition {
+                preview_closed,
+                quoted: false,
+                ..
+            } = &mut frame.kind
             && *preview_closed
         {
             *preview_closed = false;

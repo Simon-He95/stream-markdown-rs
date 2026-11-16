@@ -1,4 +1,4 @@
-use crate::BlockId;
+use crate::{AdmonitionKind, BlockId};
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum Style {
@@ -24,6 +24,13 @@ impl ListMarker {
 #[derive(Clone, Copy)]
 pub(crate) enum Kind {
     Quote,
+    Admonition {
+        header_end: usize,
+        kind: AdmonitionKind,
+        quoted: bool,
+        closed: bool,
+        preview_closed: bool,
+    },
     Details {
         opening_end: usize,
         closed: bool,

@@ -35,7 +35,36 @@ export function projectBlocks(nodes, roots, context) {
 }
 
 function projectChildren(nodes, ids, context) {
-  return ids.map(id => projectBlock(nodes.get(id), nodes, context))
+  const projected = []
+  for (let index = 0; index < ids.length; index++) {
+    const block = nodes.get(ids[index])
+    const view = projectBlock(block, nodes, context)
+    const next = nodes.get(ids[index + 1])
+    const end = block.span[1]
+    if (context.markstream && block.kind === 'custom' && view.type === 'paragraph'
+      && next?.kind === 'paragraph' && next.span[0] >= end
+      && lineAt(context.lineStarts, end - 1) === lineAt(context.lineStarts, next.span[0])) {
+      // A native custom block can split a physical line into two blocks.
+      // The legacy view keeps the typed inline element and its text suffix together.
+      const gap = context.read([end, next.span[0]])
+      if (/^[ \t]*$/.test(gap)) {
+        const tail = projectBlock(next, nodes, context)
+        if (tail.type === 'paragraph') {
+          const first = tail.children[0]
+          if (gap && first?.type === 'text')
+            tail.children[0] = { ...first, content: gap + first.content, raw: gap + first.raw }
+          else if (gap)
+            tail.children.unshift(textNode(gap))
+          view.children.push(...tail.children)
+          view.raw += gap + tail.raw
+          Object.assign(view, sourceMap([block.span[0], next.span[1]], context))
+          index++
+        }
+      }
+    }
+    projected.push(view)
+  }
+  return projected
 }
 
 function lineAt(starts, offset) {
@@ -185,6 +214,16 @@ function legacyDelimitedText(children) {
   }).join('')
 }
 
+function customInlineNode(data, status, raw, context) {
+  const open = status === 'open'
+  return {
+    type: data.name, tag: data.name, attrs: data.attrs,
+    content: readText(data.body, context),
+    children: projectInlineNodes(data.children, context),
+    raw, loading: open && !context.final, autoClosed: open,
+  }
+}
+
 function projectInlineNodes(inlines, context) {
   const nodes = []
   for (let index = 0; index < inlines.length; index++) {
@@ -261,6 +300,9 @@ function projectInlineNodes(inlines, context) {
           nodes.push(linkNode(href, title, children, markup))
         }
       }
+    }
+    else if (kind === 'custom_inline') {
+      nodes.push(customInlineNode(data, data.status, raw, context))
     }
     else if (kind === 'html') {
       const header = htmlHeader(raw)
@@ -562,7 +604,13 @@ function projectBlock(block, nodes, context) {
         const previewMap = sourceMap([span[0], context.length], context)
         return projectTable(preview.data, preview.loading, previewMap, context)
       }
-      return { type: kind, children: projectInlines(block.previewInlines ?? data, context), raw: inlineRaw(data, raw.trim(), context), ...map }
+      let projectedRaw = inlineRaw(data, raw.trim(), context)
+      const last = block.previewInlines?.parsed.at(-1)
+      if (context.markstream && open && last && last.span[1] < span[1]
+        && context.read([last.span[1], span[1]]).trimStart().startsWith('<')) {
+        projectedRaw = normalize(context.read([data.plain?.[0] ?? span[0], last.span[1]]))
+      }
+      return { type: kind, children: projectInlines(block.previewInlines ?? data, context), raw: projectedRaw, ...map }
     }
     case 'heading': {
       const raw = inlineRaw(data.content, '', context)
@@ -582,6 +630,13 @@ function projectBlock(block, nodes, context) {
     }
     case 'vmr_container':
       return vmrNode(block, nodes, context)
+    case 'admonition': {
+      const kind = data.kind
+      const title = data.title ? readText(data.title, context) : kind[0].toUpperCase() + kind.slice(1)
+      const children = projectChildren(nodes, block.children, context)
+      const raw = `:::${kind} ${title}\n${children.map(child => child.raw).join('\n')}\n:::`
+      return { type: 'admonition', kind, title, children, raw, ...map }
+    }
     case 'thematic_break':
       return { type: kind, raw: '---', ...map }
     case 'math_block':
@@ -618,10 +673,44 @@ function projectBlock(block, nodes, context) {
     }
     case 'custom': {
       const body = readText(data.body, context)
+      if (data.promoted) {
+        return {
+          type: data.name, tag: data.name, attrs: data.attrs, content: body, raw,
+          children: projectInlineNodes(data.children, context), loading: open && !context.final, ...map,
+        }
+      }
+      const inlineRaw = raw.trimEnd()
+      if (context.markstream && status === 'closed' && !inlineRaw.includes('\n')
+        && context.read([data.body[1], span[1]]).startsWith('</')) {
+        const inline = customInlineNode(data, status, inlineRaw, context)
+        return { type: 'paragraph', children: [inline], raw: inlineRaw, ...map }
+      }
       let content = context.markstream ? body.replace(/^\n/, '') : body
+      let projectedRaw = raw
+      let projectedMap = map
       if (context.markstream && status === 'closed')
         content = content.replace(/\n$/, '')
-      return { type: data.name, tag: data.name, attrs: data.attrs.length ? data.attrs : undefined, content, raw, loading: open && !context.final, ...map }
+      if (context.markstream && open && block.parent === null) {
+        // The native node can hold a potential same-tag closer. Legacy raw displays those bytes.
+        const suffix = normalize(context.read([data.body[1], context.length]))
+        const sourceBody = body + suffix
+        const onSameLine = /^[ \t]*\S/.test(sourceBody)
+        const visibleBody = onSameLine ? sourceBody.replace(/^[ \t]+/, '') : sourceBody.replace(/^\n/, '')
+        const pendingClose = '</' + data.name
+        content = visibleBody.endsWith(pendingClose)
+          ? visibleBody.slice(0, -pendingClose.length)
+          : visibleBody
+        const opening = normalize(context.read([span[0], data.body[0]]))
+        projectedRaw = opening + (onSameLine ? '\n' + visibleBody : sourceBody)
+        projectedMap = sourceMap([span[0], context.length], context)
+      }
+      const children = data.children?.length && (!open || !context.markstream)
+        ? projectInlineNodes(data.children, context)
+        : undefined
+      return {
+        type: data.name, tag: data.name, attrs: data.attrs.length ? data.attrs : undefined,
+        content, raw: projectedRaw, ...(children && { children }), loading: open && !context.final, ...projectedMap,
+      }
     }
     case 'details':
     case 'summary':
@@ -631,7 +720,7 @@ function projectBlock(block, nodes, context) {
       const header = htmlHeader(content.trimStart())
       const loading = status === 'open' && !context.final && !header?.closed
       const display = context.markstream && loading && header?.tag
-        ? content + `</${header.tag}>`
+        ? content + (content.endsWith('\n') ? '' : '\n') + `</${header.tag}>`
         : content
       return {
         type: kind, content: display, raw: content, tag: header?.tag ?? '',

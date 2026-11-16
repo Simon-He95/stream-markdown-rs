@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::{Span, Text};
+use crate::{InlineKind, Span, Text};
 
 #[derive(Default)]
 pub(super) struct Scanner {
@@ -16,8 +16,7 @@ struct Parentheses {
 
 pub(super) struct Formula {
     pub end: usize,
-    pub body: Text,
-    pub loading: bool,
+    pub kind: InlineKind,
 }
 
 impl Scanner {
@@ -27,6 +26,7 @@ impl Scanner {
         start: usize,
         end: usize,
         allow_loading: bool,
+        legacy_start: Option<usize>,
     ) -> Option<Formula> {
         let bytes = source.as_bytes();
         let opener = bytes[start];
@@ -103,15 +103,31 @@ impl Scanner {
         {
             return None;
         }
-        if (loading || opener != b'$' || width == 2) && !math_like(trimmed) {
+        if opener == b'\\'
+            && let (Some(leaf_start), Some(close)) = (legacy_start, close)
+            && decimal_percent(trimmed)
+        {
+            let before = source[leaf_start..start].trim_end();
+            if before.is_empty() || before.ends_with("**") || before.ends_with("__") {
+                let mut literal = String::with_capacity(body.len() + 2);
+                literal.push('(');
+                literal.push_str(body);
+                literal.push(')');
+                return Some(Formula {
+                    end: close + width,
+                    kind: InlineKind::Text(Text::Decoded(literal.into_boxed_str())),
+                });
+            }
+        }
+        if (loading || opener != b'$' || width == 2) && !math_like(trimmed, legacy_start.is_some())
+        {
             return None;
         }
         let body =
             normalize(body).map_or(Text::Source(Span::new(body_start, body_end)), Text::Decoded);
         Some(Formula {
             end: close.map_or(end, |pos| pos + width),
-            body,
-            loading,
+            kind: InlineKind::Math { body, loading },
         })
     }
 }
@@ -223,7 +239,18 @@ fn placeholder(trimmed: &str) -> bool {
         || trimmed.chars().all(|ch| ch == '…')
 }
 
-fn math_like(body: &str) -> bool {
+fn decimal_percent(body: &str) -> bool {
+    let Some(number) = body.strip_suffix(r"\%") else {
+        return false;
+    };
+    let digits = |part: &str| !part.is_empty() && part.as_bytes().iter().all(u8::is_ascii_digit);
+    number.split_once('.').map_or_else(
+        || digits(number),
+        |(whole, fraction)| digits(whole) && digits(fraction),
+    )
+}
+
+fn math_like(body: &str, markstream: bool) -> bool {
     let bytes = body.as_bytes();
     if memchr::memmem::find(bytes, b"**").is_some() || contains_date(bytes) {
         return false;
@@ -255,7 +282,7 @@ fn math_like(body: &str) -> bool {
             b'\\'
                 if bytes
                     .get(i + 1)
-                    .is_some_and(|ch| matches!(ch, b'%' | b'{' | b'}')) =>
+                    .is_some_and(|ch| matches!(ch, b'{' | b'}') || !markstream && *ch == b'%') =>
             {
                 return true;
             }
