@@ -57,7 +57,7 @@ pub(crate) enum Kind {
 #[derive(Clone, Copy)]
 pub(crate) struct Frame {
     pub id: BlockId,
-    pub batch_index: usize,
+    pub output_index: usize,
     pub start: usize,
     pub end: usize,
     pub kind: Kind,

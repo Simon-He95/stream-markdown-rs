@@ -225,7 +225,7 @@ impl Engine {
                 frame.kind = kind;
                 frame.end = line.next;
                 output.close_container(
-                    frame.batch_index,
+                    frame.output_index,
                     super::container_block(*frame, BlockStatus::Open),
                 );
             }

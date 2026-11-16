@@ -323,7 +323,7 @@ impl Engine {
         }
         let frame = container::Frame {
             id: html.id,
-            batch_index: output.batch_index(),
+            output_index: output.container_index(self.options.markstream),
             start,
             end: html.span.end,
             kind: container::Kind::Html {

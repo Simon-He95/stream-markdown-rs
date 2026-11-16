@@ -55,17 +55,28 @@ impl Output<'_> {
         }
     }
 
-    fn batch_index(&self) -> usize {
+    fn container_index(&self, markstream: bool) -> usize {
         match self {
             Self::Batch(nodes, _) => nodes.len(),
-            Self::Stream(..) => 0,
+            // Markstream can publish intermediate updates to the same container.
+            Self::Stream(changes, _) if !markstream => changes.len(),
+            Self::Stream(..) => usize::MAX,
         }
     }
 
     fn close_container(&mut self, index: usize, block: Block) {
         match self {
             Self::Batch(nodes, _) => nodes[index] = block,
-            Self::Stream(changes, _) => changes.push(Change::Replace(block)),
+            Self::Stream(changes, first) => {
+                if index >= *first
+                    && let Some(Change::Insert { block: opened, .. }) = changes.get_mut(index)
+                    && opened.id == block.id
+                {
+                    *opened = block;
+                } else {
+                    changes.push(Change::Replace(block));
+                }
+            }
         }
     }
 
@@ -2365,7 +2376,7 @@ impl Engine {
     fn open_container(&mut self, kind: Kind, start: usize, end: usize, output: &mut Output<'_>) {
         let frame = Frame {
             id: self.id(),
-            batch_index: output.batch_index(),
+            output_index: output.container_index(self.options.markstream),
             start,
             end,
             kind,
@@ -2382,7 +2393,7 @@ impl Engine {
         while self.containers.len() > depth {
             let frame = self.containers.pop().unwrap();
             output.close_container(
-                frame.batch_index,
+                frame.output_index,
                 container_block(frame, BlockStatus::Closed),
             );
         }

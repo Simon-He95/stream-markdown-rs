@@ -2032,6 +2032,70 @@ fn append_coalesces_only_insertions_from_its_own_batch() {
 }
 
 #[test]
+fn container_closure_coalesces_only_with_an_insert_from_the_current_append() {
+    let mut same_append = Parser::new(Options::default());
+    let mut changes = Vec::new();
+    let first = "- first\n  - nested\n\n";
+    let second = "# end\n";
+    same_append
+        .append(&format!("{first}{second}"), &mut changes)
+        .unwrap();
+    let containers = |block: &Block| {
+        matches!(
+            block.data,
+            BlockData::List { .. } | BlockData::ListItem { .. }
+        )
+    };
+    assert_eq!(
+        changes
+            .iter()
+            .filter(|change| matches!(change, Change::Insert { block, .. }
+                if containers(block) && block.status == BlockStatus::Closed))
+            .count(),
+        4,
+    );
+    assert!(
+        !changes
+            .iter()
+            .any(|change| matches!(change, Change::Replace(block) if containers(block)))
+    );
+    let parents = |changes: &[Change]| {
+        changes
+            .iter()
+            .filter_map(|change| match change {
+                Change::Insert { block, parent } => Some((block.id, *parent)),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let same_parents = parents(&changes);
+    let mut same_view = View::default();
+    same_view.apply(&mut changes);
+
+    let mut split = Parser::new(Options::default());
+    split.append(first, &mut changes).unwrap();
+    let prefix = changes.clone();
+    assert!(
+        prefix
+            .iter()
+            .any(|change| matches!(change, Change::Insert { block, .. }
+            if containers(block) && block.status == BlockStatus::Open))
+    );
+    split.append(second, &mut changes).unwrap();
+    assert_eq!(&changes[..prefix.len()], prefix.as_slice());
+    assert!(
+        changes[prefix.len()..]
+            .iter()
+            .any(|change| matches!(change, Change::Replace(block)
+            if containers(block) && block.status == BlockStatus::Closed))
+    );
+    assert_eq!(same_parents, parents(&changes));
+    let mut split_view = View::default();
+    split_view.apply(&mut changes);
+    assert_eq!(same_view.blocks, split_view.blocks);
+}
+
+#[test]
 fn a_partial_sibling_item_reuses_the_list_and_publishes_its_first_paragraph() {
     let options = Options {
         markstream: true,
