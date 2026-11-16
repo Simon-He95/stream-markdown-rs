@@ -13,6 +13,20 @@ export function projectBlocks(nodes, roots, context) {
   if (context.markstream && !context.final) {
     const start = context.lineStarts.at(-1)
     const last = nodes.get(roots.at(-1))
+    const view = blocks.at(-1)
+    const text = view?.children?.length === 1 ? view.children[0] : undefined
+    if (last?.kind === 'paragraph' && last.status === 'open' && text?.type === 'text' && text.raw === view.raw) {
+      const source = view.raw
+      const complete = HTML_START.exec(source)
+      if (complete?.[0] === source && source.endsWith('/>') && !context.customTags.includes(complete[1].toLowerCase()))
+        delete text.center
+      else if (source.includes('\n') && !source.includes('>')) {
+        const opening = /^<([a-z][\w:.-]*)[ \t]+[\w:.-]+[ \t]*=[ \t]*(["'])/iu.exec(source)
+        if (opening && !context.customTags.includes(opening[1].toLowerCase())
+          && !source.slice(opening[0].length).includes(opening[2]))
+          blocks.pop()
+      }
+    }
     if (start < context.length && (!last || (last.status !== 'open' && last.span[1] <= start))) {
       const marker = /^ {0,3}(#{1,6}|`{1,2}|\||<\/?)[ \t]*$/u.exec(context.read([start, context.length]))?.[1]
       if (marker) {
@@ -463,8 +477,9 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false, insideL
       const previous = nodes.at(-1)
       if (kind === 'code_preview' && previous?.type === 'text')
         delete previous.center
-      const code = readText(data, context)
-      if (kind === 'code_preview' && context.markstream && !context.final && /^[a-z0-9.-]+$/u.test(code)) {
+      let code = readText(data, context)
+      const draft = kind === 'code_preview' && context.markstream && !context.final
+      if (draft && /^[a-z0-9.-]+$/u.test(code)) {
         const [match] = legacyLinkify.match(code) ?? []
         if (match?.schema === '' && match.index === 0 && match.lastIndex === code.length) {
           nodes.push({ type: 'inline_code', code: '', raw: '' })
@@ -473,6 +488,12 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false, insideL
             : textNode(code, false))
           continue
         }
+      }
+      if (draft) {
+        // In the legacy parser the unclosed span is still text when typography runs.
+        if (code.includes('..') && !code.includes('\\') && !code.includes('://'))
+          code = code.replace(/\.{2,}/gu, '…').replace(/([?!])…/gu, '$1..')
+        code = code.replace(/(?<![\w\\])'([\w-]+)'(?!\w)/gu, '‘$1’')
       }
       nodes.push({ type: 'inline_code', code, raw: code })
     }
@@ -759,10 +780,6 @@ function projectTableRow(values, alignments, header, context) {
     ))
     const children = projectInlines(cell, context)
     const tail = children.at(-1)
-    if (context.markstream && !context.final && cell.parsed?.at(-1)?.kind === 'code_preview' && tail?.type === 'inline_code') {
-      // A pending cell span was still plain text when the legacy typographer saw it.
-      tail.code = tail.raw = tail.code.replace(/(?<![\w\\])'([\w-]+)'(?!\w)/gu, '‘$1’')
-    }
     if (context.markstream && tail?.type === 'text' && tail.content.endsWith('`')) {
       const marker = /(?<!\\)(?:\\\\)*(`+)/u.exec(tail.content)
       if (marker?.[1] === '`' && marker.index + marker[0].length === tail.content.length) {

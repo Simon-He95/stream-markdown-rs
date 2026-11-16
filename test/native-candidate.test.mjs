@@ -1037,6 +1037,33 @@ test('an open legacy table code span styles completed quote pairs until code is 
   }
 })
 
+test('legacy draft inline code applies text typography until its actual closer', () => {
+  for (const [body, display] of [
+    ['$...', '$…'],
+    ['What?... Do!...', 'What?.. Do!..'],
+    ["setCustomComponents('chat', mapping)", 'setCustomComponents(‘chat’, mapping)'],
+    ["\\'literal\\' and \\...", "\\'literal\\' and \\..."],
+  ]) {
+    const session = createSession()
+    const prefix = 'Use `' + body
+    try {
+      session.append(prefix)
+      assert.equal(session.snapshot()[0].raw, prefix)
+      assert.deepEqual(session.snapshot()[0].children[1], {
+        type: 'inline_code', code: display, raw: display,
+      })
+      session.append('`')
+      session.finish()
+      const [paragraph] = session.snapshot()
+      assert.equal(paragraph.raw, prefix + '`')
+      assert.deepEqual(paragraph.children[1], { type: 'inline_code', code: body, raw: body })
+    }
+    finally {
+      session.dispose()
+    }
+  }
+})
+
 test('legacy draft code keeps a recognized bare domain outside the provisional code span', () => {
   const session = createSession()
   const denied = createSession({ parseOptions: { validateLink: () => false } })
@@ -1064,6 +1091,28 @@ test('legacy draft code keeps a recognized bare domain outside the provisional c
     session.dispose()
     denied.dispose()
     unknown.dispose()
+  }
+})
+
+test('legacy preview waits for a multiline component attribute before showing the literal tag', () => {
+  const session = createSession()
+  const comparison = createSession()
+  try {
+    const prefix = '<Widget :items="[\n  { text: \'typed\''
+    session.append(prefix)
+    assert.deepEqual(session.snapshot(), [])
+    session.append(' }\n]" />\n')
+    const raw = prefix + ' }\n]" />'
+    assert.deepEqual(session.snapshot(), [
+      { type: 'paragraph', raw, children: [{ type: 'text', content: raw, raw }] },
+    ])
+
+    comparison.append('<Widget :items="[\n  { text: \'a > b\'')
+    assert.equal(comparison.snapshot().length, 1)
+  }
+  finally {
+    session.dispose()
+    comparison.dispose()
   }
 })
 
