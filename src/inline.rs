@@ -553,7 +553,7 @@ fn remap_nodes(nodes: &mut [Inline], joined: &str, parts: &[Fragment], reference
 }
 
 #[inline]
-fn special(byte: u8, gfm: bool) -> bool {
+const fn special(byte: u8, gfm: bool) -> bool {
     matches!(
         byte,
         b'\\' | b'`' | b'*' | b'_' | b'[' | b']' | b'!' | b'&' | b'<' | b'\n' | b'\r' | 0
@@ -606,10 +606,33 @@ fn first_special(bytes: &[u8], gfm: bool) -> Option<usize> {
 }
 
 #[inline]
-fn special_mode<const MATH: bool, const MARKSTREAM: bool>(byte: u8, gfm: bool) -> bool {
+const fn special_mode<const MATH: bool, const MARKSTREAM: bool>(byte: u8, gfm: bool) -> bool {
     special(byte, gfm)
         || MATH && byte == b'$'
         || MARKSTREAM && matches!(byte, b'^' | b'~' | b'=' | b'+')
+}
+
+const fn scalar_markers<const MATH: bool, const MARKSTREAM: bool>(gfm: bool) -> [bool; 256] {
+    let mut table = [false; 256];
+    let mut index = 0;
+    while index < table.len() {
+        table[index] = special_mode::<MATH, MARKSTREAM>(index as u8, gfm);
+        index += 1;
+    }
+    table
+}
+
+#[inline]
+fn scalar_first_special<const MATH: bool, const MARKSTREAM: bool>(
+    bytes: &[u8],
+    gfm: bool,
+) -> Option<usize> {
+    let table = if gfm {
+        &const { scalar_markers::<MATH, MARKSTREAM>(true) }
+    } else {
+        &const { scalar_markers::<MATH, MARKSTREAM>(false) }
+    };
+    bytes.iter().position(|&byte| table[usize::from(byte)])
 }
 
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
@@ -662,9 +685,7 @@ fn first_special_mode<const MATH: bool, const MARKSTREAM: bool>(
             }
         }
     }
-    tail.iter()
-        .position(|&byte| special_mode::<MATH, MARKSTREAM>(byte, gfm))
-        .map(|n| bytes.len() - tail.len() + n)
+    scalar_first_special::<MATH, MARKSTREAM>(tail, gfm).map(|n| bytes.len() - tail.len() + n)
 }
 
 #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
@@ -672,9 +693,7 @@ fn first_special_mode<const MATH: bool, const MARKSTREAM: bool>(
     bytes: &[u8],
     gfm: bool,
 ) -> Option<usize> {
-    bytes
-        .iter()
-        .position(|&byte| special_mode::<MATH, MARKSTREAM>(byte, gfm))
+    scalar_first_special::<MATH, MARKSTREAM>(bytes, gfm)
 }
 
 fn parse_inner(
