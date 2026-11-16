@@ -201,12 +201,20 @@ enum BodyToken {
     Closing { start: usize, checked: usize },
 }
 
+fn same_name<const IGNORE_CASE: bool>(left: &[u8], right: &[u8]) -> bool {
+    if IGNORE_CASE {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        left == right
+    }
+}
+
 impl BodyScanner {
     pub fn new(at: usize) -> Self {
         Self { at, token: None }
     }
 
-    pub fn advance(
+    pub fn advance<const IGNORE_CASE: bool>(
         &mut self,
         source: &str,
         end: usize,
@@ -220,7 +228,11 @@ impl BodyScanner {
                 Some(BodyToken::Opening(mut probe)) => {
                     if let Some(stop) = probe.update(source, end) {
                         if let Some(inner) = opening(source, probe.start, stop) {
-                            if !inner.self_closing && inner.tag.tag_name(source).as_bytes() == name
+                            if !inner.self_closing
+                                && same_name::<IGNORE_CASE>(
+                                    inner.tag.tag_name(source).as_bytes(),
+                                    name,
+                                )
                             {
                                 *depth += 1;
                             }
@@ -267,11 +279,13 @@ impl BodyScanner {
                     };
                     if first == b'/' {
                         let after = &tail[1..];
-                        if after.starts_with(name) {
+                        let common = name.len().min(after.len());
+                        if same_name::<IGNORE_CASE>(&after[..common], &name[..common]) {
+                            if after.len() < name.len() {
+                                return (start, None);
+                            }
                             let checked = start + 2 + name.len();
                             self.token = Some(BodyToken::Closing { start, checked });
-                        } else if name.starts_with(after) {
-                            return (start, None);
                         } else {
                             self.at += 1;
                         }
@@ -293,7 +307,7 @@ impl BodyScanner {
         tag: Tag,
         depth: &mut usize,
     ) -> Option<Span> {
-        let (pending, found) = self.advance(source, end, tag, depth);
+        let (pending, found) = self.advance::<false>(source, end, tag, depth);
         let close = found.or_else(|| close(source, pending, end, tag, depth));
         self.at = next;
         self.token = None;

@@ -329,6 +329,28 @@ struct Html {
     lines: Option<Vec<RawLine>>,
 }
 
+struct HtmlDraft {
+    start: usize,
+    tag: Tag,
+    scanner: tag::BodyScanner,
+    depth: usize,
+}
+
+impl HtmlDraft {
+    fn advance(&mut self, source: &str, end: usize) -> (bool, usize) {
+        if self.depth == 0 {
+            return (true, end);
+        }
+        let (accepted, close) =
+            self.scanner
+                .advance::<true>(source, end, self.tag, &mut self.depth);
+        (
+            close.is_some(),
+            if close.is_some() { end } else { accepted },
+        )
+    }
+}
+
 #[derive(Clone, Copy)]
 enum HtmlEnd {
     Blank,
@@ -485,6 +507,7 @@ pub(crate) struct Engine {
     containers: Vec<Frame>,
     draft: Option<Draft>,
     non_inline_draft: Option<BlockId>,
+    html_draft: Option<Box<HtmlDraft>>,
     partial_list: Option<container::Prefix>,
     preview: Option<BlockId>,
     row_preview_end: usize,
@@ -522,6 +545,7 @@ impl Engine {
             containers: Vec::new(),
             draft: None,
             non_inline_draft: None,
+            html_draft: None,
             partial_list: None,
             preview: None,
             row_preview_end: 0,
@@ -1249,7 +1273,7 @@ impl Engine {
             && let Some(scanner) = &mut element.scanner
         {
             let (through, close) =
-                scanner.advance(source, self.scan, element.tag, &mut element.depth);
+                scanner.advance::<false>(source, self.scan, element.tag, &mut element.depth);
             emit_append(output, element.id, &mut element.body.end, through);
             if let Some(close) = close {
                 let Some(Active::Element(element)) = self.active.take() else {
@@ -1327,45 +1351,65 @@ impl Engine {
     }
 
     fn partial_html(&mut self, source: &str, span: Span, output: &mut Output<'_>) -> bool {
-        if !self.options.markstream || self.active.is_some() || span.end - span.start > 1024 {
+        if !self.options.markstream || self.active.is_some() {
             return false;
         }
-        let head = unindent(&source[Range::from(span)]);
-        if !head.starts_with('<') {
-            return false;
-        }
-        let start = span.end - head.len();
-        let opener = tag::opening(source, start, span.end);
-        let block_rule = html_start(head, false);
-        let void = opener
-            .as_ref()
-            .is_some_and(|open| open.self_closing || is_void_html(open.tag.tag_name(source)));
         let mut content_end = span.end;
-        let status = match block_rule {
-            Some(rule @ (HtmlEnd::Literal(_) | HtmlEnd::AsciiCase(_))) => Some(rule.closes(head)),
-            Some(HtmlEnd::Blank) => opener.as_ref().map(|open| {
-                if void {
-                    return true;
-                }
-                let mut scanner = tag::BodyScanner::new(open.end);
-                let (accepted, closed) = scanner.advance(source, span.end, open.tag, &mut 1);
-                if closed.is_none() {
-                    content_end = accepted;
-                }
-                closed.is_some()
-            }),
-            None if void
-                && opener
-                    .as_ref()
-                    .is_some_and(|open| blank(&source[open.end..span.end])) =>
-            {
-                Some(true)
+        let (start, status) = if let Some(html) = &mut self.html_draft
+            && self.draft.is_some_and(|draft| draft.start == html.start)
+        {
+            let (closed, accepted) = html.advance(source, span.end);
+            content_end = accepted;
+            (html.start, Some(closed))
+        } else {
+            self.html_draft = None;
+            let mut head_end = span.start + (span.end - span.start).min(1024);
+            while !source.is_char_boundary(head_end) {
+                head_end -= 1;
             }
-            _ => None,
+            let head = unindent(&source[span.start..head_end]);
+            let start = head_end - head.len();
+            let opener = tag::opening(source, start, head_end);
+            let rule = html_start(head, false);
+            let void = opener
+                .as_ref()
+                .is_some_and(|open| open.self_closing || is_void_html(open.tag.tag_name(source)));
+            let status = match rule {
+                Some(rule @ (HtmlEnd::Literal(_) | HtmlEnd::AsciiCase(_)))
+                    if head_end == span.end =>
+                {
+                    Some(rule.closes(head))
+                }
+                Some(HtmlEnd::Blank) => opener.as_ref().map(|open| {
+                    if void {
+                        return true;
+                    }
+                    let mut draft = Box::new(HtmlDraft {
+                        start,
+                        tag: open.tag,
+                        scanner: tag::BodyScanner::new(open.end),
+                        depth: 1,
+                    });
+                    let (closed, accepted) = draft.advance(source, span.end);
+                    content_end = accepted;
+                    self.html_draft = Some(draft);
+                    closed
+                }),
+                None if head_end == span.end
+                    && void
+                    && opener
+                        .as_ref()
+                        .is_some_and(|open| blank(&source[open.end..span.end])) =>
+                {
+                    Some(true)
+                }
+                _ => None,
+            };
+            if status.is_none() && (opener.is_none() || head_end != span.end) {
+                return false;
+            }
+            (start, status)
         };
-        if status.is_none() && opener.is_none() {
-            return false;
-        }
         let (id, present) = self
             .draft
             .map_or_else(|| (self.id(), false), |draft| (draft.id, true));
@@ -2742,6 +2786,9 @@ impl Engine {
 
     fn block_id(&mut self, start: usize) -> (BlockId, bool) {
         self.non_inline_draft = None;
+        if self.options.markstream {
+            self.html_draft = None;
+        }
         if let Some(draft) = self.draft.take().filter(|draft| draft.start == start) {
             (draft.id, true)
         } else {

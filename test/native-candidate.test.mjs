@@ -82,6 +82,31 @@ test('native candidate delivers Rust custom tag metadata only after a complete o
   }
 })
 
+test('native candidate keeps a long raw HTML line live while its closer is arriving', () => {
+  const opening = '<DIV class="outer">'
+  const body = '长文本'.repeat(500)
+  for (const chunks of [[opening, body + '</di'], [opening + body + '</di']]) {
+    const session = createSession()
+    try {
+      for (const chunk of chunks)
+        session.append(chunk)
+      const pending = session.snapshot()[0]
+      assert.equal(pending.raw, opening + body + '</di')
+      assert.equal(pending.content, opening + body + '\n</div>')
+      assert.equal(pending.loading, true)
+      session.append('v>')
+      const closed = session.snapshot()[0]
+      assert.equal(closed.raw, opening + body + '</div>')
+      assert.equal(closed.loading, false)
+      session.finish()
+      assert.deepEqual(session.snapshot(), [closed])
+    }
+    finally {
+      session.dispose()
+    }
+  }
+})
+
 test('native candidate exposes complete attributes from a multiline registered opening', () => {
   const session = createSession({ factoryOptions: { customHtmlTags: ['tool-call'] } })
   try {
@@ -648,6 +673,41 @@ test('literal unmatched multi-backticks keep their text and legacy metadata', ()
   }
   finally {
     matched.dispose()
+  }
+})
+
+test('complete unregistered self-closing components keep their literal text boundary', () => {
+  const tag = '<PrereqChips :items="[\n  { text: \'Vue Quick Start\', link: \'/guide/quick-start\' },\n]" />'
+  const legacy = createSession()
+  const standard = createSession({ parseOptions: { markstream: false } })
+  const escaped = createSession()
+  try {
+    for (const session of [legacy, standard]) {
+      session.append('See ' + tag.slice(0, -2))
+      session.append('/> here')
+      session.finish()
+    }
+    assert.deepEqual(legacy.snapshot(), [{
+      type: 'paragraph',
+      raw: 'See ' + tag + ' here',
+      children: [
+        { type: 'text', content: 'See ', raw: 'See ', center: false },
+        { type: 'text', content: tag + ' here', raw: tag + ' here' },
+      ],
+    }])
+    assert.equal(standard.snapshot()[0].children[1].type, 'html_inline')
+
+    escaped.append('\\<PrereqChips />\n\nvalue < tag / >')
+    escaped.finish()
+    assert.deepEqual(escaped.snapshot().map(node => node.children[0]), [
+      { type: 'text', content: '<PrereqChips />', raw: '<PrereqChips />', center: false },
+      { type: 'text', content: 'value < tag / >', raw: 'value < tag / >', center: false },
+    ])
+  }
+  finally {
+    legacy.dispose()
+    standard.dispose()
+    escaped.dispose()
   }
 })
 

@@ -275,6 +275,13 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false) {
     const { kind, span, data } = inlines[index]
     const raw = normalize(context.read(span))
     if (kind === 'text' || kind === 'softbreak') {
+      if (kind === 'text' && context.markstream && Array.isArray(data)
+        && data[0] === span[0] && data[1] === span[1]
+        && raw.startsWith('<') && raw.endsWith('/>') && HTML_START.exec(raw)?.[0] === raw) {
+        // The complete demoted tag starts its own legacy text node.
+        nodes.push(textNode(raw, false))
+        continue
+      }
       const literalCodeMarker = kind === 'text' && context.markstream && raw.includes('``')
         && (/(?<!\\)(?:\\\\)*(`+)/u.exec(raw)?.[1].length ?? 0) > 1
       mergeText(nodes, textNode(kind === 'softbreak' ? '\n' : readText(data, context),
