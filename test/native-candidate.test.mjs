@@ -88,6 +88,24 @@ test('blockquote raw includes the last line already carried by its inline previe
   }
 })
 
+test('list paragraph raw includes a typed continuation outside the item indentation', () => {
+  const session = createSession()
+  const raw = 'Pick `option`\nKeep `content` and `children`'
+  try {
+    session.append('- Pick `option`\r\n')
+    session.append('  Keep `content` and `children`')
+    const child = session.snapshot()[0].items[0].children[0]
+    assert.equal(child.raw, raw)
+    assert.equal(child.children.at(-1).code, 'children')
+    session.append('\r\n')
+    session.finish()
+    assert.equal(session.snapshot()[0].items[0].children[0].raw, raw)
+  }
+  finally {
+    session.dispose()
+  }
+})
+
 test('native candidate delivers Rust custom tag metadata only after a complete opener', () => {
   const session = createSession({ factoryOptions: { customHtmlTags: ['tool-call'], markstream: false } })
   try {
@@ -615,6 +633,26 @@ test('open root details keep the current fenced line in legacy raw and editor ou
     assert.equal(Buffer.from(data, 'base64').toString(), 'let 名称 = 1')
     session.append('\n```\n\n</details>\n')
     assert.equal(session.snapshot()[0].loading, false)
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('open details expose the quoted draft while rendering an unclosed code marker literally', () => {
+  const session = createSession({ id: 'details-quote' })
+  try {
+    const prefix = '<details>\n<summary>Example</summary>\n\n'
+    session.append(prefix)
+    session.append('> Warning: `code')
+    const [draft] = session.snapshot()
+    assert.equal(draft.raw, prefix + '> Warning: `code')
+    const [quote] = draft.children.slice(-1)
+    assert.equal(quote.type, 'blockquote')
+    assert.equal(quote.children[0].children.at(-1).type, 'inline_code')
+    assert.match(draft.content, /<blockquote>\n<p>Warning: `code<\/p>/u)
+    session.append('`')
+    assert.match(session.snapshot()[0].content, /<blockquote>\n<p>Warning: <code>code<\/code><\/p>/u)
   }
   finally {
     session.dispose()
@@ -1192,6 +1230,26 @@ test('legacy draft inline code applies text typography until its actual closer',
     finally {
       session.dispose()
     }
+  }
+})
+
+test('a source-backed pending strong span preserves the legacy preceding text shape', () => {
+  const session = createSession()
+  try {
+    session.append('- 每个稳定版都是一次 **Markstream Family Re')
+    let paragraph = session.snapshot()[0].items[0].children[0]
+    assert.equal(paragraph.raw, '每个稳定版都是一次 **Markstream Family Re')
+    assert.deepEqual(paragraph.children[0], {
+      type: 'text', content: '每个稳定版都是一次 ', raw: '每个稳定版都是一次 ',
+    })
+    assert.equal(paragraph.children[1].type, 'strong')
+    session.append('**')
+    paragraph = session.snapshot()[0].items[0].children[0]
+    assert.equal(paragraph.children[0].center, false)
+    assert.equal(paragraph.children[1].type, 'strong')
+  }
+  finally {
+    session.dispose()
   }
 })
 
@@ -2126,6 +2184,38 @@ test('a line-leading HTML anchor waits for its withheld image child in the legac
   finally {
     session.dispose()
     inline.dispose()
+  }
+})
+
+test('standalone nested-image preview requires real alt text and has no URL until confirmed', () => {
+  const session = createSession()
+  try {
+    session.append('[![')
+    assert.equal(session.snapshot()[0].children[0].type, 'text')
+    session.append(' ')
+    assert.equal(session.snapshot()[0].children[0].type, 'text')
+  }
+  finally {
+    session.dispose()
+  }
+  const withAlt = createSession()
+  try {
+    withAlt.append('[![在')
+    assert.deepEqual(withAlt.snapshot(), [{
+      type: 'paragraph', raw: '[![在',
+      children: [{
+        type: 'link', href: '', title: null, text: '在', raw: '[在]()', loading: true, markup: '',
+        children: [{ type: 'image', src: '', alt: '在', title: null, raw: '![在', loading: true }],
+      }],
+    }])
+    withAlt.append('线](https://example.org/image.png)](/docs)')
+    const [link] = withAlt.snapshot()[0].children
+    assert.equal(link.loading, false)
+    assert.equal(link.href, '/docs')
+    assert.equal(link.children[0].src, 'https://example.org/image.png')
+  }
+  finally {
+    withAlt.dispose()
   }
 })
 

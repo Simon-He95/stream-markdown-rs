@@ -8,7 +8,9 @@ const VOID = new Set('area base br col embed hr img input link meta param source
 const HTML_START = /^<([A-Z][\w:.-]*)(\s(?:[^"'<>]|"[^"]*"|'[^']*')*)?\s*\/?>/i
 const HTML_ATTRIBUTE = /([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g
 const MARKDOWN_FILENAME = /(^|[\s([,"'“‘])([A-Z0-9](?:[A-Z0-9-]*[A-Z0-9])?)\.[mM][dD](?=$|[\s)\],;"'”’]|[.!?:](?:\s|$))/gu
+const PENDING_BADGE_ALT = /^\[!\[([^\[\]\\<>*&`\r\n]*)(?:\])?$/u
 const legacyLinkify = new LinkifyIt({ fuzzyLink: true })
+const draftCodeSource = new WeakMap()
 
 export function projectBlocks(nodes, roots, context) {
   const blocks = projectChildren(nodes, roots, context)
@@ -309,7 +311,7 @@ function pendingBadgeLink(image) {
   }
 }
 
-function projectDraftBadge(children, source, context, withheldHtml) {
+function projectDraftBadge(children, source, context, withheldHtml, standalone) {
   const tail = children.at(-1)
   if (withheldHtml && tail?.type === 'link' && tail.markup === 'html' && !tail.loading
     && tail.children.some(child => child.type === 'html_inline' && child.tag === 'img')) {
@@ -329,15 +331,22 @@ function projectDraftBadge(children, source, context, withheldHtml) {
     }
   }
   const lineStart = source.lastIndexOf('\n')
-  if (lineStart < 0)
+  if (lineStart < 0) {
+    if (standalone && children.length === 1 && tail?.type === 'text'
+      && tail.content === source && tail.raw === source) {
+      const alt = PENDING_BADGE_ALT.exec(source)?.[1]
+      if (alt && /[\p{L}\p{N}]/u.test(alt))
+        children[0] = pendingBadgeLink({ type: 'image', src: '', alt, title: null, raw: source.slice(1), loading: true })
+    }
     return
+  }
   const line = source.slice(lineStart + 1).replace(/^ {0,3}/u, '')
   const previous = children.at(-2)
   const hasBadge = node => node?.type === 'link' && !node.loading && node.children.some(child => child.type === 'image')
   if (tail?.type !== 'text' || tail.raw !== tail.content)
     return
   if (hasBadge(previous) && tail.raw === `\n${line}`) {
-    const alt = /^\[!\[([^\[\]\\<>*&`\r\n]*)(?:\])?$/u.exec(line)
+    const alt = PENDING_BADGE_ALT.exec(line)
     if (alt) {
       tail.content = tail.raw = '\n'
       children.push(pendingBadgeLink({ type: 'image', src: '', alt: alt[1], title: null, raw: line.slice(1), loading: true }))
@@ -766,11 +775,23 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false, insideL
           code = code.replace(/\.{2,}/gu, '…').replace(/([?!])…/gu, '$1..')
         code = code.replace(/(?<![\w\\])'([\w-]+)'(?!\w)/gu, '‘$1’')
       }
-      nodes.push({ type: 'inline_code', code, raw: code })
+      const node = { type: 'inline_code', code, raw: code }
+      if (draft)
+        draftCodeSource.set(node, raw)
+      nodes.push(node)
     }
     else if (kind === 'emphasis' || kind === 'strong' || kind === 'strikethrough') {
       const children = projectInlineNodes(data, context, false, insideLinkLabel)
       const marker = kind === 'emphasis' ? '*' : kind === 'strong' ? '**' : '~~'
+      if (kind === 'strong' && context.markstream && !context.final && !insideLinkLabel && raw.startsWith('**')
+        && data.length === 1 && data[0].kind === 'text'
+        && data[0].span[0] === span[0] + 2 && data[0].span[1] === span[1]) {
+        const before = inlines[index - 1]
+        const previous = nodes.at(-1)
+        if (before?.kind === 'text' && before.span[1] === span[0] && previous?.type === 'text'
+          && previous.raw === previous.content && previous.content === readText(before.data, context))
+          delete previous.center
+      }
       nodes.push({ type: kind, children, raw: context.markstream ? marker + legacyDelimitedText(children) + marker : raw })
     }
     else if (kind === 'subscript' || kind === 'superscript') {
@@ -1172,8 +1193,10 @@ function renderDetailChild(node, inlineParagraph = false) {
   switch (node.type) {
     case 'text':
       return escapeHtml(node.content, false)
-    case 'inline_code':
-      return '<code>' + escapeHtml(node.code, false) + '</code>'
+    case 'inline_code': {
+      const source = draftCodeSource.get(node)
+      return source === undefined ? '<code>' + escapeHtml(node.code, false) + '</code>' : escapeHtml(source, false)
+    }
     case 'strong':
       return '<strong>' + children() + '</strong>'
     case 'emphasis':
@@ -1369,14 +1392,15 @@ function projectBlock(block, nodes, context) {
       let withheldHtml
       const parsed = block.previewInlines?.parsed
       const last = parsed?.at(-1)
-      const committedEnd = rawContent.fragments?.at(-1)?.[1]
+      const committedEnd = rawContent.fragments?.at(-1)?.[1] ?? rawContent.plain?.[1]
+      const parentKind = nodes.get(block.parent)?.kind
       if (context.markstream && open && last && last.span[1] > span[1]
-        && committedEnd !== undefined && nodes.get(block.parent)?.kind === 'blockquote') {
+        && committedEnd !== undefined && (parentKind === 'blockquote' || parentKind === 'list_item')) {
         const breakIndex = parsed.findIndex(node => node.kind === 'softbreak' && node.span[0] === committedEnd)
         const first = breakIndex < 0 ? undefined : parsed[breakIndex + 1]
         if (first && first.span[0] >= parsed[breakIndex].span[1]
           && lineAt(context.lineStarts, first.span[0]) === lineAt(context.lineStarts, last.span[1] - 1)) {
-          // A typed break and the next inline span delimit the source outside the quote prefix.
+          // Keep the typed continuation source outside its container prefix.
           projectedRaw += readText(parsed[breakIndex].span, context)
             + readText([first.span[0], last.span[1]], context)
         }
@@ -1402,7 +1426,9 @@ function projectBlock(block, nodes, context) {
           const badgeTail = withheldHtml ?? (block.parent === null && span[1] < context.length
             ? context.read([span[1], context.length])
             : undefined)
-          projectedRaw += projectDraftBadge(children, projectedRaw, context, badgeTail) ?? ''
+          projectedRaw += projectDraftBadge(
+            children, projectedRaw, context, badgeTail, block.parent === null && data.plain !== undefined && !parsed,
+          ) ?? ''
         }
       }
       const imageLink = context.markstream && context.final && inlines.parsed
