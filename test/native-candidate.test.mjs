@@ -1063,3 +1063,29 @@ test('confirmed HTML image under an anchor preserves raw markup and the parent l
     ordinary.dispose()
   }
 })
+
+test('a line-leading HTML anchor waits for its withheld image child in the legacy view', () => {
+  const opening = '<a href="/docs" target="_blank">'
+  const session = createSession()
+  const inline = createSession()
+  try {
+    session.append(opening + '<img src="/badge')
+    assert.deepEqual(session.snapshot(), [{ type: 'paragraph', children: [], raw: opening }])
+    const suffix = '.svg" /></a>'
+    session.append(suffix)
+    session.finish()
+    const [paragraph] = session.snapshot()
+    assert.equal(paragraph.raw, opening + '<img src="/badge' + suffix)
+    assert.equal(paragraph.children[0].href, '/docs')
+    assert.equal(paragraph.children[0].loading, false)
+    assert.equal(paragraph.children[0].children[0].raw, '<img src="/badge.svg" />')
+
+    inline.append('Badge ' + opening + '<img src="/badge')
+    assert.equal(inline.snapshot()[0].children[0].content, 'Badge ')
+    assert.equal(inline.snapshot()[0].children[1].tag, 'a')
+  }
+  finally {
+    session.dispose()
+    inline.dispose()
+  }
+})

@@ -739,10 +739,18 @@ function projectBlock(block, nodes, context) {
       }
       const rawContent = block.rawFragments ? { fragments: block.rawFragments } : data
       let projectedRaw = inlineRaw(rawContent, raw.trim(), context, span[1])
-      const last = block.previewInlines?.parsed.at(-1)
-      if (context.markstream && open && last && last.span[1] < span[1]
-        && context.read([last.span[1], span[1]]).trimStart().startsWith('<')) {
-        projectedRaw = normalize(context.read([data.plain?.[0] ?? span[0], last.span[1]]))
+      const parsed = block.previewInlines?.parsed
+      const last = parsed?.at(-1)
+      if (context.markstream && open && last && last.span[1] < span[1]) {
+        const tail = context.read([last.span[1], span[1]])
+        if (tail.trimStart().startsWith('<'))
+          projectedRaw = normalize(context.read([data.plain?.[0] ?? span[0], last.span[1]]))
+        if (!context.final && parsed.length === 1 && last.kind === 'html'
+          && /^<img(?:[\s/]|$)/i.test(tail)) {
+          const anchor = htmlHeader(projectedRaw)
+          if (anchor?.tag === 'a' && !anchor.closed)
+            return { type: kind, children: [], raw: projectedRaw, ...map }
+        }
       }
       return { type: kind, children: projectInlines(block.previewInlines ?? data, context), raw: projectedRaw, ...map }
     }
