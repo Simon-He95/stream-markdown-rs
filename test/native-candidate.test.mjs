@@ -1973,6 +1973,31 @@ test('a multiline legacy anchor holds an unfinished nested tag without altering 
   }
 })
 
+test('legacy preview preserves a directly observed pre and code opening pair together', () => {
+  const session = createSession()
+  const closing = createSession()
+  try {
+    const source = 'Render <pre><code> text and ([link](/docs))'
+    session.append('* ' + source + '\n* Next')
+    const paragraph = session.snapshot()[0].items[0].children[0]
+    const pre = paragraph.children[1]
+    assert.equal(paragraph.raw, source)
+    assert.equal(pre.content, '<pre><code> text and ([link](/docs))</pre>')
+    assert.equal(pre.loading, true)
+    assert.equal(pre.children[0].content, '<code> text and ([link](/docs))</code>')
+    assert.equal(pre.children[0].children[1].href, '/docs')
+
+    closing.append('Render <pre><code> text')
+    assert.equal(closing.snapshot()[0].children[1].autoClosed, true)
+    closing.append('</code></pre>')
+    assert.equal(closing.snapshot()[0].children[1].autoClosed, false)
+  }
+  finally {
+    session.dispose()
+    closing.dispose()
+  }
+})
+
 test('a line-leading HTML anchor waits for its withheld image child in the legacy view', () => {
   const opening = '<a href="/docs" target="_blank">'
   const session = createSession()

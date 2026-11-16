@@ -545,6 +545,31 @@ function escapedBacktickPair(inlines, index, context) {
   }
 }
 
+function draftPreCode(inlines, index, context) {
+  const start = inlines[index]
+  const code = inlines[index + 1]
+  if (code?.kind !== 'html' || code.span[0] !== start.span[1]
+    || context.read(start.span).toLowerCase() !== '<pre>' || context.read(code.span).toLowerCase() !== '<code>'
+    || !inlines[index + 2])
+    return
+  let end = code.span[1]
+  for (const node of inlines.slice(index + 2)) {
+    if (node.span[0] !== end || /[\r\n]/u.test(context.read(node.span)))
+      return
+    if (node.kind === 'text') {
+      if (readText(node.data, context) !== context.read(node.span))
+        return
+    }
+    else if (node.kind !== 'link' || node.data.loading
+      || context.read([node.span[0] - 1, node.span[0]]) !== '('
+      || context.read([node.span[1], node.span[1] + 1]) !== ')') {
+      return
+    }
+    end = node.span[1]
+  }
+  return code.span[0]
+}
+
 function projectInlineNodes(inlines, context, insideLoadingLink = false, insideLinkLabel = false) {
   const nodes = []
   let filenameIndex = -1
@@ -812,8 +837,12 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false, insideL
         }
       }
       const tag = header?.tag
-      const autoClosed = context.markstream && context.final && end === index && !header?.closed
+      const pairedCode = context.markstream && !context.final && tag === 'pre' && end === index
+        ? draftPreCode(inlines, index, context)
+        : undefined
+      const autoClosed = context.markstream && end === index && !header?.closed
         && (tag === 'pre' || tag === 'code')
+        && (context.final || pairedCode !== undefined || context.pairedCodeStart === span[0])
       const href = header && attrValue(header.attrs, 'href')
       const previous = inlines[index - 1]
       const image = inlines[index + 1]
@@ -827,7 +856,7 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false, insideL
       const last = includeTail ? inlines.length - 1 : end
       let children = projectInlineNodes(
         inlines.slice(index + 1, includeTail ? inlines.length : end),
-        context,
+        pairedCode === undefined ? context : { ...context, pairedCodeStart: pairedCode },
         false,
         insideLinkLabel || tag === 'a',
       )
