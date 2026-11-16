@@ -381,6 +381,27 @@ fn markstream_pipe_after_a_delimited_header_only_publishes_a_loading_hint() {
 }
 
 #[test]
+fn large_root_fence_append_reuses_the_partial_line_and_counts_each_byte_once() {
+    let options = Options::default();
+    let mut parser = Parser::new(options.clone());
+    let mut changes = Vec::new();
+    let mut view = View::default();
+    let suffix = format!("{}\r\n```\r\n\r\nTail", " body with ` literal".repeat(300));
+    for chunk in ["```rust\r\n`prefix", &suffix] {
+        parser.append(chunk, &mut changes).unwrap();
+        view.apply(&mut changes);
+    }
+    parser.finish(&mut changes).unwrap();
+    view.apply(&mut changes);
+    let source = parser.source_text();
+    assert_eq!(parser.metrics().scanned_bytes, source.len());
+    assert_eq!(
+        view.blocks.into_values().collect::<Vec<_>>(),
+        parse(source, &options).unwrap().nodes
+    );
+}
+
+#[test]
 fn finish_closes_fences_once_and_preserves_the_body() {
     let mut parser = Parser::new(Options::default());
     let mut changes = Vec::new();

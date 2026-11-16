@@ -625,6 +625,16 @@ impl Engine {
             self.resume_html_line_ending(source, final_input, &mut output);
         }
         let bytes = source.as_bytes();
+        // Short appends use the generic line loop to avoid extra dispatch work.
+        let direct_fence_lines = source.len() - self.scan >= 4096
+            && !self.batch
+            && self.options.preview == Preview::Off
+            && !self.options.markstream
+            && !self.options.math
+            && !self.options.footnotes
+            && !self.options.require_closing_strong
+            && self.options.custom_tags.is_empty()
+            && self.plugins.is_empty();
         while self.scan < source.len() {
             if self.batch
                 && self.containers.is_empty()
@@ -677,7 +687,20 @@ impl Engine {
                 self.scan = next;
                 continue;
             }
-            self.container_line(source, Line::new(self.line_start, end, next), &mut output)?;
+            let line = Line::new(self.line_start, end, next);
+            if direct_fence_lines
+                && matches!(self.active, Some(Active::Fence(Fence { lines: None, .. })))
+                && self.containers.is_empty()
+                && self.partial_container.is_none()
+            {
+                let Some(Active::Fence(fence)) = self.active.take() else {
+                    unreachable!()
+                };
+                let raw = &source[line.start..line.end];
+                self.fence_line(line, raw, unindent(raw), fence, &mut output);
+            } else {
+                self.container_line(source, line, &mut output)?;
+            }
             self.line_start = next;
             self.scan = next;
         }
@@ -2354,34 +2377,8 @@ impl Engine {
             Some(Active::Math(math)) => {
                 return self.display_line(source, line, line.start, math, output);
             }
-            Some(Active::Fence(mut fence)) => {
-                if closing_fence(head, fence.marker, fence.count) {
-                    self.close_code(fence, line.next, BlockStatus::Closed, output);
-                } else {
-                    if let Some(lines) = &mut fence.lines {
-                        let mut body = line;
-                        body.advance(container::whitespace(
-                            raw.as_bytes(),
-                            line.column,
-                            line.padding,
-                            fence.indent,
-                        ));
-                        let body = body.raw();
-                        fence.body.end = line.next;
-                        if self.batch {
-                            lines.push(body);
-                        } else {
-                            output.update(Change::AddRawLine {
-                                id: fence.id,
-                                line: body,
-                                end: line.next,
-                            });
-                        }
-                    } else {
-                        emit_append(output, fence.id, &mut fence.body.end, line.next);
-                    }
-                    self.active = Some(Active::Fence(fence));
-                }
+            Some(Active::Fence(fence)) => {
+                self.fence_line(line, raw, head, fence, output);
                 return Ok(());
             }
             Some(Active::Element(mut element)) => {
@@ -3218,6 +3215,44 @@ impl Engine {
             false,
             self.parent(),
         );
+    }
+
+    #[inline]
+    fn fence_line(
+        &mut self,
+        line: Line,
+        raw: &str,
+        head: &str,
+        mut fence: Fence,
+        output: &mut Output<'_>,
+    ) {
+        if closing_fence(head, fence.marker, fence.count) {
+            self.close_code(fence, line.next, BlockStatus::Closed, output);
+        } else {
+            if let Some(lines) = &mut fence.lines {
+                let mut body = line;
+                body.advance(container::whitespace(
+                    raw.as_bytes(),
+                    line.column,
+                    line.padding,
+                    fence.indent,
+                ));
+                let body = body.raw();
+                fence.body.end = line.next;
+                if self.batch {
+                    lines.push(body);
+                } else {
+                    output.update(Change::AddRawLine {
+                        id: fence.id,
+                        line: body,
+                        end: line.next,
+                    });
+                }
+            } else {
+                emit_append(output, fence.id, &mut fence.body.end, line.next);
+            }
+            self.active = Some(Active::Fence(fence));
+        }
     }
 
     fn close_code(&self, fence: Fence, end: usize, status: BlockStatus, output: &mut Output<'_>) {
