@@ -703,7 +703,8 @@ function projectBlock(block, nodes, context) {
         const previewMap = sourceMap([span[0], context.length], context)
         return projectTable(preview.data, preview.loading, previewMap, context)
       }
-      let projectedRaw = inlineRaw(data, raw.trim(), context, span[1])
+      const rawContent = block.rawFragments ? { fragments: block.rawFragments } : data
+      let projectedRaw = inlineRaw(rawContent, raw.trim(), context, span[1])
       const last = block.previewInlines?.parsed.at(-1)
       if (context.markstream && open && last && last.span[1] < span[1]
         && context.read([last.span[1], span[1]]).trimStart().startsWith('<')) {

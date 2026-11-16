@@ -169,6 +169,13 @@ function applyChange(nodes, roots, change) {
   const block = nodes.get(change.block?.id ?? change.id)
   switch (change.op) {
     case 'replace':
+      if (change.block.kind === 'paragraph' && change.block.data.parsed) {
+        if (block.data.fragments)
+          block.rawFragments = block.data.fragments
+      }
+      else {
+        delete block.rawFragments
+      }
       Object.assign(block, change.block)
       delete block.previewInlines
       delete block.preview

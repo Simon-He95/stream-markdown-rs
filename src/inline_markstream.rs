@@ -199,7 +199,11 @@ pub(super) fn script_pair(source: &str, start: usize, end: usize) -> Option<(usi
 }
 
 enum Part<'a> {
-    Text(&'a mut Text, bool),
+    Text {
+        text: &'a mut Text,
+        escaped_first: bool,
+        ellipsis: bool,
+    },
     Opaque(&'a Text),
     Raw(Span),
     Break,
@@ -209,7 +213,7 @@ enum Part<'a> {
 impl Part<'_> {
     fn as_str<'a>(&'a self, source: &'a str) -> &'a str {
         match self {
-            Self::Text(text, _) => text.as_str(source),
+            Self::Text { text, .. } => text.as_str(source),
             Self::Opaque(text) => text.as_str(source),
             Self::Raw(span) => &source[span.start..span.end],
             Self::Break => " ",
@@ -219,8 +223,10 @@ impl Part<'_> {
 }
 
 fn collect_parts<'a>(
+    source: &str,
     nodes: &'a mut [super::Inline],
     level: usize,
+    ellipsis: bool,
     parts: &mut Vec<(usize, Part<'a>)>,
 ) {
     use super::InlineKind;
@@ -229,11 +235,15 @@ fn collect_parts<'a>(
         let part = match &mut node.kind {
             InlineKind::Text(text @ Text::Decoded(_)) => Part::Opaque(text),
             InlineKind::Text(text) => {
-                let Text::Source(source) = text else {
+                let Text::Source(span) = text else {
                     unreachable!()
                 };
-                let escaped_first = source.start != node.span.start;
-                Part::Text(text, escaped_first)
+                let escaped_first = span.start != node.span.start;
+                Part::Text {
+                    text,
+                    escaped_first,
+                    ellipsis,
+                }
             }
             InlineKind::Code(text)
             | InlineKind::CodePreview(text)
@@ -246,11 +256,19 @@ fn collect_parts<'a>(
             | InlineKind::Strikethrough(children)
             | InlineKind::Highlight(children)
             | InlineKind::Insert(children) => {
-                collect_parts(children, level + 1, parts);
+                collect_parts(source, children, level + 1, ellipsis, parts);
                 Part::Boundary
             }
             InlineKind::Link(link) | InlineKind::LinkPreview(link) => {
-                collect_parts(&mut link.children, level + 1, parts);
+                let autolink = matches!(&link.children[..], [child]
+                    if child.span == node.span || source.as_bytes()[node.span.start] == b'<');
+                collect_parts(
+                    source,
+                    &mut link.children,
+                    level + 1,
+                    ellipsis && !autolink,
+                    parts,
+                );
                 Part::Boundary
             }
             _ => Part::Raw(node.span),
@@ -259,13 +277,59 @@ fn collect_parts<'a>(
     }
 }
 
-pub(super) fn needs_quotes(text: &str) -> bool {
-    memchr::memchr2(b'\'', b'"', text.as_bytes()).is_some()
+pub(super) fn typography(source: &str, input: Span, nodes: &mut [super::Inline]) {
+    let raw = &source[input.start..input.end];
+    let ellipsis = memchr::memmem::find(raw.as_bytes(), b"..").is_some();
+    let quotes = memchr::memchr2(b'\'', b'"', raw.as_bytes()).is_some();
+    if !ellipsis && !quotes {
+        return;
+    }
+    let mut parts = Vec::new();
+    collect_parts(source, nodes, 0, ellipsis, &mut parts);
+    if ellipsis {
+        for (_, part) in &mut parts {
+            if let Part::Text {
+                text,
+                escaped_first,
+                ellipsis: true,
+            } = part
+                && let Some(rewritten) = replace_ellipsis(text.as_str(source), *escaped_first)
+            {
+                **text = Text::Decoded(rewritten.into_boxed_str());
+            }
+        }
+    }
+    if quotes {
+        smart_quotes(source, parts);
+    }
 }
 
-pub(super) fn smart_quotes(source: &str, nodes: &mut [super::Inline]) {
-    let mut parts = Vec::new();
-    collect_parts(nodes, 0, &mut parts);
+fn replace_ellipsis(original: &str, escaped_first: bool) -> Option<String> {
+    let start = usize::from(escaped_first);
+    let bytes = original.as_bytes();
+    memchr::memmem::find(&bytes[start..], b"..")?;
+    let mut rewritten = String::with_capacity(original.len() + 1);
+    let mut cursor = 0;
+    for pos in memchr::memchr_iter(b'.', &bytes[start..]).map(|pos| pos + start) {
+        if pos < cursor || bytes.get(pos + 1) != Some(&b'.') {
+            continue;
+        }
+        rewritten.push_str(&original[cursor..pos]);
+        rewritten.push_str(if pos > start && matches!(bytes[pos - 1], b'?' | b'!') {
+            ".."
+        } else {
+            "…"
+        });
+        cursor = pos + 2;
+        while bytes.get(cursor) == Some(&b'.') {
+            cursor += 1;
+        }
+    }
+    rewritten.push_str(&original[cursor..]);
+    Some(rewritten)
+}
+
+fn smart_quotes(source: &str, parts: Vec<(usize, Part<'_>)>) {
     let mut stack: Vec<(usize, usize, usize, bool)> = Vec::new();
     let mut edits = Vec::new();
 
@@ -276,7 +340,12 @@ pub(super) fn smart_quotes(source: &str, nodes: &mut [super::Inline]) {
         {
             stack.pop();
         }
-        let Part::Text(text, escaped_first) = part else {
+        let Part::Text {
+            text,
+            escaped_first,
+            ..
+        } = part
+        else {
             continue;
         };
         let text = text.as_str(source);
@@ -341,7 +410,7 @@ pub(super) fn smart_quotes(source: &str, nodes: &mut [super::Inline]) {
         if !edits.peek().is_some_and(|&(part, ..)| part == i) {
             continue;
         }
-        let Part::Text(text, _) = part else {
+        let Part::Text { text, .. } = part else {
             unreachable!()
         };
         let original = text.as_str(source);

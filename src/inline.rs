@@ -486,7 +486,7 @@ pub(crate) fn needs_markup(text: &str, syntax: Syntax) -> bool {
 
 pub(crate) fn needs_markstream_markup(text: &str) -> bool {
     memchr::memchr2(b'^', b'~', text.as_bytes()).is_some()
-        || ["==", "++", "\"", "'"]
+        || ["==", "++", "\"", "'", ".."]
             .iter()
             .any(|needle| text.contains(needle))
         || text
@@ -632,8 +632,8 @@ fn parse_inner(
     if options.markstream && preview {
         markstream::strip_preview_tail(source, &mut nodes, options.math);
     }
-    if options.markstream && markstream::needs_quotes(content(source, input)) {
-        markstream::smart_quotes(source, &mut nodes);
+    if options.markstream {
+        markstream::typography(source, input, &mut nodes);
     }
     if options.markstream && content(source, input).as_bytes().contains(&b'<') {
         markstream::normalize_html(source, &mut nodes, &options.custom_tags);
@@ -2864,6 +2864,103 @@ mod tests {
         assert!(
             matches!(&parsed[2].kind, InlineKind::Text(text) if text.as_str(source) == " after”")
         );
+    }
+
+    #[test]
+    fn markstream_ellipsis_changes_display_text_and_preserves_raw_spans() {
+        let options = Options {
+            markstream: true,
+            ..Options::default()
+        };
+        let refs = References::default();
+        for (source, expected) in [
+            ("If you want to...", "If you want to…"),
+            ("如果你现在想做的是...", "如果你现在想做的是…"),
+            ("\"Wait...\"", "“Wait…”"),
+            (
+                "A..B ...! Wait?... Woah!... !…",
+                "A…B …! Wait?.. Woah!.. !…",
+            ),
+        ] {
+            let input = span(0, source.len());
+            let InlineContent::Parsed(finalized) =
+                parse_content(source, input, &options, &refs, None)
+            else {
+                panic!("expected parsed ellipsis: {source}");
+            };
+            for nodes in [finalized, parse_preview(source, input, &options, &refs)] {
+                assert_eq!(
+                    nodes,
+                    [Inline {
+                        span: input,
+                        kind: InlineKind::Text(Text::Decoded(expected.into())),
+                    }],
+                    "{source}"
+                );
+            }
+            for syntax in [Syntax::CommonMark, Syntax::Gfm] {
+                let options = Options {
+                    syntax,
+                    ..Options::default()
+                };
+                assert_eq!(
+                    parse(source, input, &options, &refs),
+                    [original(0, source.len())],
+                    "{source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn markstream_ellipsis_preserves_code_urls_and_escaped_dots() {
+        let options = Options {
+            syntax: Syntax::Gfm,
+            markstream: true,
+            ..Options::default()
+        };
+        let refs = References::default();
+        let source = "`code...` [label...](https://example.com/a...b) https://example.com/a...b <https://example.com/x...z> ![alt...](/x...)";
+        let nodes = parse(source, span(0, source.len()), &options, &refs);
+        assert!(
+            matches!(&nodes[0].kind, InlineKind::Code(text) if text.as_str(source) == "code...")
+        );
+        for (index, raw, display, destination) in [
+            (2, "label...", "label…", "https://example.com/a...b"),
+            (
+                4,
+                "https://example.com/a...b",
+                "https://example.com/a...b",
+                "https://example.com/a...b",
+            ),
+            (
+                6,
+                "https://example.com/x...z",
+                "https://example.com/x...z",
+                "https://example.com/x...z",
+            ),
+            (8, "alt...", "alt...", "/x..."),
+        ] {
+            let (InlineKind::Link(link) | InlineKind::Image(link)) = &nodes[index].kind else {
+                panic!("expected link or image: {nodes:?}");
+            };
+            assert_eq!(link.destination.as_str(source), destination);
+            assert_eq!(content(source, link.children[0].span), raw);
+            assert!(
+                matches!(&link.children[0].kind, InlineKind::Text(text) if text.as_str(source) == display)
+            );
+        }
+
+        let source = r"x \... y \.. z &period;&period; end";
+        let nodes = parse(source, span(0, source.len()), &options, &refs);
+        let display: String = nodes
+            .iter()
+            .map(|node| match &node.kind {
+                InlineKind::Text(text) => text.as_str(source),
+                _ => panic!("expected text"),
+            })
+            .collect();
+        assert_eq!(display, "x .… y .. z .. end");
     }
 
     #[test]

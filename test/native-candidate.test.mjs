@@ -47,6 +47,25 @@ test('native candidate applies reference backpatch and nested fence deltas', () 
   }
 })
 
+test('nested paragraph raw keeps line fragments after close and reference backpatch', () => {
+  const session = createSession({ parseOptions: { includeSourceMap: true } })
+  try {
+    session.append('> 中文 [jump][id]\r\n> second line\r\n\r\n')
+    const raw = '中文 [jump][id]\nsecond line'
+    assert.equal(session.snapshot()[0].children[0].raw, raw)
+    session.append('[id]: /docs\n\n')
+    session.finish()
+    const quote = session.snapshot()[0]
+    assert.equal(quote.raw, raw)
+    assert.equal(quote.children[0].raw, raw)
+    assert.deepEqual(quote.children[0].sourceMap, { startLine: 0, endLine: 2 })
+    assert.equal(quote.children[0].children.find(node => node.type === 'link').href, '/docs')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
 test('native candidate delivers Rust custom tag metadata only after a complete opener', () => {
   const session = createSession({ factoryOptions: { customHtmlTags: ['tool-call'], markstream: false } })
   try {
