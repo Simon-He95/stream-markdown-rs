@@ -201,8 +201,11 @@ fn apply_changes(blocks: &mut StreamView, changes: &mut Vec<Change>) -> Result<(
             }
             Change::AddTextFragment { id, span } => {
                 let block = existing_block(blocks, id)?;
-                let BlockData::Paragraph(content) = &mut block.data else {
-                    return Err(format!("added a text fragment to non-text block {id:?}"));
+                let content = match &mut block.data {
+                    BlockData::Paragraph(content)
+                    | BlockData::Footnote { content, .. }
+                    | BlockData::Summary { content, .. } => content,
+                    _ => return Err(format!("added a text fragment to non-text block {id:?}")),
                 };
                 match content {
                     InlineContent::Plain(first) => {
@@ -711,6 +714,29 @@ fn unescape_punctuation(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streamed_footnote_fragments_reconstruct_the_full_body() {
+        let source = "[^note]: First.\n    Second [label][ref].\n\n[ref]: /destination\n";
+        let options = Options {
+            footnotes: true,
+            preview: Preview::Ai,
+            ..Options::default()
+        };
+        let document = parse(source, &options).unwrap();
+        let expected = document
+            .nodes
+            .iter()
+            .find(|block| block.footnote_label().is_some())
+            .unwrap();
+        let streamed = stream_view(source, options).unwrap();
+        let note = streamed
+            .values()
+            .map(|(_, block)| block)
+            .find(|block| block.footnote_label().is_some())
+            .unwrap();
+        assert_eq!(note, expected);
+    }
 
     #[test]
     fn corpus_stream_matches_full_nodes_at_varied_chunk_boundaries() {

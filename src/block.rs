@@ -1203,10 +1203,15 @@ impl Engine {
         output: &mut Output<'_>,
     ) -> Result<bool, ParseError> {
         loop {
-            if self.running.is_some()
-                || !self.containers.is_empty()
-                || !matches!(self.active, None | Some(Active::Paragraph(_)))
+            if self.running.is_some() || !self.containers.is_empty() {
+                return Ok(false);
+            }
+            if matches!(self.active, Some(Active::Footnote(_)))
+                && self.registered_tag_probe(source, next).is_some()
             {
+                self.stop_leaf(source, output)?;
+            }
+            if !matches!(self.active, None | Some(Active::Paragraph(_))) {
                 return Ok(false);
             }
             let probe = if self.tag_probe.as_ref().is_some_and(|probe| probe.buffered) {
@@ -1948,6 +1953,14 @@ impl Engine {
             {
                 *tight = false;
             }
+        } else if self.running.is_none() && matches!(self.active, Some(Active::Footnote(_))) {
+            let Some(Active::Footnote(note)) = self.active.take() else {
+                unreachable!()
+            };
+            if self.advance_footnote(source, note, line, output)? {
+                self.extend_containers(line.next);
+                return Ok(());
+            }
         } else if matches!(
             self.active,
             Some(
@@ -1955,7 +1968,6 @@ impl Engine {
                     | Active::Element(_)
                     | Active::Html(_)
                     | Active::Math(_)
-                    | Active::Footnote(_)
                     | Active::Summary(_)
             )
         ) || self.running.is_some()

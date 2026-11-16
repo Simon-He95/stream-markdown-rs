@@ -261,3 +261,92 @@ fn footnote_label_keeps_its_source_span_inside_a_quote() {
     assert!(!labels.is_empty());
     assert!(labels.iter().all(|label| *label == expected));
 }
+
+#[test]
+fn footnote_eof_boundary_reprocesses_the_next_line_as_a_container() {
+    let source = "[^one]: Note.\n- item\n\n[^two]: Other.\n> quote\n";
+    let document = parse(source, &options()).unwrap();
+    let roots: Vec<_> = document
+        .nodes
+        .iter()
+        .filter(|block| document.parent(block.id).is_none())
+        .collect();
+    assert!(
+        matches!(
+            roots.as_slice(),
+            [
+                Block {
+                    data: BlockData::Footnote { .. },
+                    ..
+                },
+                Block {
+                    data: BlockData::List { .. },
+                    ..
+                },
+                Block {
+                    data: BlockData::Footnote { .. },
+                    ..
+                },
+                Block {
+                    data: BlockData::Quote,
+                    ..
+                },
+            ]
+        ),
+        "{roots:?}"
+    );
+
+    let mut parser = Parser::new(options());
+    let mut changes = Vec::new();
+    parser.append("[^one]: Note.\n", &mut changes).unwrap();
+    parser
+        .append("- item\n\n[^two]: Other.\n", &mut changes)
+        .unwrap();
+    parser.append("> quote\n", &mut changes).unwrap();
+    parser.finish(&mut changes).unwrap();
+    assert!(changes.iter().any(
+        |change| matches!(change, Change::Insert { parent: None, block }
+        if matches!(block.data, BlockData::List { .. }))
+    ));
+    assert!(changes.iter().any(
+        |change| matches!(change, Change::Insert { parent: None, block }
+        if matches!(block.data, BlockData::Quote))
+    ));
+}
+
+#[test]
+fn multiline_custom_opener_is_buffered_immediately_after_a_footnote() {
+    let options = Options {
+        custom_tags: vec!["tool-call".into()],
+        ..options()
+    };
+    let source = "[^n]: Note.\n<tool-call\n  name=\"lookup\">body</tool-call>\n";
+    let document = parse(source, &options).unwrap();
+    assert_eq!(document.nodes.len(), 2);
+    let BlockData::CustomTag(element) = &document.nodes[1].data else {
+        panic!(
+            "expected a custom block after the footnote: {:?}",
+            document.nodes
+        );
+    };
+    assert_eq!(
+        element.tag.attrs(source).next().unwrap().value,
+        Some("lookup")
+    );
+    let mut parser = Parser::new(options);
+    let mut changes = Vec::new();
+    for chunk in [
+        "[^n]: Note.\n",
+        "<tool-call\n",
+        "  name=\"lookup\">body</tool-call>\n",
+    ] {
+        parser.append(chunk, &mut changes).unwrap();
+    }
+    parser.finish(&mut changes).unwrap();
+    assert!(
+        changes
+            .iter()
+            .filter_map(published)
+            .any(|block| block == &document.nodes[1])
+    );
+}
