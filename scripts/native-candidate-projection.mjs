@@ -539,12 +539,24 @@ function displayFence(block, context) {
   let sourceSpan = span
   if (context.markstream && loading && block.parent === null && span[1] < context.length) {
     const lineEnd = context.lineStarts[lineAt(context.lineStarts, span[0]) + 1] ?? span[1]
-    const opening = /^ {0,3}(`{3,}|~{3,})/.exec(context.read([span[0], lineEnd]))
-    const pending = /^ {0,3}(`+|~+)[ \t]*$/.exec(context.read([span[1], context.length]))
-    if (opening && pending && opening[1][0] === pending[1][0]) {
-      loading = pending[1].length < opening[1].length
+    const opening = /^( {0,3})(`{3,}|~{3,})/.exec(context.read([span[0], lineEnd]))
+    const tail = context.read([span[1], context.length])
+    const pending = /^ {0,3}(`+|~+)[ \t]*$/.exec(tail)
+    if (opening && pending && opening[2][0] === pending[1][0]) {
+      loading = pending[1].length < opening[2].length
       if (loading)
         content = content.replace(/\n$/, '')
+      sourceSpan = [span[0], context.length]
+    }
+    else if (opening && span[1] === context.lineStarts.at(-1)) {
+      const indent = opening[1].length
+      let columns = 0
+      let offset = 0
+      while (columns < indent && (tail[offset] === ' ' || tail[offset] === '\t')) {
+        columns += tail[offset] === '\t' ? 4 - columns % 4 : 1
+        offset++
+      }
+      content += ' '.repeat(Math.max(0, columns - indent)) + normalize(tail.slice(offset))
       sourceSpan = [span[0], context.length]
     }
   }

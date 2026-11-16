@@ -728,6 +728,36 @@ test('native provisional fence uses the existing code block output', () => {
   }
 })
 
+test('open fenced code displays held indentation from the current line', () => {
+  const session = createSession({ parseOptions: { includeSourceMap: true } })
+  const indented = createSession()
+  try {
+    session.append('```ts\nfirst\n')
+    session.append('   ')
+    const [draft] = session.snapshot()
+    assert.equal(draft.code, 'first\n   ')
+    assert.equal(draft.raw, 'first\n   ')
+    assert.equal(draft.loading, true)
+    assert.deepEqual(draft.sourceMap, { startLine: 0, endLine: 3 })
+
+    session.append('`')
+    assert.equal(session.snapshot()[0].loading, true)
+    session.append('``')
+    assert.equal(session.snapshot()[0].loading, false)
+    assert.equal(session.snapshot()[0].code, 'first\n')
+
+    indented.append('  ```ts\r\n    first\r\n')
+    indented.append('\t')
+    assert.equal(indented.snapshot()[0].code, '  first\n  ')
+    indented.append('body')
+    assert.equal(indented.snapshot()[0].code, '  first\n  body')
+  }
+  finally {
+    session.dispose()
+    indented.dispose()
+  }
+})
+
 test('literal unmatched multi-backticks keep their text and legacy metadata', () => {
   const body = ' pauses at unclosed ``` fences and each fence stays atomic.'
   const legacy = createSession()
