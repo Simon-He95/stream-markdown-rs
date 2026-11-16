@@ -204,3 +204,99 @@ test('native candidate tracks image preview loading while its destination arrive
     session.dispose()
   }
 })
+
+test('native candidate exposes Markstream containers and supports explicit opt-out', () => {
+  const enabled = createSession()
+  const disabled = createSession({ parseOptions: { markstream: false } })
+  try {
+    const head = '::: viewcode:live args {value:hello}\n'
+    enabled.append(head + 'body')
+    const vmr = enabled.snapshot()[0]
+    assert.equal(vmr.type, 'vmr_container')
+    assert.equal(vmr.name, 'viewcode:live')
+    assert.deepEqual(vmr.attrs, { args: 'args', value: 'hello' })
+    assert.equal(vmr.loading, true)
+    assert.equal(vmr.children[0].raw, 'body')
+    enabled.append('\n:::')
+    assert.equal(enabled.snapshot()[0].loading, false)
+
+    disabled.append(head + 'body\n:::')
+    disabled.finish()
+    assert.equal(disabled.snapshot()[0].type, 'paragraph')
+  }
+  finally {
+    enabled.dispose()
+    disabled.dispose()
+  }
+})
+
+test('native candidate shows held fence delimiters through legacy loading and source metadata', () => {
+  const session = createSession({ parseOptions: { includeSourceMap: true } })
+  try {
+    session.append('~~~js\r\ncode\r\n~~')
+    const pending = session.snapshot()[0]
+    assert.equal(pending.code, 'code')
+    assert.equal(pending.loading, true)
+    assert.deepEqual(pending.sourceMap, { startLine: 0, endLine: 3 })
+    session.append('~')
+    const closed = session.snapshot()[0]
+    assert.equal(closed.code, 'code\n')
+    assert.equal(closed.loading, false)
+    assert.deepEqual(closed.sourceMap, { startLine: 0, endLine: 3 })
+    session.finish()
+    assert.equal(session.snapshot()[0].code, 'code\n')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('native candidate materializes legacy table preview from typed native fields', () => {
+  const session = createSession({ parseOptions: { includeSourceMap: true } })
+  try {
+    session.append('| A | B |\n| --- | ')
+    assert.equal(session.snapshot()[0].type, 'table')
+    assert.equal(session.snapshot()[0].loading, true)
+    assert.deepEqual(session.snapshot()[0].sourceMap, { startLine: 0, endLine: 2 })
+    session.append('-')
+    assert.equal(session.snapshot()[0].loading, false)
+    session.append(' not a separator')
+    assert.equal(session.snapshot()[0].type, 'paragraph')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('legacy link projection keeps local file hrefs and demotes hosted file hrefs', () => {
+  const session = createSession()
+  try {
+    session.append('[local](file:///tmp/example) [hosted](file://host/tmp/example)')
+    session.finish()
+    const children = session.snapshot()[0].children
+    const links = children.filter(child => child.type === 'link')
+    assert.deepEqual(links.map(link => link.href), ['file:///tmp/example'])
+    assert.ok(children.some(child => child.content?.includes('hosted')))
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('native candidate projects Markstream inline extension payloads into legacy nodes', () => {
+  const session = createSession()
+  try {
+    session.append(String.raw`H~foo\~bar~O x^3^ ==mark *em*== ++insert *em*++`)
+    session.finish()
+    const children = session.snapshot()[0].children
+    const subscript = children.find(node => node.type === 'subscript')
+    assert.equal(subscript.children[0].content, 'foo~bar')
+    assert.equal(subscript.raw, '~foo~bar~')
+    assert.equal(children.find(node => node.type === 'superscript').raw, '^3^')
+    assert.equal(children.find(node => node.type === 'highlight').raw, '==mark em==')
+    assert.equal(children.find(node => node.type === 'insert').raw, '++insert em++')
+  }
+  finally {
+    session.dispose()
+  }
+})

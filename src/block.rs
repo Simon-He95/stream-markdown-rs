@@ -1,5 +1,7 @@
 #[path = "footnotes.rs"]
 mod footnotes;
+#[path = "vmr.rs"]
+pub(crate) mod vmr;
 
 use std::{collections::HashMap, num::NonZeroUsize, ops::Range, sync::Arc};
 
@@ -158,6 +160,44 @@ struct Fence {
     lines: Option<Vec<RawLine>>,
 }
 
+#[derive(Clone, Copy)]
+enum FencePrefix {
+    Indent(u8),
+    Run(usize),
+    Spaces,
+    Literal,
+}
+
+struct FenceProbe {
+    start: usize,
+    checked: usize,
+    prefix: FencePrefix,
+}
+
+impl FenceProbe {
+    fn update(&mut self, source: &str, end: usize, marker: u8, width: usize) -> bool {
+        for byte in source.as_bytes()[self.checked..end].iter().copied() {
+            self.prefix = match self.prefix {
+                FencePrefix::Indent(count) if byte == b' ' && count < 3 => {
+                    FencePrefix::Indent(count + 1)
+                }
+                FencePrefix::Indent(_) if byte == marker => FencePrefix::Run(1),
+                FencePrefix::Run(count) if byte == marker => FencePrefix::Run(count + 1),
+                FencePrefix::Run(count) if count >= width && matches!(byte, b' ' | b'\t') => {
+                    FencePrefix::Spaces
+                }
+                FencePrefix::Spaces if matches!(byte, b' ' | b'\t') => FencePrefix::Spaces,
+                _ => FencePrefix::Literal,
+            };
+            if matches!(self.prefix, FencePrefix::Literal) {
+                break;
+            }
+        }
+        self.checked = end;
+        matches!(self.prefix, FencePrefix::Literal)
+    }
+}
+
 struct Table {
     id: BlockId,
     span: Span,
@@ -179,7 +219,7 @@ enum SeparatorStage {
 struct SeparatorProbe {
     start: usize,
     scanned: usize,
-    columns: usize,
+    alignments: Vec<Alignment>,
     completed: usize,
     saw_dash: bool,
     stage: SeparatorStage,
@@ -195,20 +235,31 @@ impl SeparatorProbe {
         Self {
             start,
             scanned: start + 1,
-            columns,
+            alignments: vec![Alignment::None; columns],
             completed: 0,
             saw_dash: false,
             stage: SeparatorStage::Start,
         }
     }
 
-    fn update(&mut self, source: &str, end: usize) -> bool {
+    fn ready(&self) -> bool {
+        self.completed == self.alignments.len()
+            || (self.completed + 1 == self.alignments.len()
+                && matches!(
+                    self.stage,
+                    SeparatorStage::Dashes | SeparatorStage::TrailingColon | SeparatorStage::Spaces
+                ))
+    }
+
+    fn update(&mut self, source: &str, end: usize) -> (bool, bool) {
         use SeparatorStage::*;
+        let was_ready = self.ready();
+        let mut alignment_changed = false;
         for byte in source.as_bytes()[self.scanned..end].iter().copied() {
             if matches!(self.stage, Invalid) {
                 break;
             }
-            if self.completed == self.columns {
+            if self.completed == self.alignments.len() {
                 if !matches!(byte, b' ' | b'\t') {
                     self.stage = Invalid;
                 }
@@ -216,12 +267,25 @@ impl SeparatorProbe {
             }
             self.stage = match (self.stage, byte) {
                 (Start, b' ' | b'\t') => Start,
-                (Start, b':') => LeadingColon,
+                (Start, b':') => {
+                    self.alignments[self.completed] = Alignment::Left;
+                    alignment_changed = true;
+                    LeadingColon
+                }
                 (Start | LeadingColon | Dashes, b'-') => {
                     self.saw_dash = true;
                     Dashes
                 }
-                (Dashes, b':') => TrailingColon,
+                (Dashes, b':') => {
+                    let alignment = &mut self.alignments[self.completed];
+                    *alignment = if *alignment == Alignment::Left {
+                        Alignment::Center
+                    } else {
+                        Alignment::Right
+                    };
+                    alignment_changed = true;
+                    TrailingColon
+                }
                 (Dashes | TrailingColon | Spaces, b' ' | b'\t') => Spaces,
                 (Dashes | TrailingColon | Spaces, b'|') => {
                     self.completed += 1;
@@ -231,7 +295,10 @@ impl SeparatorProbe {
             };
         }
         self.scanned = end;
-        self.saw_dash && !matches!(self.stage, Invalid)
+        (
+            self.saw_dash && !matches!(self.stage, Invalid),
+            alignment_changed || self.ready() != was_ready,
+        )
     }
 }
 
@@ -269,13 +336,13 @@ struct Indented {
     pending_blank: Vec<RawLine>,
 }
 
-#[derive(Clone, Copy)]
 struct Element {
     id: BlockId,
     start: usize,
     tag: Tag,
     depth: usize,
     body: Span,
+    scanner: Option<Box<tag::BodyScanner>>,
 }
 
 struct DisplayMath {
@@ -395,6 +462,7 @@ pub(crate) struct Engine {
     preview: Option<BlockId>,
     inline_preview: Option<(BlockId, usize)>,
     separator: Option<SeparatorProbe>,
+    fence_probe: Option<FenceProbe>,
     tag_probe: Option<tag::OpeningProbe>,
     refs: References,
     footnotes: Option<Box<footnotes::Index>>,
@@ -422,6 +490,7 @@ impl Engine {
             preview: None,
             inline_preview: None,
             separator: None,
+            fence_probe: None,
             tag_probe: None,
             refs: References::default(),
             footnotes,
@@ -538,7 +607,15 @@ impl Engine {
                 && let Some(&byte) = bytes.get(self.line_start)
                 && (ordinary_start(byte) || byte == b'|')
             {
-                self.close_containers(0, &mut output);
+                let limit = self
+                    .containers
+                    .iter()
+                    .rposition(|frame| matches!(frame.kind, Kind::Vmr { .. }))
+                    .map_or(0, |index| index + 1);
+                self.close_containers(limit, &mut output);
+            }
+            if self.options.markstream && self.partial_vmr(source, &mut output)? {
+                return Ok(());
             }
             if self.options.footnotes
                 && self.running.is_none()
@@ -690,6 +767,7 @@ impl Engine {
             let text = &source[Range::from(body)];
             if inline::needs_markup(text, self.options.syntax)
                 || self.options.math && text.as_bytes().contains(&b'$')
+                || self.options.markstream && inline::needs_markstream_markup(text)
             {
                 let mut nodes = inline::parse_preview(source, body, &self.options, &self.refs);
                 if self.options.footnotes {
@@ -758,6 +836,22 @@ impl Engine {
         source: &str,
         output: &mut Output<'_>,
     ) -> Result<bool, ParseError> {
+        if let Some(Active::Element(element)) = &mut self.active
+            && let Some(scanner) = &mut element.scanner
+        {
+            let (through, close) =
+                scanner.advance(source, self.scan, element.tag, &mut element.depth);
+            emit_append(output, element.id, &mut element.body.end, through);
+            if let Some(close) = close {
+                let Some(Active::Element(element)) = self.active.take() else {
+                    unreachable!()
+                };
+                self.close_element(element, close.end, BlockStatus::Closed, output);
+                self.line_start = close.end;
+                return Ok(true);
+            }
+            return Ok(false);
+        }
         if !matches!(self.active, None | Some(Active::Paragraph(_))) {
             return Ok(false);
         }
@@ -800,21 +894,42 @@ impl Engine {
     fn partial(&mut self, source: &str, output: &mut Output<'_>) {
         let end = self.scan;
         let start = self.line_start;
-        if self.running.is_some() || start >= end || !self.containers.is_empty() {
+        if self.running.is_some()
+            || start >= end
+            || self
+                .containers
+                .iter()
+                .any(|frame| !matches!(frame.kind, Kind::Vmr { .. }))
+        {
             return;
         }
         let head = unindent(&source[start..end]);
         let byte = head.as_bytes().first().copied().unwrap_or(b' ');
         if let Some(Active::Fence(fence)) = &mut self.active {
-            if fence.lines.is_none() && byte != b' ' && byte != fence.marker {
-                emit_append(output, fence.id, &mut fence.body.end, end);
+            if fence.lines.is_none() && fence.body.end < end {
+                if self
+                    .fence_probe
+                    .as_ref()
+                    .is_none_or(|probe| probe.start != start)
+                {
+                    self.fence_probe = Some(FenceProbe {
+                        start,
+                        checked: start,
+                        prefix: FencePrefix::Indent(0),
+                    });
+                }
+                if self
+                    .fence_probe
+                    .as_mut()
+                    .unwrap()
+                    .update(source, end, fence.marker, fence.count)
+                {
+                    emit_append(output, fence.id, &mut fence.body.end, end);
+                }
             }
             return;
         }
-        if let Some(Active::Element(element)) = &mut self.active {
-            let start = element.body.end.max(self.line_start);
-            let text_end = tag::pending_close(source, start, end, element.tag);
-            emit_append(output, element.id, &mut element.body.end, text_end);
+        if matches!(self.active, Some(Active::Element(_))) {
             return;
         }
         if let Some(Active::Paragraph(paragraph)) = &self.active
@@ -832,13 +947,23 @@ impl Engine {
             {
                 self.separator = Some(SeparatorProbe::new(source, start, paragraph.first));
             }
-            let pending = self.separator.as_mut().unwrap().update(source, end);
+            let separator = self.separator.as_mut().unwrap();
+            let (pending, alignment_changed) = separator.update(source, end);
             if pending {
-                if self.preview != Some(paragraph.id) {
+                if self.preview != Some(paragraph.id) || alignment_changed {
                     self.preview = Some(paragraph.id);
+                    let cells = cell_spans(source, paragraph.first)
+                        .map(InlineContent::Plain)
+                        .collect();
                     output.update(Change::Preview {
                         id: paragraph.id,
-                        hint: Some(PreviewHint::Table),
+                        hint: Some(PreviewHint::Table {
+                            table: Box::new(TableData {
+                                alignments: separator.alignments.clone(),
+                                cells,
+                            }),
+                            loading: !separator.ready(),
+                        }),
                     });
                 }
             } else {
@@ -871,7 +996,7 @@ impl Engine {
                                 content: InlineContent::Plain(Span::new(content.start, end)),
                             },
                         },
-                        None,
+                        self.parent(),
                     );
                 }
             }
@@ -879,7 +1004,9 @@ impl Engine {
         }
         let header_text =
             byte == b'|' && self.active.is_none() && (self.draft.is_some() || !blank(&head[1..]));
-        if !(ordinary_start(byte) || header_text)
+        let inline_text =
+            self.options.markstream && (self.draft.is_some() || partial_inline_start(head));
+        if !(ordinary_start(byte) || header_text || inline_text)
             || self
                 .block_triggers
                 .get(usize::from(byte))
@@ -931,21 +1058,33 @@ impl Engine {
         output: &mut Output<'_>,
     ) -> Result<(), ParseError> {
         if self.containers.is_empty() {
-            let head = unindent(&source[line.start..line.end]);
-            if !head
-                .as_bytes()
-                .first()
-                .is_some_and(|byte| matches!(byte, b'>' | b'-' | b'+' | b'*' | b'0'..=b'9'))
-            {
+            let raw = &source[line.start..line.end];
+            let marker = if raw.starts_with(' ') {
+                unindent(raw).as_bytes().first()
+            } else {
+                raw.as_bytes().first()
+            };
+            if !matches!(marker, Some(b'>' | b'-' | b'+' | b'*' | b'0'..=b'9')) {
                 return self.line(source, line, output);
             }
         }
         let physical_blank = blank(&source[line.start..line.end]);
         let mut matched = 0;
+        let mut vmr_close = None;
         while let Some(frame) = self.containers.get(matched) {
             let remaining = &source[line.start..line.end];
             let prefix = match frame.kind {
                 Kind::Quote => container::quote_at(remaining, line.column, line.padding),
+                Kind::Vmr { .. } => {
+                    vmr_close = self
+                        .vmr_closer(source, line, *frame)
+                        .then_some((matched, line));
+                    Some(container::Prefix {
+                        bytes: 0,
+                        columns: 0,
+                        padding: line.padding,
+                    })
+                }
                 Kind::List { .. } => Some(container::Prefix {
                     bytes: 0,
                     columns: 0,
@@ -983,11 +1122,18 @@ impl Engine {
             line.advance(prefix);
         }
 
+        if let Some((index, close)) = vmr_close
+            && (matched < self.containers.len() || !self.vmr_leaf_protected())
+        {
+            return self.close_vmr(source, close, index, output);
+        }
+
         if matched < self.containers.len() {
             let remaining = &source[line.start..line.end];
             let starts_container = container::quote_at(remaining, line.column, line.padding)
                 .is_some()
-                || container::list_at(remaining, line.column, line.padding).is_some();
+                || container::list_at(remaining, line.column, line.padding).is_some()
+                || self.options.markstream && self.vmr_opener(source, line);
             if matches!(self.active, Some(Active::Paragraph(_)))
                 && !blank(remaining)
                 && !starts_container
@@ -1208,6 +1354,12 @@ impl Engine {
         };
         let start = line.end - head.len();
 
+        if self.options.markstream
+            && head.starts_with(':')
+            && self.open_vmr_line(source, line, output)?
+        {
+            return Ok(());
+        }
         if self.options.footnotes
             && head.starts_with("[^")
             && self.try_open_footnote(source, line, start, output)?
@@ -1255,14 +1407,30 @@ impl Engine {
                 return Ok(());
             }
             Some(Active::Element(mut element)) => {
-                if let Some(close) = tag::close(
-                    source,
-                    line.start,
-                    line.end,
-                    element.tag,
-                    &mut element.depth,
-                ) {
-                    emit_append(output, element.id, &mut element.body.end, close.start);
+                let close = match &mut element.scanner {
+                    Some(scanner) => scanner.finish_line(
+                        source,
+                        line.end,
+                        line.next,
+                        element.tag,
+                        &mut element.depth,
+                    ),
+                    None => tag::close(
+                        source,
+                        line.start,
+                        line.end,
+                        element.tag,
+                        &mut element.depth,
+                    ),
+                };
+                if let Some(close) = close {
+                    let committed_body = if close.start == line.start && !self.containers.is_empty()
+                    {
+                        element.body.end
+                    } else {
+                        close.start
+                    };
+                    emit_append(output, element.id, &mut element.body.end, committed_body);
                     self.close_element(element, close.end, BlockStatus::Closed, output);
                     if !source[close.end..line.end].trim().is_empty() {
                         self.line(
@@ -1338,7 +1506,7 @@ impl Engine {
                 self.close_indented(code, output);
             }
             Some(Active::Table(mut table)) => {
-                if !head.trim_matches([' ', '\t']).is_empty() && !interrupts_paragraph(head) {
+                if !blank(head) && !interrupts_paragraph(head) {
                     let spans = cell_spans(source, line.span())
                         .take(table.columns)
                         .chain(std::iter::repeat(Span::new(line.end, line.end)))
@@ -1431,7 +1599,7 @@ impl Engine {
                     }
                 }
                 self.clear_preview(output);
-                if !head.trim_matches([' ', '\t']).is_empty()
+                if !blank(head)
                     && !interrupts_paragraph(head)
                     && !self.is_custom_start(source, start, line.end)
                     && !(self.options.math && math_block::opening(head).is_some())
@@ -1491,7 +1659,7 @@ impl Engine {
             None => {}
         }
 
-        if head.trim_matches([' ', '\t']).is_empty() {
+        if blank(head) {
             return Ok(());
         }
 
@@ -1593,6 +1761,7 @@ impl Engine {
                 tag: opener.tag,
                 depth: 1,
                 body: Span::new(opener.end, opener.end),
+                scanner: None,
             };
             if opener.self_closing {
                 self.emit_element(element, opener.end, BlockStatus::Closed, false, output);
@@ -1627,6 +1796,9 @@ impl Engine {
                 }
             } else {
                 element.body.end = line.next;
+                if !self.batch && self.containers.is_empty() {
+                    element.scanner = Some(Box::new(tag::BodyScanner::new(line.next)));
+                }
                 output.open(
                     Block {
                         id,
@@ -1766,7 +1938,8 @@ impl Engine {
                 self.close_code(fence, end, status, output);
             }
             Active::Element(element) => {
-                self.close_element(element, element.body.end, status, output)
+                let end = element.body.end;
+                self.close_element(element, end, status, output)
             }
             Active::Html(html) => {
                 let status = if matches!(html.end, HtmlEnd::Blank) {
@@ -2183,7 +2356,8 @@ impl Engine {
         });
         if !(plugin_hit
             || inline::needs_markup(text, self.options.syntax)
-            || self.options.math && text.as_bytes().contains(&b'$'))
+            || self.options.math && text.as_bytes().contains(&b'$')
+            || self.options.markstream && inline::needs_markstream_markup(text))
         {
             return Ok(InlineContent::Plain(span));
         }
@@ -2618,12 +2792,24 @@ fn task_marker(line: &str) -> (Option<bool>, usize) {
 }
 
 fn blank(line: &str) -> bool {
-    line.trim_matches([' ', '\t']).is_empty()
+    line.bytes().all(|byte| matches!(byte, b' ' | b'\t'))
 }
 
-fn container_block(frame: Frame, status: BlockStatus) -> Block {
+fn container_block(frame: Frame, mut status: BlockStatus) -> Block {
     let data = match frame.kind {
         Kind::Quote => BlockData::Quote,
+        Kind::Vmr {
+            header_end,
+            closed,
+            preview_closed,
+        } => {
+            if status == BlockStatus::Closed && !(closed || preview_closed) {
+                status = BlockStatus::Incomplete;
+            }
+            BlockData::Vmr(vmr::Vmr {
+                header: Span::new(frame.start, header_end),
+            })
+        }
         Kind::List {
             style,
             ordinal,
@@ -2654,11 +2840,32 @@ fn unindent(line: &str) -> &str {
 }
 
 fn trim_span(source: &str, span: Span) -> Span {
-    let text = &source[Range::from(span)];
-    let left = text.trim_start_matches([' ', '\t', '\n', '\r']);
-    let right = left.trim_end_matches([' ', '\t', '\n', '\r']);
-    let start = span.end - left.len();
-    Span::new(start, start + right.len())
+    let bytes = &source.as_bytes()[span.start..span.end];
+    let content = |byte: &u8| !matches!(byte, b' ' | b'\t' | b'\n' | b'\r');
+    let Some(first) = bytes.iter().position(content) else {
+        return Span::new(span.end, span.end);
+    };
+    let last = bytes.iter().rposition(content).unwrap();
+    Span::new(span.start + first, span.start + last + 1)
+}
+
+fn partial_inline_start(head: &str) -> bool {
+    let bytes = head.as_bytes();
+    match bytes.first() {
+        Some(&marker @ (b'*' | b'_' | b'`')) => {
+            let limit = if marker == b'`' { 2 } else { 3 };
+            let width = bytes
+                .iter()
+                .take(limit)
+                .take_while(|&&byte| byte == marker)
+                .count();
+            bytes
+                .get(width)
+                .is_some_and(|byte| *byte != marker && !matches!(byte, b' ' | b'\t'))
+        }
+        Some(b'[') if bytes.len() <= 1024 => head.contains("]("),
+        _ => false,
+    }
 }
 
 fn ordinary_start(byte: u8) -> bool {
@@ -2759,7 +2966,7 @@ fn closing_fence(text: &str, marker: u8, width: usize) -> bool {
         return false;
     }
     let count = text.bytes().take_while(|&byte| byte == marker).count();
-    count >= width && text[count..].trim_matches([' ', '\t']).is_empty()
+    count >= width && blank(&text[count..])
 }
 
 fn batch_fence_close(source: &str, start: usize, marker: u8, width: usize) -> Option<Line> {

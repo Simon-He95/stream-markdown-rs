@@ -284,6 +284,7 @@ impl Renderer<'_> {
                 self.children(Some(block.id), false);
                 self.html.push_str("</blockquote>\n");
             }
+            BlockData::Vmr(_) => self.children(Some(block.id), false),
             BlockData::List {
                 ordered,
                 start,
@@ -458,6 +459,18 @@ impl Renderer<'_> {
                     }
                 }
                 InlineKind::Strikethrough(children) => self.inline_tag("del", children),
+                InlineKind::Highlight(children) => self.inline_tag("mark", children),
+                InlineKind::Insert(children) => self.inline_tag("ins", children),
+                InlineKind::Subscript(text) | InlineKind::Superscript(text) => {
+                    let tag = if matches!(inline.kind, InlineKind::Subscript(_)) {
+                        "sub"
+                    } else {
+                        "sup"
+                    };
+                    write!(self.html, "<{tag}>").unwrap();
+                    escape(&mut self.html, text.as_str(self.source));
+                    write!(self.html, "</{tag}>").unwrap();
+                }
                 InlineKind::Link(link) => {
                     self.html.push_str("<a href=\"");
                     escape_url(&mut self.html, link.destination.as_str(self.source));
@@ -508,12 +521,16 @@ impl Renderer<'_> {
             match &inline.kind {
                 InlineKind::Text(text)
                 | InlineKind::Code(text)
+                | InlineKind::Subscript(text)
+                | InlineKind::Superscript(text)
                 | InlineKind::Math { body: text, .. } => {
                     escape(&mut self.html, text.as_str(self.source))
                 }
                 InlineKind::Emphasis(children)
                 | InlineKind::Strong(children)
-                | InlineKind::Strikethrough(children) => self.image_alt(children),
+                | InlineKind::Strikethrough(children)
+                | InlineKind::Highlight(children)
+                | InlineKind::Insert(children) => self.image_alt(children),
                 InlineKind::Link(link)
                 | InlineKind::Image(link)
                 | InlineKind::ImagePreview(link) => self.image_alt(&link.children),

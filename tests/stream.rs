@@ -174,13 +174,17 @@ fn table_preview_requires_a_delimiter_and_keeps_the_block_id() {
     parser.append("|", &mut changes).unwrap();
     assert!(changes.is_empty());
     parser.append("-", &mut changes).unwrap();
-    assert_eq!(
-        changes,
-        [Change::Preview {
-            id,
-            hint: Some(PreviewHint::Table)
-        }]
-    );
+    let [
+        Change::Preview {
+            id: changed,
+            hint: Some(PreviewHint::Table { table, .. }),
+        },
+    ] = changes.as_slice()
+    else {
+        panic!("expected a typed table preview");
+    };
+    assert_eq!(*changed, id);
+    assert_eq!(table.header().len(), 2);
     changes.clear();
     parser.append("| - |\n", &mut changes).unwrap();
     assert!(changes.iter().any(|change| matches!(
@@ -324,7 +328,7 @@ fn table_preview_is_withdrawn_when_a_separator_exceeds_the_header() {
     parser.append("A | B\n| -", &mut changes).unwrap();
     let Some(Change::Preview {
         id,
-        hint: Some(PreviewHint::Table),
+        hint: Some(PreviewHint::Table { .. }),
     }) = changes.last()
     else {
         panic!("expected a table preview");
@@ -644,4 +648,135 @@ fn custom_tag_body_streams_nested_markup_until_its_own_closer() {
     parser.append("nking>\n", &mut changes).unwrap();
     view.apply(&mut changes);
     assert_eq!(view.blocks[&id].status, BlockStatus::Closed);
+}
+
+#[test]
+fn a_custom_tag_closes_in_the_same_chunk_without_waiting_for_newline() {
+    let options = Options {
+        custom_tags: vec!["thinking".into()],
+        ..Options::default()
+    };
+    let mut parser = Parser::new(options.clone());
+    let mut view = View::default();
+    let mut changes = Vec::new();
+    for chunk in [
+        "<thinking>before <think",
+        "ing title=\"literal </thinking>",
+        "\">nested</think",
+        "ing> remaining</think",
+    ] {
+        parser.append(chunk, &mut changes).unwrap();
+        view.apply(&mut changes);
+        assert!(
+            view.blocks
+                .values()
+                .all(|block| block.status == BlockStatus::Open)
+        );
+    }
+    parser.append("ing> trailing", &mut changes).unwrap();
+    view.apply(&mut changes);
+    let root = view.blocks.values().next().unwrap();
+    assert_eq!(root.status, BlockStatus::Closed);
+    let BlockData::CustomTag { body, .. } = root.data else {
+        panic!("expected a tag")
+    };
+    assert_eq!(
+        parser.source(body),
+        "before <thinking title=\"literal </thinking>\">nested</thinking> remaining"
+    );
+    parser.finish(&mut changes).unwrap();
+    view.apply(&mut changes);
+    let full = parse(parser.source_text(), &options).unwrap();
+    assert_eq!(view.blocks.into_values().collect::<Vec<_>>(), full.nodes);
+}
+
+#[test]
+fn finished_session_releases_plugins_and_retains_source_metrics() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use stream_markdown_rs::{PluginError, PluginRule, Rule, RuleInput, RuleResult, Scope};
+
+    struct DropRule(Arc<AtomicUsize>);
+
+    impl PluginRule for DropRule {
+        fn rule(&self) -> Rule {
+            Rule {
+                trigger: b'@',
+                scope: Scope::Block,
+                kind: 1,
+            }
+        }
+
+        fn step(&mut self, _: RuleInput<'_>) -> Result<RuleResult, PluginError> {
+            Ok(RuleResult::Reject)
+        }
+    }
+
+    impl Drop for DropRule {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let released = Arc::new(AtomicUsize::new(0));
+    let mut parser = Parser::new(Options::default());
+    parser.add_plugin(DropRule(released.clone())).unwrap();
+    let mut changes = Vec::new();
+    parser.append("text", &mut changes).unwrap();
+    assert_eq!(released.load(Ordering::Relaxed), 0);
+    parser.finish(&mut changes).unwrap();
+    assert_eq!(released.load(Ordering::Relaxed), 1);
+    assert_eq!(parser.source_text(), "text");
+    assert_eq!(parser.metrics().scanned_bytes, 4);
+    parser.finish(&mut changes).unwrap();
+    assert_eq!(released.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn a_fence_releases_a_partial_line_when_it_cannot_close_the_block() {
+    let mut parser = Parser::new(Options::default());
+    let mut changes = Vec::new();
+    let mut view = View::default();
+    parser.append("```txt\n", &mut changes).unwrap();
+    view.apply(&mut changes);
+    let id = *view.blocks.keys().next().unwrap();
+    parser.append("`", &mut changes).unwrap();
+    assert!(changes.is_empty());
+    parser.append("value", &mut changes).unwrap();
+    assert!(
+        matches!(changes.as_slice(), [Change::AppendText { id: changed, span }] if *changed == id && parser.source(*span) == "`value")
+    );
+    view.apply(&mut changes);
+    parser.append("\n    ```", &mut changes).unwrap();
+    view.apply(&mut changes);
+    assert_eq!(view.blocks[&id].status, BlockStatus::Open);
+    let BlockData::CodeBlock { body, .. } = view.blocks[&id].data else {
+        panic!("expected code")
+    };
+    assert_eq!(parser.source(body), "`value\n    ```");
+}
+
+#[test]
+fn markstream_projects_a_root_inline_prefix_once_it_cannot_be_a_block_marker() {
+    let options = Options {
+        markstream: true,
+        preview: Preview::Ai,
+        ..Options::default()
+    };
+    let mut parser = Parser::new(options);
+    let mut changes = Vec::new();
+    parser.append("**", &mut changes).unwrap();
+    assert!(changes.is_empty());
+    parser
+        .append("[百度](https://baidu.com/)提", &mut changes)
+        .unwrap();
+    assert!(
+        matches!(changes.first(), Some(Change::Insert { block, .. }) if matches!(block.data, BlockData::Paragraph(_)))
+    );
+    assert!(
+        matches!(changes.last(), Some(Change::PreviewInlines { nodes, .. }) if
+        nodes.iter().any(|node| matches!(node.kind, InlineKind::Link(_))))
+    );
 }

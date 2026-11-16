@@ -7,7 +7,7 @@ use std::{
 };
 use stream_markdown_rs::{
     Alignment, Block, BlockData, Change, Inline, InlineContent, InlineKind, Options, Parser,
-    PluginField, PluginFieldValue, Preview, PreviewHint, RawLine, Span, Syntax, Text,
+    PluginField, PluginFieldValue, Preview, PreviewHint, RawLine, Span, Syntax, TableData, Text,
 };
 
 fn main() -> io::Result<()> {
@@ -49,6 +49,7 @@ fn request(sessions: &mut HashMap<u64, Parser>, input: &Value) -> Result<Value, 
             custom_tags,
             math: input["math"].as_bool().unwrap_or(true),
             footnotes: input["footnotes"].as_bool().unwrap_or(true),
+            markstream: input["markstream"].as_bool().unwrap_or(true),
         }));
         return Ok(Value::Null);
     }
@@ -105,6 +106,10 @@ fn inline(value: &Inline) -> Value {
         InlineKind::Emphasis(children) => ("emphasis", json!(inlines(children))),
         InlineKind::Strong(children) => ("strong", json!(inlines(children))),
         InlineKind::Strikethrough(children) => ("strikethrough", json!(inlines(children))),
+        InlineKind::Subscript(body) => ("subscript", text(body)),
+        InlineKind::Superscript(body) => ("superscript", text(body)),
+        InlineKind::Highlight(children) => ("highlight", json!(inlines(children))),
+        InlineKind::Insert(children) => ("insert", json!(inlines(children))),
         InlineKind::Link(link) | InlineKind::Image(link) | InlineKind::ImagePreview(link) => {
             let kind = if matches!(value.kind, InlineKind::Link(_)) {
                 "link"
@@ -185,6 +190,18 @@ fn block(value: &Block, source: &str) -> Value {
             "footnote",
             json!({ "label": span(*label), "content": content(value) }),
         ),
+        BlockData::Vmr(vmr) => {
+            let parameters = vmr.parameters(source);
+            (
+                "vmr_container",
+                json!({
+                    "header": span(vmr.header),
+                    "name": span(parameters.name),
+                    "args": parameters.args.map(span),
+                    "attributes": parameters.attributes.map(span),
+                }),
+            )
+        }
         BlockData::Quote => ("blockquote", Value::Null),
         BlockData::List { ordered, start, .. } => {
             ("list", json!({ "ordered": ordered, "start": start }))
@@ -195,18 +212,7 @@ fn block(value: &Block, source: &str) -> Value {
             "html_block",
             json!({ "lines": lines.iter().copied().map(raw_line).collect::<Vec<_>>() }),
         ),
-        BlockData::Table(table) => (
-            "table",
-            json!({
-                "alignments": table.alignments().iter().map(|align| match align {
-                    Alignment::None | Alignment::Left => "left",
-                    Alignment::Center => "center",
-                    Alignment::Right => "right",
-                }).collect::<Vec<_>>(),
-                "header": table.header().iter().map(content).collect::<Vec<_>>(),
-                "rows": table.rows().map(|row| row.iter().map(content).collect::<Vec<_>>()).collect::<Vec<_>>(),
-            }),
-        ),
+        BlockData::Table(table) => ("table", table_value(table)),
         BlockData::CustomTag { tag, body } => (
             "custom",
             json!({
@@ -230,6 +236,18 @@ fn block(value: &Block, source: &str) -> Value {
         "open": value.status == stream_markdown_rs::BlockStatus::Open,
         "kind": kind,
         "data": data,
+    })
+}
+
+fn table_value(table: &TableData) -> Value {
+    json!({
+        "alignments": table.alignments().iter().map(|align| match align {
+            Alignment::None | Alignment::Left => "left",
+            Alignment::Center => "center",
+            Alignment::Right => "right",
+        }).collect::<Vec<_>>(),
+        "header": table.header().iter().map(content).collect::<Vec<_>>(),
+        "rows": table.rows().map(|row| row.iter().map(content).collect::<Vec<_>>()).collect::<Vec<_>>(),
     })
 }
 
@@ -285,8 +303,8 @@ fn change_value(change: &Change, source: &str) -> Value {
             json!({ "op": "preview_inlines", "id": id.0, "nodes": inlines(nodes) })
         }
         Change::Preview { id, hint } => {
-            json!({ "op": "preview", "id": id.0, "hint": hint.map(|hint| match hint {
-                PreviewHint::Table => "table",
+            json!({ "op": "preview", "id": id.0, "hint": hint.as_ref().map(|hint| match hint {
+                PreviewHint::Table { table, loading } => json!({ "data": table_value(table), "loading": loading }),
             }) })
         }
     }

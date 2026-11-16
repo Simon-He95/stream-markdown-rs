@@ -185,29 +185,114 @@ fn attribute(input: &str) -> Option<(Attribute<'_>, &str)> {
     })
 }
 
-/// Publish body bytes until a possible close of the current element.
-pub(crate) fn pending_close(source: &str, start: usize, end: usize, tag: Tag) -> usize {
-    let bytes = source.as_bytes();
-    let name = tag.tag_name(source).as_bytes();
-    for relative in memchr::memchr_iter(b'<', &bytes[start..end]) {
-        let offset = start + relative;
-        let after_lt = &bytes[offset + 1..end];
-        if after_lt.is_empty() {
-            return offset;
-        }
-        let Some(after_slash) = after_lt.strip_prefix(b"/") else {
-            continue;
-        };
-        if name.starts_with(after_slash)
-            || after_slash.strip_prefix(name).is_some_and(|tail| {
-                tail.first()
-                    .is_some_and(|byte| matches!(byte, b'>' | b' ' | b'\t'))
-            })
-        {
-            return offset;
+pub(crate) struct BodyScanner {
+    at: usize,
+    token: Option<BodyToken>,
+}
+
+enum BodyToken {
+    Opening(OpeningProbe),
+    Closing { start: usize, checked: usize },
+}
+
+impl BodyScanner {
+    pub fn new(at: usize) -> Self {
+        Self { at, token: None }
+    }
+
+    pub fn advance(
+        &mut self,
+        source: &str,
+        end: usize,
+        tag: Tag,
+        depth: &mut usize,
+    ) -> (usize, Option<Span>) {
+        let bytes = source.as_bytes();
+        let name = tag.tag_name(source).as_bytes();
+        loop {
+            match self.token.take() {
+                Some(BodyToken::Opening(mut probe)) => {
+                    if let Some(stop) = probe.update(source, end) {
+                        if let Some(inner) = opening(source, probe.start, stop) {
+                            if !inner.self_closing && inner.tag.tag_name(source).as_bytes() == name
+                            {
+                                *depth += 1;
+                            }
+                            self.at = stop;
+                        } else {
+                            self.at = probe.start + 1;
+                        }
+                    } else if probe.rejected {
+                        self.at = probe.start + 1;
+                    } else {
+                        let start = probe.start;
+                        self.token = Some(BodyToken::Opening(probe));
+                        return (start, None);
+                    }
+                }
+                Some(BodyToken::Closing { start, mut checked }) => {
+                    while checked < end && matches!(bytes[checked], b' ' | b'\t') {
+                        checked += 1;
+                    }
+                    if checked == end {
+                        self.token = Some(BodyToken::Closing { start, checked });
+                        return (start, None);
+                    }
+                    if bytes[checked] == b'>' {
+                        *depth -= 1;
+                        self.at = checked + 1;
+                        if *depth == 0 {
+                            return (start, Some(Span::new(start, self.at)));
+                        }
+                    } else {
+                        self.at = checked;
+                    }
+                }
+                None => {
+                    let Some(relative) = memchr::memchr(b'<', &bytes[self.at..end]) else {
+                        self.at = end;
+                        return (end, None);
+                    };
+                    self.at += relative;
+                    let start = self.at;
+                    let tail = &bytes[start + 1..end];
+                    let Some(&first) = tail.first() else {
+                        return (start, None);
+                    };
+                    if first == b'/' {
+                        let after = &tail[1..];
+                        if after.starts_with(name) {
+                            let checked = start + 2 + name.len();
+                            self.token = Some(BodyToken::Closing { start, checked });
+                        } else if name.starts_with(after) {
+                            return (start, None);
+                        } else {
+                            self.at += 1;
+                        }
+                    } else if first.is_ascii_alphabetic() {
+                        self.token = Some(BodyToken::Opening(OpeningProbe::new(start, start + 1)));
+                    } else {
+                        self.at += 1;
+                    }
+                }
+            }
         }
     }
-    end
+
+    pub fn finish_line(
+        &mut self,
+        source: &str,
+        end: usize,
+        next: usize,
+        tag: Tag,
+        depth: &mut usize,
+    ) -> Option<Span> {
+        let (pending, found) = self.advance(source, end, tag, depth);
+        let close = found.or_else(|| close(source, pending, end, tag, depth));
+        self.at = next;
+        self.token = None;
+        close
+    }
 }
 
 pub(crate) fn close(

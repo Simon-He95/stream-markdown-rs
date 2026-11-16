@@ -9,6 +9,9 @@ use crate::{Options, References, Span, Syntax, Text};
 #[path = "inline_math.rs"]
 mod inline_math;
 
+#[path = "inline_markstream.rs"]
+mod markstream;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Inline {
     pub span: Span,
@@ -26,6 +29,10 @@ pub enum InlineKind {
     Emphasis(Vec<Inline>),
     Strong(Vec<Inline>),
     Strikethrough(Vec<Inline>),
+    Subscript(Text),
+    Superscript(Text),
+    Highlight(Vec<Inline>),
+    Insert(Vec<Inline>),
     Link(Box<Link>),
     Image(Box<Link>),
     ImagePreview(Box<Link>),
@@ -357,12 +364,14 @@ fn remap_nodes(nodes: &mut [Inline], joined: &str, parts: &[Fragment], reference
         match &mut node.kind {
             InlineKind::Text(text)
             | InlineKind::Code(text)
-            | InlineKind::Math { body: text, .. } => remap_text(text, joined, parts),
+            | InlineKind::Math { body: text, .. }
+            | InlineKind::Subscript(text)
+            | InlineKind::Superscript(text) => remap_text(text, joined, parts),
             InlineKind::Emphasis(children)
             | InlineKind::Strong(children)
-            | InlineKind::Strikethrough(children) => {
-                remap_nodes(children, joined, parts, references)
-            }
+            | InlineKind::Strikethrough(children)
+            | InlineKind::Highlight(children)
+            | InlineKind::Insert(children) => remap_nodes(children, joined, parts, references),
             InlineKind::Link(link) | InlineKind::Image(link) | InlineKind::ImagePreview(link) => {
                 if references.binary_search(&node.span.start).is_err() {
                     remap_text(&mut link.destination, joined, parts);
@@ -391,8 +400,15 @@ pub(crate) fn needs_markup(text: &str, syntax: Syntax) -> bool {
     first_special(text.as_bytes(), gfm).is_some() || (gfm && has_gfm_trigger(text))
 }
 
+pub(crate) fn needs_markstream_markup(text: &str) -> bool {
+    memchr::memchr2(b'^', b'~', text.as_bytes()).is_some()
+        || ["==", "++", "\"", "'"]
+            .iter()
+            .any(|needle| text.contains(needle))
+}
+
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
-const fn marker_table(gfm: bool, math: bool) -> [u8; 16] {
+const fn marker_table(gfm: bool, math: bool, markstream: bool) -> [u8; 16] {
     let mut table = [0; 16];
     let markers = b"\0\n\r!&*[\\]_`<";
     let mut i = 0;
@@ -401,8 +417,13 @@ const fn marker_table(gfm: bool, math: bool) -> [u8; 16] {
         table[(byte & 15) as usize] |= 1 << (byte >> 4);
         i += 1;
     }
-    if gfm {
+    if gfm || markstream {
         table[(b'~' & 15) as usize] |= 1 << (b'~' >> 4);
+    }
+    if markstream {
+        table[(b'^' & 15) as usize] |= 1 << (b'^' >> 4);
+        table[(b'=' & 15) as usize] |= 1 << (b'=' >> 4);
+        table[(b'+' & 15) as usize] |= 1 << (b'+' >> 4);
     }
     if math {
         table[(b'$' & 15) as usize] |= 1 << (b'$' >> 4);
@@ -412,32 +433,45 @@ const fn marker_table(gfm: bool, math: bool) -> [u8; 16] {
 
 #[inline]
 fn first_special(bytes: &[u8], gfm: bool) -> Option<usize> {
-    first_special_mode::<false>(bytes, gfm)
+    first_special_mode::<false, false>(bytes, gfm)
 }
 
 #[inline]
-fn special_mode<const MATH: bool>(byte: u8, gfm: bool) -> bool {
-    special(byte, gfm) || MATH && byte == b'$'
+fn special_mode<const MATH: bool, const MARKSTREAM: bool>(byte: u8, gfm: bool) -> bool {
+    special(byte, gfm)
+        || MATH && byte == b'$'
+        || MARKSTREAM && matches!(byte, b'^' | b'~' | b'=' | b'+')
 }
 
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
-fn first_special_mode<const MATH: bool>(bytes: &[u8], gfm: bool) -> Option<usize> {
+fn first_special_mode<const MATH: bool, const MARKSTREAM: bool>(
+    bytes: &[u8],
+    gfm: bool,
+) -> Option<usize> {
     use std::arch::aarch64::{vandq_u8, vdupq_n_u8, vld1q_u8, vmaxvq_u8, vqtbl1q_u8, vshrq_n_u8};
 
-    const COMMONMARK: [u8; 16] = marker_table(false, false);
-    const GFM: [u8; 16] = marker_table(true, false);
-    const COMMONMARK_MATH: [u8; 16] = marker_table(false, true);
-    const GFM_MATH: [u8; 16] = marker_table(true, true);
+    const COMMONMARK: [u8; 16] = marker_table(false, false, false);
+    const GFM: [u8; 16] = marker_table(true, false, false);
+    const COMMONMARK_MATH: [u8; 16] = marker_table(false, true, false);
+    const GFM_MATH: [u8; 16] = marker_table(true, true, false);
+    const COMMONMARK_MARKSTREAM: [u8; 16] = marker_table(false, false, true);
+    const GFM_MARKSTREAM: [u8; 16] = marker_table(true, false, true);
+    const COMMONMARK_BOTH: [u8; 16] = marker_table(false, true, true);
+    const GFM_BOTH: [u8; 16] = marker_table(true, true, true);
     const HIGH_BITS: [u8; 16] = [1, 2, 4, 8, 16, 32, 64, 128, 0, 0, 0, 0, 0, 0, 0, 0];
     let (chunks, tail) = bytes.as_chunks::<16>();
     if !chunks.is_empty() {
         // The lookup tables and each exact chunk contain 16 readable bytes.
         unsafe {
-            let markers = match (gfm, MATH) {
-                (true, true) => &GFM_MATH,
-                (true, false) => &GFM,
-                (false, true) => &COMMONMARK_MATH,
-                (false, false) => &COMMONMARK,
+            let markers = match (gfm, MATH, MARKSTREAM) {
+                (true, true, true) => &GFM_BOTH,
+                (true, true, false) => &GFM_MATH,
+                (true, false, true) => &GFM_MARKSTREAM,
+                (true, false, false) => &GFM,
+                (false, true, true) => &COMMONMARK_BOTH,
+                (false, true, false) => &COMMONMARK_MATH,
+                (false, false, true) => &COMMONMARK_MARKSTREAM,
+                (false, false, false) => &COMMONMARK,
             };
             let table = vld1q_u8(markers.as_ptr());
             let high_bits = vld1q_u8(HIGH_BITS.as_ptr());
@@ -450,22 +484,25 @@ fn first_special_mode<const MATH: bool>(bytes: &[u8], gfm: bool) -> Option<usize
                 if vmaxvq_u8(candidates) != 0 {
                     return chunk
                         .iter()
-                        .position(|&byte| special_mode::<MATH>(byte, gfm))
+                        .position(|&byte| special_mode::<MATH, MARKSTREAM>(byte, gfm))
                         .map(|n| index * 16 + n);
                 }
             }
         }
     }
     tail.iter()
-        .position(|&byte| special_mode::<MATH>(byte, gfm))
+        .position(|&byte| special_mode::<MATH, MARKSTREAM>(byte, gfm))
         .map(|n| bytes.len() - tail.len() + n)
 }
 
 #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
-fn first_special_mode<const MATH: bool>(bytes: &[u8], gfm: bool) -> Option<usize> {
+fn first_special_mode<const MATH: bool, const MARKSTREAM: bool>(
+    bytes: &[u8],
+    gfm: bool,
+) -> Option<usize> {
     bytes
         .iter()
-        .position(|&byte| special_mode::<MATH>(byte, gfm))
+        .position(|&byte| special_mode::<MATH, MARKSTREAM>(byte, gfm))
 }
 
 fn parse_inner(
@@ -479,8 +516,44 @@ fn parse_inner(
 ) -> Vec<Inline> {
     // Short leaves usually fit without allocating scratch. Use Vec for longer
     // leaves, where repeatedly checking SmallVec's spill state costs more.
-    match (input.end - input.start <= 128, options.math) {
-        (true, false) => parse_with::<Local, false>(
+    let mut nodes = if input.end - input.start <= 128 {
+        parse_storage::<Local>(
+            source,
+            input,
+            options,
+            refs,
+            unresolved,
+            reference_origins,
+            preview,
+        )
+    } else {
+        parse_storage::<Heap>(
+            source,
+            input,
+            options,
+            refs,
+            unresolved,
+            reference_origins,
+            preview,
+        )
+    };
+    if options.markstream && markstream::needs_quotes(content(source, input)) {
+        markstream::smart_quotes(source, &mut nodes);
+    }
+    nodes
+}
+
+fn parse_storage<S: Storage>(
+    source: &str,
+    input: Span,
+    options: &Options,
+    refs: &References,
+    unresolved: Option<&mut Vec<String>>,
+    reference_origins: Option<(&str, &mut Vec<usize>)>,
+    preview: bool,
+) -> Vec<Inline> {
+    match (options.math, options.markstream) {
+        (false, false) => parse_with::<S, false, false>(
             source,
             input,
             options,
@@ -489,7 +562,7 @@ fn parse_inner(
             reference_origins,
             preview,
         ),
-        (false, false) => parse_with::<Heap, false>(
+        (true, false) => parse_with::<S, true, false>(
             source,
             input,
             options,
@@ -498,16 +571,7 @@ fn parse_inner(
             reference_origins,
             preview,
         ),
-        (true, true) => parse_with::<Local, true>(
-            source,
-            input,
-            options,
-            refs,
-            unresolved,
-            reference_origins,
-            preview,
-        ),
-        (false, true) => parse_with::<Heap, true>(
+        (_, true) => parse_with::<S, true, true>(
             source,
             input,
             options,
@@ -519,7 +583,7 @@ fn parse_inner(
     }
 }
 
-fn parse_with<S: Storage, const MATH: bool>(
+fn parse_with<S: Storage, const MATH: bool, const MARKSTREAM: bool>(
     source: &str,
     input: Span,
     options: &Options,
@@ -538,9 +602,10 @@ fn parse_with<S: Storage, const MATH: bool>(
     let start = input.end - leading.len();
     let end = start + leading.trim_end_matches([' ', '\t', '\r', '\n']).len();
     let gfm = options.syntax == Syntax::Gfm;
+    let math = MATH && (!MARKSTREAM || options.math);
     let math_end = if preview { input.end } else { end };
     let gfm_autolink = gfm && has_gfm_trigger(&source[start..end]);
-    let Some(first) = first_special_mode::<MATH>(&bytes[start..end], gfm) else {
+    let Some(first) = first_special_mode::<MATH, MARKSTREAM>(&bytes[start..end], gfm) else {
         return if start == end {
             Vec::new()
         } else if gfm_autolink {
@@ -561,14 +626,14 @@ fn parse_with<S: Storage, const MATH: bool>(
     push_original(&mut tokens, start, start + first);
     let mut i = start + first;
     while i < end {
-        if !special_mode::<MATH>(bytes[i], gfm) {
-            let next =
-                first_special_mode::<MATH>(&bytes[i..end], gfm).map_or(end, |offset| i + offset);
+        if !special_mode::<MATH, MARKSTREAM>(bytes[i], gfm) {
+            let next = first_special_mode::<MATH, MARKSTREAM>(&bytes[i..end], gfm)
+                .map_or(end, |offset| i + offset);
             push_original(&mut tokens, i, next);
             i = next;
             continue;
         }
-        if MATH
+        if math
             && (bytes[i] == b'$' || bytes[i..end].starts_with(b"\\("))
             && let Some(formula) = math_scanner.read(source, i, math_end, preview)
         {
@@ -583,6 +648,19 @@ fn parse_with<S: Storage, const MATH: bool>(
                 &mut payloads,
             ));
             i = formula.end;
+            continue;
+        }
+        if MARKSTREAM
+            && (bytes[i] == b'^' || bytes[i] == b'~' && bytes.get(i + 1) != Some(&b'~'))
+            && let Some((stop, body)) = markstream::script_pair(source, i, end)
+        {
+            let kind = if bytes[i] == b'^' {
+                InlineKind::Superscript(body)
+            } else {
+                InlineKind::Subscript(body)
+            };
+            tokens.push(Token::from_inline(span(i, stop), kind, None, &mut payloads));
+            i = stop;
             continue;
         }
         let begin = i;
@@ -640,19 +718,26 @@ fn parse_with<S: Storage, const MATH: bool>(
                     InlineKind::Text(Text::Source(span(begin, i)))
                 }
             }
-            b'*' | b'_' | b'~' if bytes[i] != b'~' || gfm => {
+            b'*' | b'_' | b'~' | b'=' | b'+' => {
                 i = run_end(bytes, i, end);
                 let marker = bytes[begin];
                 let width = i - begin;
-                if marker != b'~' || width <= 2 {
-                    let opener = flanking(source, start, begin, i, end);
+                let pairable = match marker {
+                    b'~' => gfm && (width == 2 || !MARKSTREAM && width == 1),
+                    b'=' | b'+' => MARKSTREAM && width >= 2,
+                    _ => true,
+                };
+                if pairable {
+                    let opener = flanking::<MARKSTREAM>(source, start, begin, i, end);
                     if width <= 2 && opener.opens && !opener.closes {
-                        let candidate = first_special_mode::<MATH>(&bytes[i..end], gfm)
+                        let candidate = first_special_mode::<MATH, MARKSTREAM>(&bytes[i..end], gfm)
                             .map_or(end, |offset| i + offset);
                         if candidate < end && bytes[candidate] == marker {
                             let close_end = run_end(bytes, candidate, end);
                             if close_end - candidate == width {
-                                let closer = flanking(source, start, candidate, close_end, end);
+                                let closer = flanking::<MARKSTREAM>(
+                                    source, start, candidate, close_end, end,
+                                );
                                 if closer.closes && !closer.opens {
                                     // The nearest opener and a closer-only run pair before any outer delimiter.
                                     let children = vec![original(i, candidate)];
@@ -784,7 +869,8 @@ fn parse_with<S: Storage, const MATH: bool>(
             &mut payloads,
         ));
         let next = next_special.unwrap_or_else(|| {
-            first_special_mode::<MATH>(&bytes[i..end], gfm).map_or(end, |offset| i + offset)
+            first_special_mode::<MATH, MARKSTREAM>(&bytes[i..end], gfm)
+                .map_or(end, |offset| i + offset)
         });
         push_original(&mut tokens, i, next);
         i = next;
@@ -799,7 +885,9 @@ fn literal_math_in_image(nodes: &mut [Inline]) {
             InlineKind::Math { .. } => node.kind = InlineKind::Text(Text::Source(node.span)),
             InlineKind::Emphasis(children)
             | InlineKind::Strong(children)
-            | InlineKind::Strikethrough(children) => {
+            | InlineKind::Strikethrough(children)
+            | InlineKind::Highlight(children)
+            | InlineKind::Insert(children) => {
                 literal_math_in_image(children);
             }
             InlineKind::Link(link) | InlineKind::Image(link) | InlineKind::ImagePreview(link) => {
@@ -932,9 +1020,21 @@ fn is_punctuation(ch: char) -> bool {
             ))
 }
 
-fn flanking(source: &str, start: usize, begin: usize, next: usize, end: usize) -> Delimiter {
+fn flanking<const MARKSTREAM: bool>(
+    source: &str,
+    start: usize,
+    begin: usize,
+    next: usize,
+    end: usize,
+) -> Delimiter {
     let before = source[start..begin].chars().next_back().unwrap_or(' ');
     let after = source[next..end].chars().next().unwrap_or(' ');
+    let marker = source.as_bytes()[begin];
+    let (before, before_cjk) = if MARKSTREAM {
+        markstream::preceding(&source[start..begin], before)
+    } else {
+        (before, false)
+    };
     let before_ws = is_whitespace(before);
     let after_ws = is_whitespace(after);
     let (left, right, before_p, after_p) = if before_ws || after_ws {
@@ -942,14 +1042,14 @@ fn flanking(source: &str, start: usize, begin: usize, next: usize, end: usize) -
     } else {
         let before_p = is_punctuation(before);
         let after_p = is_punctuation(after);
+        let cjk = MARKSTREAM && marker != b'_' && (before_cjk || markstream::is_cjk(after));
         (
-            !after_p || before_p,
-            !before_p || after_p,
+            cjk || !after_p || before_p,
+            cjk || !before_p || after_p,
             before_p,
             after_p,
         )
     };
-    let marker = source.as_bytes()[begin];
     Delimiter {
         marker,
         length_class: if marker == b'~' {
@@ -964,10 +1064,10 @@ fn flanking(source: &str, start: usize, begin: usize, next: usize, end: usize) -
 
 fn matching(open: Delimiter, close: Delimiter) -> bool {
     open.marker == close.marker
-        && if open.marker == b'~' {
-            open.length_class == close.length_class
-        } else {
-            !(open.closes || close.opens) || (open.length_class + close.length_class) != 3
+        && match open.marker {
+            b'~' => open.length_class == close.length_class,
+            b'=' | b'+' => true,
+            _ => !(open.closes || close.opens) || (open.length_class + close.length_class) != 3,
         }
 }
 
@@ -999,22 +1099,29 @@ fn finish_tokens<S: Storage>(
         }
         tokens[head - 1].next = usize::MAX;
         let mut openers = S::Openers::default();
-        let mut lower_bound = [0; 15];
+        let mut lower_bound = [0; 16];
 
         for i in start..head {
             let Some(close) = tokens[i].delimiter() else {
                 continue;
+            };
+            let min_width = if matches!(close.marker, b'=' | b'+') {
+                2
+            } else {
+                1
             };
             if close.closes {
                 let length = usize::from(close.length_class);
                 let category = match close.marker {
                     b'*' => 3 * usize::from(close.opens) + length,
                     b'_' => 6 + 3 * usize::from(close.opens) + length,
-                    _ => 11 + length,
+                    b'~' => 11 + length,
+                    b'=' => 14,
+                    _ => 15,
                 };
                 loop {
                     let close_span = tokens[i].span;
-                    if close_span.start == close_span.end {
+                    if close_span.end - close_span.start < min_width {
                         break;
                     }
                     let found = openers
@@ -1063,12 +1170,13 @@ fn finish_tokens<S: Storage>(
                     );
                     group.next = i;
                     tokens.push(group);
-                    openers
-                        .truncate(position + usize::from(open_span.end - open_span.start > used));
+                    openers.truncate(
+                        position + usize::from(open_span.end - open_span.start - used >= min_width),
+                    );
                 }
             }
             let rem = tokens[i].span;
-            if close.opens && rem.start < rem.end {
+            if close.opens && rem.end - rem.start >= min_width {
                 openers.push(i);
             }
         }
@@ -1090,6 +1198,8 @@ fn finish_tokens<S: Storage>(
 fn delimiter_kind(marker: u8, width: usize, children: Vec<Inline>) -> InlineKind {
     match marker {
         b'~' => InlineKind::Strikethrough(children),
+        b'=' => InlineKind::Highlight(children),
+        b'+' => InlineKind::Insert(children),
         _ if width == 2 => InlineKind::Strong(children),
         _ => InlineKind::Emphasis(children),
     }
@@ -1594,7 +1704,9 @@ fn gfm_linkify(source: &str, nodes: Vec<Inline>) -> Vec<Inline> {
             }
             InlineKind::Emphasis(children)
             | InlineKind::Strong(children)
-            | InlineKind::Strikethrough(children) => {
+            | InlineKind::Strikethrough(children)
+            | InlineKind::Highlight(children)
+            | InlineKind::Insert(children) => {
                 *children = gfm_linkify(source, std::mem::take(children));
             }
             _ => {}
@@ -1822,7 +1934,7 @@ mod tests {
                         "{gfm} {offset} {byte}"
                     );
                     assert_eq!(
-                        first_special_mode::<true>(&bytes, gfm),
+                        first_special_mode::<true, false>(&bytes, gfm),
                         (special(byte, gfm) || byte == b'$').then_some(offset),
                         "math {gfm} {offset} {byte}"
                     );
@@ -2008,7 +2120,9 @@ mod tests {
                 InlineKind::Math { body, loading } => output.push((body.as_str(source), *loading)),
                 InlineKind::Emphasis(children)
                 | InlineKind::Strong(children)
-                | InlineKind::Strikethrough(children) => collect_math(source, children, output),
+                | InlineKind::Strikethrough(children)
+                | InlineKind::Highlight(children)
+                | InlineKind::Insert(children) => collect_math(source, children, output),
                 InlineKind::Link(link) | InlineKind::Image(link) => {
                     collect_math(source, &link.children, output)
                 }
@@ -2279,5 +2393,202 @@ mod tests {
             &References::default(),
         );
         assert_eq!(nodes, [original(0, source.len())]);
+    }
+
+    #[test]
+    fn markstream_cjk_flanking_pairs_punctuation_without_losing_text() {
+        let options = Options {
+            markstream: true,
+            ..Options::default()
+        };
+        let refs = References::default();
+        for (source, raw, body) in [
+            ("了**《法》**后", "**《法》**", "《法》"),
+            ("了**「法」**：", "**「法」**", "「法」"),
+            ("了**『法』**：", "**『法』**", "『法』"),
+            ("了**【法】**：", "**【法】**", "【法】"),
+            ("了**（法）**：", "**（法）**", "（法）"),
+            ("了**“法”**：", "**“法”**", "“法”"),
+            ("**快。**Pi 的底层", "**快。**", "快。"),
+            (
+                "한국어**「테스트」**입니다.",
+                "**「테스트」**",
+                "「테스트」",
+            ),
+            ("中文**😀**字", "**😀**", "😀"),
+        ] {
+            let parsed = parse(source, span(0, source.len()), &options, &refs);
+            let mut matches = parsed
+                .iter()
+                .filter(|node| matches!(node.kind, InlineKind::Strong(_)));
+            let strong = matches
+                .next()
+                .unwrap_or_else(|| panic!("expected strong in {source}"));
+            assert!(matches.next().is_none(), "expected one strong in {source}");
+            assert_eq!(content(source, strong.span), raw);
+            let InlineKind::Strong(children) = &strong.kind else {
+                unreachable!()
+            };
+            let [
+                Inline {
+                    kind: InlineKind::Text(text),
+                    ..
+                },
+            ] = children.as_slice()
+            else {
+                panic!("expected strong text")
+            };
+            assert_eq!(text.as_str(source), body);
+        }
+        let source = "a*😀*a";
+        assert_eq!(
+            parse(source, span(0, source.len()), &options, &refs),
+            [original(0, source.len())]
+        );
+    }
+
+    #[test]
+    fn markstream_smart_quotes_look_across_formatting_boundaries() {
+        let options = Options {
+            markstream: true,
+            ..Options::default()
+        };
+        let refs = References::default();
+        for (source, expected) in [
+            ("他说**'关键'**内容", "’关键’"),
+            ("他说**\"重点\"**是工作", "\"重点\""),
+            (
+                "为**\"热量产生-传递-分配-排出\"四环节的失配**,电芯",
+                "\"热量产生-传递-分配-排出\"四环节的失配",
+            ),
+        ] {
+            let parsed = parse(source, span(0, source.len()), &options, &refs);
+            let InlineKind::Strong(children) = &parsed[1].kind else {
+                panic!("expected strong in {source}")
+            };
+            let [
+                Inline {
+                    kind: InlineKind::Text(text),
+                    ..
+                },
+            ] = children.as_slice()
+            else {
+                panic!("expected strong text")
+            };
+            assert_eq!(text.as_str(source), expected, "{source}");
+        }
+        let source = "\"before *text* after\"";
+        let parsed = parse(source, span(0, source.len()), &options, &refs);
+        assert!(
+            matches!(&parsed[0].kind, InlineKind::Text(text) if text.as_str(source) == "“before ")
+        );
+        assert!(
+            matches!(&parsed[2].kind, InlineKind::Text(text) if text.as_str(source) == " after”")
+        );
+    }
+
+    #[test]
+    fn markstream_script_guards_preserve_ranges_and_allow_explicit_scripts() {
+        let options = Options {
+            markstream: true,
+            ..Options::default()
+        };
+        let refs = References::default();
+        for source in [
+            "价格~5元，其他~6元",
+            "价格~5元,其他~6元",
+            "电话~123456，分机~654321",
+            "第~1章讲原理，第~2章讲实现",
+            "预算60万~100万元至追加5万元~6万元",
+            "从1亿~2亿元增加到3亿~4亿元",
+            "10~23~",
+            "1~2~3",
+        ] {
+            for preview in [false, true] {
+                let parsed = if preview {
+                    parse_preview(source, span(0, source.len()), &options, &refs)
+                } else {
+                    parse(source, span(0, source.len()), &options, &refs)
+                };
+                assert_eq!(parsed, [original(0, source.len())], "{source}");
+            }
+        }
+
+        for (source, expected) in [
+            ("速度~max~值，空格~x~ 测试~y~", &["max", "x", "y"][..]),
+            ("C~2~H~5~OH", &["2", "5"]),
+            (r"H~foo\~bar~O", &["foo~bar"]),
+            ("变量~第2项~", &["第2项"]),
+            ("H~2号~O", &["2号"]),
+            ("x~i，j~", &["i，j"]),
+            (
+                "H~abcdefghijklmnopqrstuvwxy~O",
+                &["abcdefghijklmnopqrstuvwxy"],
+            ),
+        ] {
+            let parsed = parse(source, span(0, source.len()), &options, &refs);
+            let scripts = parsed
+                .iter()
+                .filter_map(|node| match &node.kind {
+                    InlineKind::Subscript(body) => Some(body.as_str(source)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(scripts, expected, "{source}");
+        }
+        let source = "第^二^章 x^2^+10^23^";
+        let parsed = parse(source, span(0, source.len()), &options, &refs);
+        let scripts = parsed
+            .iter()
+            .filter_map(|node| match &node.kind {
+                InlineKind::Superscript(body) => Some(body.as_str(source)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(scripts, ["二", "2", "23"]);
+    }
+
+    #[test]
+    fn failed_script_lookahead_keeps_preceding_matched_code_span() {
+        let options = Options {
+            markstream: true,
+            ..Options::default()
+        };
+        let source = "^`x`y`z";
+        let parsed = parse(
+            source,
+            span(0, source.len()),
+            &options,
+            &References::default(),
+        );
+        assert!(parsed.iter().any(
+            |node| matches!(&node.kind, InlineKind::Code(body) if body.as_str(source) == "x")
+        ));
+    }
+
+    #[test]
+    fn markstream_insert_and_highlight_keep_full_delimiter_runs() {
+        let options = Options {
+            markstream: true,
+            ..Options::default()
+        };
+        let refs = References::default();
+        let source = "这是==重要==内容，价格++5元++，其他++6元++。==important, really!==";
+        let parsed = parse(source, span(0, source.len()), &options, &refs);
+        let actual = parsed
+            .iter()
+            .filter_map(|node| match node.kind {
+                InlineKind::Highlight(_) | InlineKind::Insert(_) => {
+                    Some(content(source, node.span))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            ["==重要==", "++5元++", "++6元++", "==important, really!=="]
+        );
+        let parsed = parse(source, span(0, source.len()), &Options::default(), &refs);
+        assert_eq!(parsed, [original(0, source.len())]);
     }
 }

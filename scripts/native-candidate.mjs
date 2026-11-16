@@ -54,7 +54,8 @@ export function createSession({ factoryOptions, parseOptions = {} } = {}) {
   const math = (parseOptions.enableMath ?? factoryOptions?.enableMath) !== false
   const footnotes = (parseOptions.enableFootnotes ?? factoryOptions?.enableFootnotes) !== false
   const validateLink = parseOptions.validateLink ?? factoryOptions?.markdownItOptions?.validateLink
-  request('create', session, { customTags, math, footnotes })
+  const markstream = parseOptions.markstream ?? factoryOptions?.markstream ?? true
+  request('create', session, { customTags, math, footnotes, markstream })
   const nodes = new Map()
   const roots = []
   const lineStarts = [0]
@@ -92,7 +93,7 @@ export function createSession({ factoryOptions, parseOptions = {} } = {}) {
     metrics = response.metrics
     for (const change of response.changes)
       applyChange(nodes, roots, change)
-    if (response.changes.length || op === 'finish')
+    if (response.changes.length || op === 'finish' || markstream)
       cached = undefined
   }
 
@@ -126,7 +127,9 @@ export function createSession({ factoryOptions, parseOptions = {} } = {}) {
         const projected = projectBlocks(nodes, roots, {
           read: ([start, end]) => source.toString('utf8', start, end),
           lineStarts,
+          length,
           final,
+          markstream,
           customTags,
           parseOptions,
           validateLink,
@@ -166,6 +169,7 @@ function applyChange(nodes, roots, change) {
     case 'replace':
       Object.assign(block, change.block)
       delete block.previewInlines
+      delete block.preview
       break
     case 'append_text': {
       const range = block.data.body
@@ -204,8 +208,10 @@ function applyChange(nodes, roots, change) {
     }
     case 'status':
       block.open = change.open
-      if (!change.open)
+      if (!change.open) {
         delete block.previewInlines
+        delete block.preview
+      }
       block.span[1] = change.end
       break
     case 'remove': {

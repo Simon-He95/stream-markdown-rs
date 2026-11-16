@@ -2,7 +2,7 @@
 
 为 Rust TUI 解析 AI 流式 Markdown 的库。解析器把每次追加转换成带类型、内容变化和生命周期状态的块更新。终端 UI 可以用同一条流逐步显示段落、代码、表格和列表，按块状态决定何时提交最终样式。原生追加延迟、内存占用和更新范围是首要指标。默认 GFM，AI 预判可与 GFM 或 CommonMark 同时开启，运行时插件作为可选宿主层接入。
 
-仓库包含 Rust 批处理和增量解析核心、可选 WASM 插件宿主、规范测试和原生基准。TUI 可以使用 `Parser::append` 获取变化批次，通过 `Parser::finish` 收尾，或用 `parse` 得到完整结构。 将 `Options::math` 与 `Options::footnotes` 设为 `true` 可启用数学和命名脚注扩展。AI 预览可为打开的段落和标题交付临时行内覆盖，关闭节点时交付最终结构。
+仓库包含 Rust 批处理和增量解析核心、可选 WASM 插件宿主、规范测试和原生基准。TUI 可以使用 `Parser::append` 获取变化批次，通过 `Parser::finish` 收尾，或用 `parse` 得到完整结构。 将 `Options::math` 与 `Options::footnotes` 设为 `true` 可启用数学和命名脚注扩展。`Options::markstream` 开启 VMR 容器、CJK 强调、排版和行内扩展。AI 预览可为打开的段落和标题交付临时行内覆盖，关闭节点时交付最终结构。
 
 ## 运行验证
 

@@ -9,6 +9,7 @@ mod tag;
 
 use std::{borrow::Cow, collections::HashMap, fmt, num::NonZeroUsize, ops::Range};
 
+pub use block::vmr::{Vmr, VmrParameters};
 pub use inline::{Inline, InlineKind, Link};
 pub use plugin::{
     Phase, PluginError, PluginField, PluginFieldValue, PluginRule, Rule, RuleInput, RuleResult,
@@ -69,6 +70,8 @@ pub struct Options {
     pub preview: Preview,
     pub math: bool,
     pub footnotes: bool,
+    /// Enables Markstream syntax and typography extensions.
+    pub markstream: bool,
     /// HTML-like element names that produce structured custom nodes.
     pub custom_tags: Vec<String>,
 }
@@ -168,6 +171,7 @@ pub enum BlockData {
     Html,
     SegmentedHtml(Vec<RawLine>),
     Table(Box<TableData>),
+    Vmr(Vmr),
     Math {
         body: Text,
     },
@@ -196,9 +200,12 @@ pub struct Block {
     pub data: BlockData,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PreviewHint {
-    Table,
+    Table {
+        table: Box<TableData>,
+        loading: bool,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -328,61 +335,58 @@ pub struct Metrics {
 
 pub struct Parser {
     source: String,
-    engine: block::Engine,
-    finished: bool,
+    engine: Option<block::Engine>,
+    finished_metrics: Metrics,
 }
 
 impl Parser {
     pub fn new(options: Options) -> Self {
         Self {
             source: String::new(),
-            engine: block::Engine::new(options, false),
-            finished: false,
+            engine: Some(block::Engine::new(options, false)),
+            finished_metrics: Metrics::default(),
         }
     }
 
     pub fn add_plugin(&mut self, plugin: impl PluginRule + 'static) -> Result<(), ParseError> {
-        if !self.source.is_empty() || self.finished {
-            return Err(PluginError::new("register plugins before appending source").into());
+        if self.source.is_empty()
+            && let Some(engine) = &mut self.engine
+        {
+            return Ok(engine.add_plugin(Box::new(plugin))?);
         }
-        self.engine.add_plugin(Box::new(plugin))?;
-        Ok(())
+        Err(PluginError::new("register plugins before appending source").into())
     }
 
     pub fn append(&mut self, chunk: &str, out: &mut Vec<Change>) -> Result<(), ParseError> {
-        if self.finished {
+        let Some(engine) = &mut self.engine else {
             return Err(ParseError::Finished);
-        }
+        };
         if chunk.is_empty() {
             return Ok(());
         }
         let start = out.len();
         self.source.push_str(chunk);
-        if let Err(error) =
-            self.engine
-                .consume(&self.source, false, block::Output::Stream(out, start))
-        {
+        if let Err(error) = engine.consume(&self.source, false, block::Output::Stream(out, start)) {
             out.truncate(start);
-            self.finished = true;
+            self.finished_metrics = engine.metrics();
+            self.engine = None;
             return Err(error);
         }
         Ok(())
     }
 
     pub fn finish(&mut self, out: &mut Vec<Change>) -> Result<(), ParseError> {
-        if self.finished {
+        let Some(engine) = &mut self.engine else {
             return Ok(());
-        }
-        self.finished = true;
+        };
         let start = out.len();
-        if let Err(error) =
-            self.engine
-                .consume(&self.source, true, block::Output::Stream(out, start))
-        {
+        let result = engine.consume(&self.source, true, block::Output::Stream(out, start));
+        self.finished_metrics = engine.metrics();
+        self.engine = None;
+        if result.is_err() {
             out.truncate(start);
-            return Err(error);
         }
-        Ok(())
+        result
     }
 
     pub fn source_text(&self) -> &str {
@@ -398,7 +402,9 @@ impl Parser {
     }
 
     pub fn metrics(&self) -> Metrics {
-        self.engine.metrics()
+        self.engine
+            .as_ref()
+            .map_or(self.finished_metrics, block::Engine::metrics)
     }
 }
 

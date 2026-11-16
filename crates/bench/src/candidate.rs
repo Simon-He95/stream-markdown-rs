@@ -48,7 +48,9 @@ impl<'a> Engine<'a> for Candidate {
             .parser
             .finish(&mut session.changes)
             .map_err(|error| error.to_string())?;
-        session.apply()
+        session.apply()?;
+        session.changes = Vec::new();
+        Ok(())
     }
 
     #[cfg(not(feature = "count-allocations"))]
