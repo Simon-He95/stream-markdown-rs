@@ -459,11 +459,14 @@ fn multiline_registered_openers_keep_original_attributes_at_every_split() {
 }
 
 #[test]
-fn registered_tag_comments_do_not_close_the_body_in_batch_or_streaming() {
+fn registered_tag_literals_do_not_close_the_body_in_batch_or_streaming() {
     for body in [
         "\r\n<!-- fake </tool-call>\r\n还在注释中 -->\r\nactual body\r\n",
         "<!-- fake </tool-call>\ncontinued -->actual body",
         "<!-- fake </tool-call> -->actual body",
+        "\r\n<![CDATA[fake </tool-call>\r\n还在原文中 ]]>\r\nactual body\r\n",
+        "<![CDATA[fake </tool-call>\ncontinued ]]>actual body",
+        "<![CDATA[fake </tool-call> ]]>actual body",
     ] {
         let source = format!("<tool-call>{body}</tool-call>\n\n# Next");
         let options = Options {

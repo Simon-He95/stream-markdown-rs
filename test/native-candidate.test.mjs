@@ -1130,3 +1130,36 @@ test('a line-leading HTML anchor waits for its withheld image child in the legac
     inline.dispose()
   }
 })
+
+test('an inline HTML anchor with a confirmed image stays loading until its real closer', () => {
+  const prefix = 'Badge '
+  const opening = '<a href="/guide" title="read" target="_blank">'
+  const image = '<img src="/logo.svg" alt="Example">'
+  const session = createSession()
+  const rejected = createSession({ parseOptions: { validateLink: () => false } })
+  try {
+    session.append(prefix + opening + image.slice(0, -1))
+    assert.equal(session.snapshot()[0].children.some(node => node.type === 'link'), false)
+    session.append('>')
+    const [paragraph] = session.snapshot()
+    assert.equal(paragraph.raw, prefix + opening + image)
+    const expected = {
+      type: 'link', href: '/guide', title: 'read', text: image, raw: opening + image,
+      attrs: [['href', '/guide'], ['title', 'read'], ['target', '_blank']],
+      children: [{ type: 'html_inline', tag: 'img', content: image, children: [], raw: image, loading: false }],
+      loading: true, markup: 'html',
+    }
+    assert.deepEqual(paragraph.children[1], expected)
+    session.append('</a>')
+    assert.deepEqual(session.snapshot()[0].children[1], {
+      ...expected, raw: opening + image + '</a>', loading: false,
+    })
+
+    rejected.append(prefix + opening + image)
+    assert.deepEqual(rejected.snapshot()[0].children.map(node => node.type), ['text', 'html_inline', 'html_inline'])
+  }
+  finally {
+    session.dispose()
+    rejected.dispose()
+  }
+})

@@ -436,16 +436,27 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false) {
       const tag = header?.tag
       const autoClosed = context.markstream && context.final && end === index && !header?.closed
         && (tag === 'pre' || tag === 'code')
-      const last = autoClosed ? inlines.length - 1 : end
-      let children = projectInlineNodes(inlines.slice(index + 1, autoClosed ? inlines.length : end), context)
+      const href = header && attrValue(header.attrs, 'href')
+      const previous = inlines[index - 1]
+      const image = inlines[index + 1]
+      const loadingAnchor = context.markstream && !context.final && tag === 'a' && href
+        && end === index && !header.closed && previous?.kind === 'text'
+        && lineAt(context.lineStarts, previous.span[0]) === lineAt(context.lineStarts, span[0])
+        && readText(previous.data, context).trim()
+        && image?.kind === 'html' && image.span[0] === span[1] && index + 2 === inlines.length
+        && htmlHeader(context.read(image.span))?.tag === 'img' && allowsLink(href, context)
+      const includeTail = autoClosed || loadingAnchor
+      const last = includeTail ? inlines.length - 1 : end
+      let children = projectInlineNodes(inlines.slice(index + 1, includeTail ? inlines.length : end), context)
       const source = last === index ? raw : normalize(context.read([span[0], inlines[last].span[1]]))
       const combined = autoClosed ? source + `</${tag}>` : source
-      const href = header && attrValue(header.attrs, 'href')
-      if (tag === 'a' && href && end > index) {
-        if (allowsLink(href, context)) {
+      if (tag === 'a' && href && (end > index || loadingAnchor)) {
+        if (loadingAnchor || allowsLink(href, context)) {
           const title = attrValue(header.attrs, 'title')
           const attrs = title === '' ? [...header.attrs, ['title', title]] : header.attrs
-          nodes.push(linkNode(href, title, children, 'html', combined, attrs))
+          const link = linkNode(href, title, children, 'html', combined, attrs)
+          link.loading = Boolean(loadingAnchor)
+          nodes.push(link)
         }
         else {
           mergeText(nodes, textNode(displayText(children), false))

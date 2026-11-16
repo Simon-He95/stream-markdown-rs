@@ -101,11 +101,13 @@ fn find_end(
             }
         }
         let tail = &source[position..end];
-        if let Some(comment) = tail.strip_prefix("<!--") {
-            let Some(close) = comment.find("-->") else {
+        if let Some(kind) = tag::LiteralKind::at_start(tail.as_bytes()) {
+            let Some(close) =
+                kind.find_end(source.as_bytes(), position + kind.opening().len(), end)
+            else {
                 return (position, None);
             };
-            start = position + 4 + close + 3;
+            start = close;
         } else if let Some(opening) = tag::opening(source, position, end) {
             start = opening.end;
         } else {
@@ -143,11 +145,11 @@ fn wrapper_remains_open(source: &str, mut at: usize, end: usize, name: Name) -> 
     let mut depth = 1usize;
     while let Some(relative) = memchr::memchr(b'<', &bytes[at..end]) {
         let position = at + relative;
-        if let Some(comment) = source[position..end].strip_prefix("<!--") {
-            let Some(close) = comment.find("-->") else {
+        if let Some(kind) = tag::LiteralKind::at_start(&bytes[position..end]) {
+            let Some(close) = kind.find_end(bytes, position + kind.opening().len(), end) else {
                 return false;
             };
-            at = position + 4 + close + 3;
+            at = close;
         } else if let EndTag::Complete(close) = match_end(source, position, end, name) {
             depth -= 1;
             if depth == 0 {

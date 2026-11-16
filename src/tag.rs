@@ -202,15 +202,50 @@ enum BodyToken {
         start: usize,
         checked: usize,
     },
-    Comment {
+    Literal {
         start: usize,
         checked: usize,
+        kind: LiteralKind,
     },
     RawText {
         start: usize,
         checked: usize,
         tag: RawTextTag,
     },
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum LiteralKind {
+    Comment,
+    Cdata,
+}
+
+impl LiteralKind {
+    pub(crate) fn opening(self) -> &'static [u8] {
+        match self {
+            Self::Comment => b"<!--",
+            Self::Cdata => b"<![CDATA[",
+        }
+    }
+
+    pub(crate) fn at_start(bytes: &[u8]) -> Option<Self> {
+        [Self::Comment, Self::Cdata]
+            .into_iter()
+            .find(|kind| bytes.starts_with(kind.opening()))
+    }
+
+    fn pending(bytes: &[u8]) -> bool {
+        Self::Comment.opening().starts_with(bytes) || Self::Cdata.opening().starts_with(bytes)
+    }
+
+    pub(crate) fn find_end(self, bytes: &[u8], from: usize, end: usize) -> Option<usize> {
+        let closer = match self {
+            Self::Comment => b"-->",
+            Self::Cdata => b"]]>",
+        };
+        memchr::memmem::find(&bytes[from..end], closer)
+            .map(|relative| from + relative + closer.len())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -267,10 +302,14 @@ impl BodyScanner {
         Self { at, token: None }
     }
 
-    pub fn in_comment(start: usize, checked: usize) -> Self {
+    pub fn in_literal(start: usize, checked: usize, kind: LiteralKind) -> Self {
         Self {
             at: start,
-            token: Some(BodyToken::Comment { start, checked }),
+            token: Some(BodyToken::Literal {
+                start,
+                checked,
+                kind,
+            }),
         }
     }
 
@@ -331,16 +370,21 @@ impl BodyScanner {
                         self.at = checked;
                     }
                 }
-                Some(BodyToken::Comment { start, checked }) => {
-                    let from = checked.saturating_sub(2).max(start + 4);
-                    let Some(relative) = memchr::memmem::find(&bytes[from..end], b"-->") else {
-                        self.token = Some(BodyToken::Comment {
+                Some(BodyToken::Literal {
+                    start,
+                    checked,
+                    kind,
+                }) => {
+                    let from = checked.saturating_sub(2).max(start + kind.opening().len());
+                    let Some(close) = kind.find_end(bytes, from, end) else {
+                        self.token = Some(BodyToken::Literal {
                             start,
                             checked: end,
+                            kind,
                         });
                         return (start, None);
                     };
-                    self.at = from + relative + 3;
+                    self.at = close;
                 }
                 Some(BodyToken::RawText {
                     start,
@@ -381,14 +425,16 @@ impl BodyScanner {
                         } else {
                             self.at += 1;
                         }
-                    } else if first == b'!' && b"!--".starts_with(&tail[..tail.len().min(3)]) {
-                        if tail.len() < 3 {
-                            return (start, None);
-                        }
-                        self.token = Some(BodyToken::Comment {
+                    } else if first == b'!'
+                        && let Some(kind) = LiteralKind::at_start(&bytes[start..end])
+                    {
+                        self.token = Some(BodyToken::Literal {
                             start,
-                            checked: start + 4,
+                            checked: start + kind.opening().len(),
+                            kind,
                         });
+                    } else if first == b'!' && LiteralKind::pending(&bytes[start..end]) {
+                        return (start, None);
                     } else if first.is_ascii_alphabetic() {
                         self.token = Some(BodyToken::Opening(OpeningProbe::new(start, start + 1)));
                     } else {
@@ -412,7 +458,7 @@ impl BodyScanner {
             self.at = self.at.max(start);
         }
         let (pending, found) = self.advance::<false>(source, end, tag, depth);
-        if matches!(self.token, Some(BodyToken::Comment { .. })) {
+        if matches!(self.token, Some(BodyToken::Literal { .. })) {
             return None;
         }
         let close = found.or_else(|| close(source, pending, end, tag, depth).found());
@@ -425,7 +471,7 @@ impl BodyScanner {
 #[derive(Clone, Copy)]
 pub(crate) enum ClosingSearch {
     Found(Span),
-    Comment(usize),
+    Literal { start: usize, kind: LiteralKind },
     Absent,
 }
 
@@ -450,11 +496,15 @@ pub(crate) fn close(
     while let Some(index) = memchr::memchr(b'<', &source.as_bytes()[offset..end]) {
         offset += index;
         let rest = &source[offset..end];
-        if let Some(comment) = rest.strip_prefix("<!--") {
-            let Some(after) = comment.find("-->") else {
-                return ClosingSearch::Comment(offset);
+        if let Some(kind) = LiteralKind::at_start(rest.as_bytes()) {
+            let Some(after) = kind.find_end(source.as_bytes(), offset + kind.opening().len(), end)
+            else {
+                return ClosingSearch::Literal {
+                    start: offset,
+                    kind,
+                };
             };
-            offset += 4 + after + 3;
+            offset = after;
             continue;
         }
         if let Some(after) = rest

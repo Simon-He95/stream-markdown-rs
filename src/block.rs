@@ -2264,9 +2264,10 @@ impl Engine {
                         element.tag,
                         &mut element.depth,
                     ) {
-                        tag::ClosingSearch::Comment(start) => {
-                            element.scanner =
-                                Some(Box::new(tag::BodyScanner::in_comment(start, line.end)));
+                        tag::ClosingSearch::Literal { start, kind } => {
+                            element.scanner = Some(Box::new(tag::BodyScanner::in_literal(
+                                start, line.end, kind,
+                            )));
                             None
                         }
                         search => search.found(),
@@ -2705,8 +2706,10 @@ impl Engine {
                 }
             } else {
                 element.body.end = line.next;
-                if let tag::ClosingSearch::Comment(start) = matched_end {
-                    element.scanner = Some(Box::new(tag::BodyScanner::in_comment(start, line.end)));
+                if let tag::ClosingSearch::Literal { start, kind } = matched_end {
+                    element.scanner = Some(Box::new(tag::BodyScanner::in_literal(
+                        start, line.end, kind,
+                    )));
                 } else if !self.batch && self.containers.is_empty() {
                     element.scanner = Some(Box::new(tag::BodyScanner::new(line.next)));
                 }
