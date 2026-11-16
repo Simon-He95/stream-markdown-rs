@@ -1564,11 +1564,20 @@ impl Engine {
             _ => return Ok(()),
         };
         let content = unindent(&raw[marker.content..]);
-        if !content
-            .as_bytes()
-            .first()
-            .is_some_and(|&byte| ordinary_start(byte) || partial_inline_start(content, false))
+        if self.options.syntax == Syntax::Gfm
+            && matches!(
+                content.as_bytes(),
+                [b'[', b' ' | b'x' | b'X']
+                    | [b'[', b' ' | b'x' | b'X', b']']
+                    | [b'[', b' ' | b'x' | b'X', b']', b' ' | b'\t', ..]
+            )
         {
+            return Ok(());
+        }
+        let bracket_preview = self.options.preview == Preview::Ai && !content.starts_with("[!");
+        if !content.as_bytes().first().is_some_and(|&byte| {
+            ordinary_start(byte) || partial_inline_start(content, bracket_preview)
+        }) {
             return Ok(());
         }
         self.stop_leaf(source, output)?;
@@ -1803,9 +1812,11 @@ impl Engine {
         let header_text =
             byte == b'|' && self.active.is_none() && (self.draft.is_some() || !blank(&head[1..]));
         let root_preview = self.options.preview == Preview::Ai && self.containers.is_empty();
+        let bracket_preview =
+            root_preview || self.options.preview == Preview::Ai && self.partial_list.is_some();
         let inline_text = self.options.markstream
             && (self.draft.is_some()
-                || partial_inline_start(head, root_preview)
+                || partial_inline_start(head, bracket_preview)
                 || root_preview && byte.is_ascii_digit() && numeric_text_prefix(head));
         if !(ordinary_start(byte) || header_text || inline_text) || self.has_block_plugin(byte) {
             return;

@@ -1792,6 +1792,55 @@ fn a_partial_sibling_item_reuses_the_list_and_publishes_its_first_paragraph() {
 }
 
 #[test]
+fn bracket_led_list_text_is_previewed_after_the_task_prefix_is_ruled_out() {
+    let options = Options {
+        markstream: true,
+        preview: Preview::Ai,
+        ..Options::default()
+    };
+    let mut parser = Parser::new(options.clone());
+    let mut changes = Vec::new();
+    let mut view = View::default();
+    parser.append("- First\n- [", &mut changes).unwrap();
+    view.apply(&mut changes);
+    parser.append("Usage", &mut changes).unwrap();
+    let item = changes
+        .iter()
+        .find_map(|change| match change {
+            Change::Insert { block, .. }
+                if matches!(block.data, BlockData::ListItem { task: None }) =>
+            {
+                Some(block.id)
+            }
+            _ => None,
+        })
+        .expect("expected the second item before its newline");
+    assert!(changes.iter().any(|change| matches!(change,
+        Change::Insert { parent: Some(parent), block } if *parent == item
+            && matches!(block.data, BlockData::Paragraph(InlineContent::Plain(span)) if parser.source(span) == "[Usage"))));
+    view.apply(&mut changes);
+    parser.append("](/guide)\n", &mut changes).unwrap();
+    view.apply(&mut changes);
+    parser.finish(&mut changes).unwrap();
+    view.apply(&mut changes);
+    assert_eq!(
+        view.blocks.into_values().collect::<Vec<_>>(),
+        parse(parser.source_text(), &options).unwrap().nodes
+    );
+
+    for (prefix, checked) in [("- [x", true), ("- [X", true), ("- [ ", false)] {
+        let mut parser = Parser::new(options.clone());
+        parser.append(prefix, &mut changes).unwrap();
+        parser.append("]", &mut changes).unwrap();
+        assert!(changes.is_empty());
+        parser.append(" task\n", &mut changes).unwrap();
+        assert!(changes.iter().any(|change| matches!(change,
+            Change::Insert { block, .. } if matches!(block.data, BlockData::ListItem { task: Some(task) } if task == checked))));
+        changes.clear();
+    }
+}
+
+#[test]
 fn a_provisional_html_closer_keeps_raw_bytes_separate_from_visible_content() {
     let options = Options {
         markstream: true,
