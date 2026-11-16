@@ -1126,6 +1126,40 @@ test('a loading image link after a completed link uses the image alt as its labe
   }
 })
 
+test('legacy final view can display a complete image under its unclosed outer URL', () => {
+  const source = '[![流式图片](https://images.example/loading.png)](https://example.com/loading'
+  const legacy = createSession()
+  const standard = createSession({ parseOptions: { markstream: false } })
+  const rejected = createSession({ parseOptions: { validateLink: href => !href.startsWith('https://example.com/') } })
+  const closed = createSession()
+  try {
+    for (const session of [legacy, standard, rejected, closed]) {
+      session.append(source.slice(0, -7))
+      session.append(source.slice(-7) + (session === closed ? ')' : ''))
+      session.finish()
+    }
+    const [paragraph] = legacy.snapshot()
+    assert.equal(paragraph.raw, source)
+    assert.deepEqual(paragraph.children, [{
+      type: 'link', href: 'https://example.com/loading', title: null, text: '流式图片',
+      children: [{
+        type: 'image', src: 'https://images.example/loading.png', alt: '流式图片',
+        title: null, raw: '流式图片', loading: false,
+      }],
+      raw: '[流式图片](https://example.com/loading)', loading: true, markup: '',
+    }])
+    assert.equal(standard.snapshot()[0].children[0].content, '[')
+    assert.equal(rejected.snapshot()[0].children.some(node => node.type === 'link'), false)
+    assert.equal(closed.snapshot()[0].children[0].loading, false)
+  }
+  finally {
+    legacy.dispose()
+    standard.dispose()
+    rejected.dispose()
+    closed.dispose()
+  }
+})
+
 test('an image-link preview recognizes only the unescaped bracket after typed text', () => {
   for (const [prefix, visible] of [
     ['say "hello" ', 'say “hello” '],

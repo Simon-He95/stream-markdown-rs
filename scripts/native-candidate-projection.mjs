@@ -231,6 +231,25 @@ function projectInlines(content, context) {
   return projectInlineNodes(content.parsed, context)
 }
 
+function projectUnclosedImageLink(inlines, nodes, context) {
+  if (inlines.length !== 4 || nodes.length !== 4)
+    return
+  const [open, image, suffix, destination] = inlines
+  const child = nodes[1]
+  const link = nodes[3]
+  if (open.kind !== 'text' || image.kind !== 'image' || image.data.loading || child.type !== 'image'
+    || suffix.kind !== 'text' || destination.kind !== 'link' || link.type !== 'link' || link.markup !== 'linkify'
+    || open.span[1] !== image.span[0] || image.span[1] !== suffix.span[0]
+    || suffix.span[1] !== destination.span[0]
+    || context.read(open.span) !== '[' || context.read(suffix.span) !== ']('
+    || !/^https?:\/\//i.test(context.read(destination.span)))
+    return
+  return {
+    type: 'link', href: link.href, title: null, text: child.alt, children: [child],
+    raw: `[${child.alt}](${link.href})`, loading: true, markup: '',
+  }
+}
+
 function legacyDelimitedText(children) {
   return children.map((child) => {
     if (child.type === 'link')
@@ -791,7 +810,12 @@ function projectBlock(block, nodes, context) {
             return { type: kind, children: [], raw: projectedRaw, ...map }
         }
       }
-      return { type: kind, children: projectInlines(block.previewInlines ?? data, context), raw: projectedRaw, ...map }
+      const inlines = block.previewInlines ?? data
+      const children = projectInlines(inlines, context)
+      const imageLink = context.markstream && context.final && inlines.parsed
+        ? projectUnclosedImageLink(inlines.parsed, children, context)
+        : undefined
+      return { type: kind, children: imageLink ? [imageLink] : children, raw: projectedRaw, ...map }
     }
     case 'heading': {
       const raw = inlineRaw(data.content, '', context, span[1])
