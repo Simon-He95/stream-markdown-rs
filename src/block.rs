@@ -711,8 +711,11 @@ impl Engine {
             self.close_containers(0, &mut output);
             self.clear_preview(&mut output);
         } else {
-            if self.options.markstream && self.options.preview == Preview::Ai {
-                self.preview_reference(source, &mut output);
+            if self.options.markstream
+                && self.options.preview == Preview::Ai
+                && self.preview_reference(source, &mut output)
+            {
+                return Ok(());
             }
             if self.active.is_none()
                 && !self.containers.is_empty()
@@ -1550,7 +1553,7 @@ impl Engine {
         if !content
             .as_bytes()
             .first()
-            .is_some_and(|&byte| ordinary_start(byte) || partial_inline_start(content))
+            .is_some_and(|&byte| ordinary_start(byte) || partial_inline_start(content, false))
         {
             return Ok(());
         }
@@ -1785,8 +1788,9 @@ impl Engine {
         }
         let header_text =
             byte == b'|' && self.active.is_none() && (self.draft.is_some() || !blank(&head[1..]));
-        let inline_text =
-            self.options.markstream && (self.draft.is_some() || partial_inline_start(head));
+        let bracket_preview = self.options.preview == Preview::Ai && self.containers.is_empty();
+        let inline_text = self.options.markstream
+            && (self.draft.is_some() || partial_inline_start(head, bracket_preview));
         if !(ordinary_start(byte) || header_text || inline_text) || self.has_block_plugin(byte) {
             return;
         }
@@ -2822,7 +2826,12 @@ impl Engine {
         let visible = !self.batch && !(head.starts_with('[') && head.contains("]:"));
         let span = Span::new(start, line.end);
         if let Some(mut draft) = draft.filter(|draft| draft.id == id) {
-            emit_append(output, id, &mut draft.published, line.end);
+            if visible {
+                emit_append(output, id, &mut draft.published, line.end);
+            } else {
+                self.clear_inline_preview(id, output);
+                output.update(Change::Remove { id });
+            }
         } else if visible {
             output.open(
                 Block {
@@ -4090,7 +4099,7 @@ fn trim_span(source: &str, span: Span) -> Span {
     Span::new(span.start + first, span.start + last + 1)
 }
 
-fn partial_inline_start(head: &str) -> bool {
+fn partial_inline_start(head: &str, bracket_preview: bool) -> bool {
     let bytes = head.as_bytes();
     match bytes.first() {
         Some(&marker @ (b'*' | b'_' | b'`')) => {
@@ -4104,7 +4113,14 @@ fn partial_inline_start(head: &str) -> bool {
                 .get(width)
                 .is_some_and(|byte| *byte != marker && !matches!(byte, b' ' | b'\t'))
         }
-        Some(b'[') if bytes.len() <= 1024 => head.contains("](") || head.contains("]["),
+        Some(b'[') if bytes.len() <= 1024 => {
+            (bracket_preview
+                && bytes
+                    .get(1)
+                    .is_some_and(|byte| !matches!(byte, b'^' | b' ' | b'\t')))
+                || head.contains("](")
+                || head.contains("][")
+        }
         _ => false,
     }
 }

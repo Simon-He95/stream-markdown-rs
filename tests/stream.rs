@@ -1419,6 +1419,49 @@ fn a_partial_reference_definition_previews_only_waiting_text() {
 }
 
 #[test]
+fn a_bracket_prefix_is_literal_until_the_reference_definition_has_a_destination() {
+    let options = Options {
+        markstream: true,
+        preview: Preview::Ai,
+        ..Options::default()
+    };
+    for ending in [" /target", " /target\n\n"] {
+        let mut parser = Parser::new(options.clone());
+        let mut changes = Vec::new();
+        let mut view = View::default();
+        parser.append("[read][来源]\n\n[来", &mut changes).unwrap();
+        let Some(Change::Insert {
+            block,
+            parent: None,
+        }) = changes.last()
+        else {
+            panic!("expected the literal bracket prefix: {changes:?}");
+        };
+        let id = block.id;
+        assert_eq!(block.status, BlockStatus::Open);
+        assert!(
+            matches!(block.data, BlockData::Paragraph(InlineContent::Plain(span))
+            if parser.source(span) == "[来")
+        );
+        view.apply(&mut changes);
+
+        parser.append("源]:", &mut changes).unwrap();
+        view.apply(&mut changes);
+        assert_eq!(parser.source(view.blocks[&id].span), "[来源]:");
+        parser.append(ending, &mut changes).unwrap();
+        assert!(changes.contains(&Change::Remove { id }));
+        view.apply(&mut changes);
+        parser.finish(&mut changes).unwrap();
+        view.apply(&mut changes);
+
+        assert_eq!(
+            view.blocks.into_values().collect::<Vec<_>>(),
+            parse(parser.source_text(), &options).unwrap().nodes
+        );
+    }
+}
+
+#[test]
 fn markstream_fence_previews_the_info_and_keeps_the_id_at_the_newline() {
     let options = Options {
         markstream: true,
