@@ -350,6 +350,37 @@ fn table_preview_requires_a_delimiter_and_keeps_the_block_id() {
 }
 
 #[test]
+fn markstream_pipe_after_a_delimited_header_only_publishes_a_loading_hint() {
+    let options = Options {
+        markstream: true,
+        preview: Preview::Ai,
+        ..Options::default()
+    };
+    for suffix in ["- | - |\n", "literal text\n"] {
+        let mut parser = Parser::new(options.clone());
+        let mut changes = Vec::new();
+        let mut view = View::default();
+        parser.append("| Name | Value |\n", &mut changes).unwrap();
+        view.apply(&mut changes);
+        let id = *view.blocks.keys().next().unwrap();
+        parser.append("| ", &mut changes).unwrap();
+        assert!(matches!(changes.as_slice(),
+            [Change::Preview { id: changed, hint: Some(PreviewHint::Table { table, loading: true }) }]
+            if *changed == id && table.header().len() == 2));
+        assert!(matches!(view.blocks[&id].data, BlockData::Paragraph(_)));
+        view.apply(&mut changes);
+        parser.append(suffix, &mut changes).unwrap();
+        view.apply(&mut changes);
+        parser.finish(&mut changes).unwrap();
+        view.apply(&mut changes);
+        assert_eq!(
+            view.blocks.into_values().collect::<Vec<_>>(),
+            parse(parser.source_text(), &options).unwrap().nodes
+        );
+    }
+}
+
+#[test]
 fn finish_closes_fences_once_and_preserves_the_body() {
     let mut parser = Parser::new(Options::default());
     let mut changes = Vec::new();

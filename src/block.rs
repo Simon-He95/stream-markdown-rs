@@ -1806,7 +1806,24 @@ impl Engine {
             }
             let separator = preview.separator.as_mut().unwrap();
             let (pending, alignment_changed) = separator.update(source, end);
-            if pending {
+            // A fully delimited literal header can show a loading hint on the
+            // next root pipe. Committing a table still requires the separator.
+            let pipe_only = !pending
+                && self.options.markstream
+                && self.containers.is_empty()
+                && start == self.line_start
+                && !separator.saw_dash
+                && matches!(separator.stage, SeparatorStage::Start)
+                && (self.preview == Some(paragraph.id) || {
+                    let header = source[Range::from(paragraph.first)].trim_matches([' ', '\t']);
+                    header.starts_with('|')
+                        && header.ends_with('|')
+                        && !inline::needs_markup(header, self.options.syntax)
+                        && !inline::needs_markstream_markup(header)
+                        && !separator.alignments.is_empty()
+                        && cell_spans(source, paragraph.first).all(|span| span.start < span.end)
+                });
+            if pending || pipe_only {
                 if self.preview != Some(paragraph.id) || alignment_changed {
                     self.preview = Some(paragraph.id);
                     let cells = cell_spans(source, paragraph.first)
