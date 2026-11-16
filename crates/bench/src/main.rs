@@ -14,7 +14,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::hint::black_box;
 use std::process::ExitCode;
 #[cfg(not(feature = "count-allocations"))]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const PULLDOWN_VERSION: &str = "0.13.6";
 
@@ -129,7 +129,13 @@ fn timed<'a, E: Engine<'a>>(
 
     match mode {
         Mode::Full => {
-            black_box(E::parse(black_box(source))?);
+            let warmup = Instant::now();
+            loop {
+                black_box(E::parse(black_box(source))?);
+                if warmup.elapsed() >= Duration::from_millis(3) {
+                    break;
+                }
+            }
             for _ in 0..rounds {
                 let begin = Instant::now();
                 let output = E::parse(black_box(source))?;
