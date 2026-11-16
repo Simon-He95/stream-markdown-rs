@@ -508,6 +508,13 @@ struct PluginMatch {
     cursor: usize,
 }
 
+#[derive(Default)]
+struct PreviewState {
+    pending_math: Vec<BlockId>,
+    reference: Option<reference_preview::ReferencePreview>,
+    separator: Option<SeparatorProbe>,
+}
+
 pub(crate) struct Engine {
     options: Options,
     batch: bool,
@@ -524,10 +531,8 @@ pub(crate) struct Engine {
     preview: Option<BlockId>,
     row_preview_end: usize,
     inline_preview: Option<(BlockId, usize)>,
-    pending_math_previews: Vec<BlockId>,
-    reference_preview: Option<reference_preview::ReferencePreview>,
+    preview_state: Option<Box<PreviewState>>,
     custom_closure: Option<Box<custom_closure::State>>,
-    separator: Option<SeparatorProbe>,
     fence_probe: Option<FenceProbe>,
     tag_probe: Option<tag::OpeningProbe>,
     promoted_tag: Option<usize>,
@@ -562,10 +567,8 @@ impl Engine {
             preview: None,
             row_preview_end: 0,
             inline_preview: None,
-            pending_math_previews: Vec::new(),
-            reference_preview: None,
+            preview_state: None,
             custom_closure: None,
-            separator: None,
             fence_probe: None,
             tag_probe: None,
             promoted_tag: None,
@@ -685,13 +688,13 @@ impl Engine {
             return Ok(());
         }
         if final_input {
-            for id in self.pending_math_previews.drain(..) {
-                output.update(Change::PreviewInlines {
-                    id,
-                    nodes: Vec::new(),
-                });
-            }
-            if self.reference_preview.is_some() {
+            if let Some(preview) = &mut self.preview_state {
+                for id in preview.pending_math.drain(..) {
+                    output.update(Change::PreviewInlines {
+                        id,
+                        nodes: Vec::new(),
+                    });
+                }
                 self.clear_reference_preview(&mut output);
             }
             if self.line_start != source.len() {
@@ -1704,14 +1707,15 @@ impl Engine {
             && byte == b'|'
         {
             let start = end - head.len();
-            if self
+            let preview = self.preview_state.get_or_insert_with(Box::default);
+            if preview
                 .separator
                 .as_ref()
                 .is_none_or(|separator| separator.start != start)
             {
-                self.separator = Some(SeparatorProbe::new(source, start, paragraph.first));
+                preview.separator = Some(SeparatorProbe::new(source, start, paragraph.first));
             }
-            let separator = self.separator.as_mut().unwrap();
+            let separator = preview.separator.as_mut().unwrap();
             let (pending, alignment_changed) = separator.update(source, end);
             if pending {
                 if self.preview != Some(paragraph.id) || alignment_changed {
@@ -1917,11 +1921,35 @@ impl Engine {
             return self.close_vmr(source, close, index, output);
         }
 
+        if matched == self.containers.len() {
+            if self.running.is_none() && matches!(self.active, Some(Active::Footnote(_))) {
+                let Some(Active::Footnote(note)) = self.active.take() else {
+                    unreachable!()
+                };
+                if self.advance_footnote(source, note, line, output)? {
+                    self.extend_containers(line.next);
+                    return Ok(());
+                }
+            } else if matches!(
+                self.active,
+                Some(
+                    Active::Fence(_)
+                        | Active::Element(_)
+                        | Active::Html(_)
+                        | Active::Math(_)
+                        | Active::Summary(_)
+                )
+            ) || self.running.is_some()
+            {
+                self.extend_containers(line.next);
+                return self.line(source, line, output);
+            }
+        }
+
+        let remaining = &source[line.start..line.end];
+        let mut opening = container::opening_at(remaining, line.column, line.padding);
         if matched < self.containers.len() {
-            let remaining = &source[line.start..line.end];
-            let starts_container = container::quote_at(remaining, line.column, line.padding)
-                .is_some()
-                || container::list_at(remaining, line.column, line.padding).is_some()
+            let starts_container = opening.is_some()
                 || self.options.markstream
                     && (self.vmr_opener(source, line) || self.details_opener(source, line));
             if matches!(self.active, Some(Active::Paragraph(_)))
@@ -1936,9 +1964,8 @@ impl Engine {
             self.stop_leaf(source, output)?;
             if matched > 0
                 && let Kind::List { style, .. } = self.containers[matched - 1].kind
-                && !container::list_at(remaining, line.column, line.padding).is_some_and(
-                    |(marker, _)| marker.style == style && !thematic(unindent(remaining)),
-                )
+                && !matches!(opening, Some(container::Opening::List(marker, _))
+                    if marker.style == style && !thematic(unindent(remaining)))
             {
                 matched -= 1;
             }
@@ -1955,27 +1982,6 @@ impl Engine {
             {
                 *tight = false;
             }
-        } else if self.running.is_none() && matches!(self.active, Some(Active::Footnote(_))) {
-            let Some(Active::Footnote(note)) = self.active.take() else {
-                unreachable!()
-            };
-            if self.advance_footnote(source, note, line, output)? {
-                self.extend_containers(line.next);
-                return Ok(());
-            }
-        } else if matches!(
-            self.active,
-            Some(
-                Active::Fence(_)
-                    | Active::Element(_)
-                    | Active::Html(_)
-                    | Active::Math(_)
-                    | Active::Summary(_)
-            )
-        ) || self.running.is_some()
-        {
-            self.extend_containers(line.next);
-            return self.line(source, line, output);
         }
 
         if !blank(&source[line.start..line.end]) && !self.containers.is_empty() {
@@ -1987,66 +1993,69 @@ impl Engine {
             }
         }
         let mut opened_item = false;
-        loop {
-            let remaining = &source[line.start..line.end];
-            if let Some(prefix) = container::quote_at(remaining, line.column, line.padding) {
-                self.stop_leaf(source, output)?;
-                self.mark_item_content();
-                if self.options.markstream
-                    && self.open_quoted_admonition(source, line, prefix, output)
-                {
-                    return Ok(());
+        while let Some(opener) = opening {
+            match opener {
+                container::Opening::Quote(prefix) => {
+                    self.stop_leaf(source, output)?;
+                    self.mark_item_content();
+                    if self.options.markstream
+                        && self.open_quoted_admonition(source, line, prefix, output)
+                    {
+                        return Ok(());
+                    }
+                    self.open_container(Kind::Quote, line.start, line.next, output);
+                    line.advance(prefix);
                 }
-                self.open_container(Kind::Quote, line.start, line.next, output);
-                line.advance(prefix);
-                continue;
+                container::Opening::List(marker, prefix) => {
+                    let remaining = &source[line.start..line.end];
+                    if thematic(unindent(remaining)) {
+                        break;
+                    }
+                    if matches!(self.active, Some(Active::Paragraph(_)))
+                        && !marker.interrupts(remaining)
+                    {
+                        break;
+                    }
+                    self.stop_leaf(source, output)?;
+                    self.mark_item_content();
+                    if !matches!(self.containers.last().map(|frame| frame.kind), Some(Kind::List { style, .. }) if style == marker.style)
+                    {
+                        self.open_container(
+                            Kind::List {
+                                style: marker.style,
+                                ordinal: marker.ordinal,
+                                tight: true,
+                            },
+                            line.start,
+                            line.next,
+                            output,
+                        );
+                    }
+                    let content = &remaining[marker.content..];
+                    let (task, marker_length) = if self.options.syntax == Syntax::Gfm {
+                        task_marker(content)
+                    } else {
+                        (None, 0)
+                    };
+                    self.open_container(
+                        Kind::Item {
+                            indent: marker.indent,
+                            blank: false,
+                            has_content: task.is_some(),
+                            task,
+                        },
+                        line.start,
+                        line.next,
+                        output,
+                    );
+                    line.advance(prefix);
+                    line.start += marker_length;
+                    line.column += marker_length;
+                    opened_item = true;
+                }
             }
-            let Some((marker, prefix)) = container::list_at(remaining, line.column, line.padding)
-            else {
-                break;
-            };
-            if thematic(unindent(remaining)) {
-                break;
-            }
-            if matches!(self.active, Some(Active::Paragraph(_))) && !marker.interrupts(remaining) {
-                break;
-            }
-            self.stop_leaf(source, output)?;
-            self.mark_item_content();
-            if !matches!(self.containers.last().map(|frame| frame.kind), Some(Kind::List { style, .. }) if style == marker.style)
-            {
-                self.open_container(
-                    Kind::List {
-                        style: marker.style,
-                        ordinal: marker.ordinal,
-                        tight: true,
-                    },
-                    line.start,
-                    line.next,
-                    output,
-                );
-            }
-            let content = &remaining[marker.content..];
-            let (task, marker_length) = if self.options.syntax == Syntax::Gfm {
-                task_marker(content)
-            } else {
-                (None, 0)
-            };
-            self.open_container(
-                Kind::Item {
-                    indent: marker.indent,
-                    blank: false,
-                    has_content: task.is_some(),
-                    task,
-                },
-                line.start,
-                line.next,
-                output,
-            );
-            line.advance(prefix);
-            line.start += marker_length;
-            line.column += marker_length;
-            opened_item = true;
+            opening =
+                container::opening_at(&source[line.start..line.end], line.column, line.padding);
         }
 
         if blank(&source[line.start..line.end]) {
@@ -3330,8 +3339,12 @@ impl Engine {
         if !self.options.custom_tags.is_empty() {
             nodes = custom_inline::group(source, nodes, leaf.content.end, &self.options, true);
         }
-        if let Err(index) = self.pending_math_previews.binary_search(&leaf.id) {
-            self.pending_math_previews.insert(index, leaf.id);
+        let pending = &mut self
+            .preview_state
+            .get_or_insert_with(Box::default)
+            .pending_math;
+        if let Err(index) = pending.binary_search(&leaf.id) {
+            pending.insert(index, leaf.id);
         }
         output.update(Change::PreviewInlines { id: leaf.id, nodes });
     }

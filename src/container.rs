@@ -123,14 +123,18 @@ pub(crate) fn quote_at(line: &str, column: usize, padding: usize) -> Option<Pref
     if leading.padding != 0 || bytes.get(leading.bytes) != Some(&b'>') {
         return None;
     }
+    Some(quote_after_indent(bytes, column, leading))
+}
+
+fn quote_after_indent(bytes: &[u8], column: usize, leading: Prefix) -> Prefix {
     let marker_end = leading.bytes + 1;
     let columns = leading.columns + 1;
     let following = whitespace(&bytes[marker_end..], column + columns, 0, 1);
-    Some(Prefix {
+    Prefix {
         bytes: marker_end + following.bytes,
         columns: columns + following.columns,
         padding: following.padding,
-    })
+    }
 }
 
 pub(crate) fn list_at(line: &str, column: usize, padding: usize) -> Option<(ListMarker, Prefix)> {
@@ -139,6 +143,27 @@ pub(crate) fn list_at(line: &str, column: usize, padding: usize) -> Option<(List
     if leading.padding != 0 {
         return None;
     }
+    list_after_indent(bytes, column, leading)
+}
+
+pub(crate) enum Opening {
+    Quote(Prefix),
+    List(ListMarker, Prefix),
+}
+
+pub(crate) fn opening_at(line: &str, column: usize, padding: usize) -> Option<Opening> {
+    let bytes = line.as_bytes();
+    let leading = whitespace(bytes, column, padding, 3);
+    if leading.padding != 0 {
+        return None;
+    }
+    if bytes.get(leading.bytes) == Some(&b'>') {
+        return Some(Opening::Quote(quote_after_indent(bytes, column, leading)));
+    }
+    list_after_indent(bytes, column, leading).map(|(marker, prefix)| Opening::List(marker, prefix))
+}
+
+fn list_after_indent(bytes: &[u8], column: usize, leading: Prefix) -> Option<(ListMarker, Prefix)> {
     let (style, digits, ordinal) = list_marker(bytes, leading.bytes)?;
     let width = digits + 1;
     let marker_end = leading.bytes + width;

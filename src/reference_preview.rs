@@ -30,8 +30,9 @@ impl Engine {
         };
         let span = Span::new(start, self.scan);
         if self
-            .reference_preview
+            .preview_state
             .as_ref()
+            .and_then(|state| state.reference.as_ref())
             .is_some_and(|preview| preview.span == span)
         {
             return;
@@ -85,11 +86,17 @@ impl Engine {
             output.update(Change::PreviewInlines { id: leaf.id, nodes });
         }
         self.refs.remove(label.as_ref());
-        self.reference_preview = Some(ReferencePreview { span, blocks });
+        self.preview_state
+            .get_or_insert_with(Box::default)
+            .reference = Some(ReferencePreview { span, blocks });
     }
 
     pub(super) fn clear_reference_preview(&mut self, output: &mut Output<'_>) {
-        if let Some(preview) = self.reference_preview.take() {
+        if let Some(preview) = self
+            .preview_state
+            .as_mut()
+            .and_then(|state| state.reference.take())
+        {
             for id in preview.blocks {
                 output.update(Change::PreviewInlines {
                     id,
