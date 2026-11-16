@@ -474,7 +474,7 @@ impl Renderer<'_> {
                 InlineKind::Text(text) | InlineKind::Math { body: text, .. } => {
                     escape(&mut self.html, text.as_str(self.source))
                 }
-                InlineKind::Code(text) => {
+                InlineKind::Code(text) | InlineKind::CodePreview(text) => {
                     self.html.push_str("<code>");
                     escape(&mut self.html, text.as_str(self.source));
                     self.html.push_str("</code>");
@@ -559,6 +559,7 @@ impl Renderer<'_> {
             match &inline.kind {
                 InlineKind::Text(text)
                 | InlineKind::Code(text)
+                | InlineKind::CodePreview(text)
                 | InlineKind::Subscript(text)
                 | InlineKind::Superscript(text)
                 | InlineKind::Math { body: text, .. } => {

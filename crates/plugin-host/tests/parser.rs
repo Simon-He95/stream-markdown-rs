@@ -373,3 +373,96 @@ fn finish_calls_the_wasm_eof_phase_and_commits_consumed_input() {
         Change::Insert { block, parent: None } if block == heading
     )));
 }
+
+#[test]
+fn wasm_inline_plugins_descend_formatting_and_explicit_link_labels() {
+    use stream_markdown_rs::{InlineContent, InlineKind};
+
+    let wasm = wat::parse_str(include_str!("fixtures/delimited.wat")).unwrap();
+    let module = WasmPlugin::load(
+        &wasm,
+        Rule {
+            trigger: b'@',
+            scope: Scope::Inline,
+            kind: 11,
+        },
+        Limits::default(),
+    )
+    .unwrap();
+    let options = Options::default();
+    let source = "**`@code!` \\@escaped! @中文!** [@label!](https://example.com/@dest!) <https://example.com/@auto!> ![@alt!](/x)\n";
+    let batch = parse_with_plugins(
+        source,
+        &options,
+        vec![Box::new(module.instantiate().unwrap())],
+    )
+    .unwrap();
+    let BlockData::Paragraph(InlineContent::Parsed(nodes)) = &batch.nodes[0].data else {
+        panic!("expected parsed paragraph");
+    };
+    let InlineKind::Strong(styled) = &nodes[0].kind else {
+        panic!("expected a strong run");
+    };
+    assert!(matches!(&styled[0].kind, InlineKind::Code(code) if code.as_str(source) == "@code!"));
+    let escaped = styled
+        .iter()
+        .find(|node| {
+            matches!(&node.kind,
+                InlineKind::Text(text) if text.as_str(source).contains("@escaped!")
+            )
+        })
+        .unwrap();
+    assert!(source[escaped.span.start..escaped.span.end].starts_with("\\@escaped!"));
+    let nested = styled
+        .iter()
+        .find(|node| matches!(node.kind, InlineKind::Extension(11)))
+        .unwrap();
+    assert_eq!(&source[nested.span.start..nested.span.end], "@中文!");
+
+    let links = nodes
+        .iter()
+        .filter_map(|node| match &node.kind {
+            InlineKind::Link(link) => Some(link.as_ref()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(links.len(), 2);
+    assert_eq!(
+        links[0].destination.as_str(source),
+        "https://example.com/@dest!"
+    );
+    assert!(matches!(
+        &links[0].children[0].kind,
+        InlineKind::Extension(11)
+    ));
+    assert!(matches!(&links[1].children[0].kind, InlineKind::Text(_)));
+    let image = nodes
+        .iter()
+        .find_map(|node| match &node.kind {
+            InlineKind::Image(image) => Some(image),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        matches!(&image.children[0].kind, InlineKind::Text(text) if text.as_str(source) == "@alt!")
+    );
+
+    let mut parser = Parser::new(options);
+    parser.add_plugin(module.instantiate().unwrap()).unwrap();
+    let mut changes = Vec::new();
+    for (start, ch) in source.char_indices() {
+        parser
+            .append(&source[start..start + ch.len_utf8()], &mut changes)
+            .unwrap();
+    }
+    parser.finish(&mut changes).unwrap();
+    let streamed = changes.iter().rev().find_map(|change| match change {
+        Change::Insert { block, .. } | Change::Replace(block)
+            if block.status == BlockStatus::Closed =>
+        {
+            Some(block)
+        }
+        _ => None,
+    });
+    assert_eq!(streamed, Some(&batch.nodes[0]));
+}

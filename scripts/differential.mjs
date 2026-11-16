@@ -231,6 +231,11 @@ function verify(id, options, actions, corpus = false) {
   let source = ''
   let wasFinal = false
   let warmColdDifferences = 0
+  let finalCount = 0
+  let previewMismatches = 0
+  let finalMismatches = 0
+  let firstPreviewMismatch
+  let firstFinalMismatch
   // The upstream corpus validator reused its sync parser instance. Keep that
   // baseline visible and use a fresh instance for every candidate comparison.
   const legacyCorpusReader = corpus && !checkingCandidate ? reference.createColdReader(config) : null
@@ -247,8 +252,10 @@ function verify(id, options, actions, corpus = false) {
       else if (action.kind === 'append') {
         session.append(action.text)
       }
-      if (action.final)
+      if (action.final) {
         session.finish()
+        finalCount++
+      }
       wasFinal = action.final
 
       const fresh = reference.parseCold(source, config, action.final)
@@ -257,17 +264,27 @@ function verify(id, options, actions, corpus = false) {
         warmColdDifferences++
       const actual = session.snapshot()
       if (!isDeepStrictEqual(actual, expected)) {
+        if (action.final)
+          finalMismatches++
+        else
+          previewMismatches++
+        if (action.final ? firstFinalMismatch : firstPreviewMismatch)
+          continue
         let node = 0
         while (node < Math.max(expected.length, actual.length) && isDeepStrictEqual(actual[node], expected[node]))
           node++
         const settings = { depth: 4, maxArrayLength: 8, maxStringLength: 320 }
-        throw new Error([
+        const detail = [
           `${id}, commit ${index}, ${action.kind}, final=${action.final}`,
           `input length: ${source.length}, last 200 chars: ${JSON.stringify(source.slice(-200))}`,
           `first difference ${firstDifference(expected[node], actual[node], `node[${node}]`)}`,
           `expected node[${node}]: ${inspect(expected[node], settings)}`,
           `actual node[${node}]: ${inspect(actual[node], settings)}`,
-        ].join('\n'))
+        ].join('\n')
+        if (action.final)
+          firstFinalMismatch = detail
+        else
+          firstPreviewMismatch = detail
       }
     }
   }
@@ -275,8 +292,19 @@ function verify(id, options, actions, corpus = false) {
     session?.dispose?.()
   }
 
+  const previewCount = actions.length - finalCount
+  const result = `${previewCount - previewMismatches}/${previewCount} preview, ${finalCount - finalMismatches}/${finalCount} final commits`
   const diagnostics = warmColdDifferences ? `; legacy reused sync differs from fresh on ${warmColdDifferences} commit(s)` : ''
-  console.log(`PASS ${id} (${actions.length} commits${diagnostics})`)
+  if (previewMismatches || finalMismatches) {
+    console.error(`FAIL ${id} (${result}${diagnostics})`)
+    for (const detail of [firstPreviewMismatch, firstFinalMismatch]) {
+      if (detail)
+        console.error(detail)
+    }
+    return false
+  }
+  console.log(`PASS ${id} (${result}${diagnostics})`)
+  return true
 }
 
 const corpora = new URL('../fixtures/corpus/', import.meta.url)
@@ -285,7 +313,8 @@ let failed = 0
 function check(...args) {
   checked++
   try {
-    verify(...args)
+    if (!verify(...args))
+      failed++
   }
   catch (error) {
     failed++

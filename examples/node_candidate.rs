@@ -98,6 +98,7 @@ fn inline(value: &Inline, source: &str) -> Value {
     let (kind, data) = match &value.kind {
         InlineKind::Text(value) => ("text", text(value)),
         InlineKind::Code(value) => ("code", text(value)),
+        InlineKind::CodePreview(value) => ("code_preview", text(value)),
         InlineKind::Math { body, loading } => (
             "math_inline",
             json!({ "body": text(body), "loading": loading }),

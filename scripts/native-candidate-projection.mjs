@@ -160,8 +160,8 @@ function allowsLink(href, context, kind = 'link') {
   return !/^(?:javascript|vbscript):/i.test(url)
 }
 
-function legacyLinkText(children) {
-  return children.map(child => child.content ?? child.raw).join('')
+function legacyLinkText(children, useImageAlt = false) {
+  return children.map(child => useImageAlt && child.type === 'image' ? child.alt : child.content ?? child.raw).join('')
 }
 
 function markdownHref(href) {
@@ -255,7 +255,8 @@ function customInlineNode(data, status, raw, context) {
 
 function sameLineInlineSuffix(inlines, index, context) {
   const line = lineAt(context.lineStarts, inlines[index].span[1])
-  if (inlines.some(node => node.kind === 'code' && lineAt(context.lineStarts, node.span[0]) === line))
+  if (inlines.some(node => (node.kind === 'code' || node.kind === 'code_preview')
+    && lineAt(context.lineStarts, node.span[0]) === line))
     return false
   for (let i = index + 1; i < inlines.length; i++) {
     const node = inlines[i]
@@ -279,7 +280,10 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false) {
     else if (kind === 'hardbreak') {
       nodes.push({ type: 'hardbreak', raw: '\\\n' })
     }
-    else if (kind === 'code') {
+    else if (kind === 'code' || kind === 'code_preview') {
+      const previous = nodes.at(-1)
+      if (kind === 'code_preview' && previous?.type === 'text')
+        delete previous.center
       const code = readText(data, context)
       nodes.push({ type: 'inline_code', code, raw: code })
     }
@@ -315,7 +319,7 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false) {
       const children = projectInlineNodes(data.children, context, kind === 'link' && data.loading)
       const allowed = allowsLink(href, context, kind)
       if (kind === 'link' && data.loading) {
-        const text = legacyLinkText(children)
+        const text = legacyLinkText(children, context.markstream)
         const hasImage = children.some(child => child.type === 'image')
         const ready = context.markstream && !hasImage ? pendingLinkDestination(destination) : destination
         const preparedHref = ready === destination ? href : markdownHref(ready)
@@ -344,10 +348,14 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false) {
         const first = data.children.at(0)
         const last = data.children.at(-1)
         const labelRaw = first && last ? normalize(context.read([first.span[0], last.span[1]])) : ''
-        const imageRaw = context.markstream && insideLoadingLink && data.loading
-          ? raw + (href ? ')' : '')
-          : labelRaw
-        nodes.push({ type: 'image', src: href, alt: displayText(children), title, raw: imageRaw, loading: data.loading })
+        const nestedPreview = context.markstream && insideLoadingLink && data.loading
+        const ready = nestedPreview ? pendingLinkDestination(destination) : destination
+        const preparedSrc = ready === destination ? href : markdownHref(ready)
+        const src = preparedSrc === href || !preparedSrc || allowsLink(preparedSrc, context, kind)
+          ? preparedSrc
+          : ''
+        const imageRaw = nestedPreview ? raw + (src ? ')' : '') : labelRaw
+        nodes.push({ type: 'image', src, alt: displayText(children), title, raw: imageRaw, loading: data.loading })
       }
       else {
         const markup = raw.startsWith('<') ? 'autolink' : raw.startsWith('[') ? '' : 'linkify'

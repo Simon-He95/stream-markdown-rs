@@ -22,6 +22,8 @@ pub struct Inline {
 pub enum InlineKind {
     Text(Text),
     Code(Text),
+    /// A Markstream AI preview whose closing delimiter has yet to arrive.
+    CodePreview(Text),
     Math {
         body: Text,
         loading: bool,
@@ -441,6 +443,7 @@ fn remap_nodes(nodes: &mut [Inline], joined: &str, parts: &[Fragment], reference
         match &mut node.kind {
             InlineKind::Text(text)
             | InlineKind::Code(text)
+            | InlineKind::CodePreview(text)
             | InlineKind::Math { body: text, .. }
             | InlineKind::Subscript(text)
             | InlineKind::Superscript(text) => remap_text(text, joined, parts),
@@ -870,7 +873,7 @@ fn parse_scanned<S: Storage, const MATH: bool, const MARKSTREAM: bool>(
                     if i == n {
                         InlineKind::Text(Text::Source(span(begin, i)))
                     } else {
-                        InlineKind::Code(Text::Source(span(n, i)))
+                        InlineKind::CodePreview(Text::Source(span(n, i)))
                     }
                 } else {
                     i = n;
@@ -3099,7 +3102,9 @@ mod tests {
         let newline = source.find('\n').unwrap();
         let parts = [span(2, newline + 1), span(newline + 3, source.len())];
         let nodes = parse_fragments_preview(source, &parts, &options, &refs);
-        assert!(matches!(&nodes[2].kind, InlineKind::Code(body) if body.as_str(source) == "code"));
+        assert!(
+            matches!(&nodes[2].kind, InlineKind::CodePreview(body) if body.as_str(source) == "code")
+        );
         let final_nodes = parse_fragments(source, &parts, &options, &refs, None);
         assert!(
             matches!(&final_nodes[2].kind, InlineKind::Text(body) if body.as_str(source) == "`code")

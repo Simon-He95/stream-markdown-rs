@@ -236,6 +236,7 @@ fn collect_parts<'a>(
                 Part::Text(text, escaped_first)
             }
             InlineKind::Code(text)
+            | InlineKind::CodePreview(text)
             | InlineKind::Math { body: text, .. }
             | InlineKind::Subscript(text)
             | InlineKind::Superscript(text) => Part::Opaque(text),

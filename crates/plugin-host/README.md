@@ -51,7 +51,9 @@ All counts are relative to the current window and must land on UTF-8 character b
 
 Block rules run on complete Markdown lines, including the last line at EOF. A rule that asks for more input owns its candidate until it accepts, rejects, or receives Finish. The parser emits an extension when the rule accepts. If the rule rejects after Advance or still needs more input at Finish, the parser replays the buffered candidate with ordinary Markdown block rules.
 
-Losing the enclosing quote or list prefix finishes a pending block rule before the next out-of-scope line. The accepted extension keeps its original parent, and the next line goes through native block parsing. Inline rules process the source-backed text windows that Markdown assigns to them.
+Losing the enclosing quote or list prefix finishes a pending block rule before the next out-of-scope line. The accepted extension keeps its original parent, and the next line goes through native block parsing.
+
+The core passes source-backed text in formatting nodes and explicit link labels to inline rules. It handles code spans, link destinations, autolinks, image alt text and escaped punctuation itself.
 
 ## Guest ABI version 2
 

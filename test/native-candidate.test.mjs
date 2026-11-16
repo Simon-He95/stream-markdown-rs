@@ -80,6 +80,31 @@ test('native candidate addresses a backpatched table cell by its flat wire index
   }
 })
 
+test('native candidate projects pending and confirmed table code at the same row', () => {
+  const session = createSession()
+  try {
+    session.append('| Key | Value |\n| --- | --- |\n| ')
+    assert.equal(session.snapshot()[0].rows[0].raw, '|')
+    session.append('x | Use `cmd')
+    const pending = session.snapshot()[0].rows[0].cells[1].children
+    assert.deepEqual(pending, [
+      { type: 'text', content: 'Use ', raw: 'Use ' },
+      { type: 'inline_code', code: 'cmd', raw: 'cmd' },
+    ])
+    session.append('` |\n')
+    session.finish()
+    const rows = session.snapshot()[0].rows
+    assert.equal(rows.length, 1)
+    assert.deepEqual(rows[0].cells[1].children, [
+      { type: 'text', content: 'Use ', raw: 'Use ', center: false },
+      pending[1],
+    ])
+  }
+  finally {
+    session.dispose()
+  }
+})
+
 test('native candidate projects resolved link and image metadata from typed spans', () => {
   const session = createSession()
   try {
@@ -627,5 +652,75 @@ test('link projection normalizes Unicode hostnames without changing userinfo, po
   }
   finally {
     session.dispose()
+  }
+})
+
+test('a loading image link after a completed link uses the image alt as its label', () => {
+  const session = createSession()
+  try {
+    session.append('[first](https://example.com)\n[![Second](http')
+    const early = session.snapshot()[0].children[2]
+    assert.equal(early.text, 'Second')
+    assert.deepEqual(early.children, [{
+      type: 'image', src: '', alt: 'Second', title: null,
+      raw: '![Second](http', loading: true,
+    }])
+
+    session.append('s://images.example/part')
+    const [previous, newline, preview] = session.snapshot()[0].children
+    assert.equal(previous.href, 'https://example.com')
+    assert.equal(previous.loading, false)
+    assert.equal(newline.content, '\n')
+    assert.equal(preview.text, 'Second')
+    assert.equal(preview.raw, '[Second]()')
+    assert.equal(preview.loading, true)
+    assert.deepEqual(preview.children, [{
+      type: 'image', src: 'https://images.example/part', alt: 'Second', title: null,
+      raw: '![Second](https://images.example/part)', loading: true,
+    }])
+    session.append(')](https://example.com/second)')
+    const confirmed = session.snapshot()[0].children[2]
+    assert.equal(confirmed.href, 'https://example.com/second')
+    assert.equal(confirmed.loading, false)
+    assert.equal(confirmed.children[0].loading, false)
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('an image-link preview recognizes only the unescaped bracket after typed text', () => {
+  for (const [prefix, visible] of [
+    ['say "hello" ', 'say “hello” '],
+    ['preceding \\* ', 'preceding * '],
+  ]) {
+    const session = createSession()
+    try {
+      session.append(prefix + '[![Second](https://images.example/part')
+      const [before, link] = session.snapshot()[0].children
+      assert.equal(before.content, visible)
+      assert.equal(link.type, 'link')
+      assert.equal(link.loading, true)
+      assert.equal(link.text, 'Second')
+    }
+    finally {
+      session.dispose()
+    }
+  }
+
+  const escaped = createSession()
+  const unconfirmed = createSession()
+  try {
+    escaped.append('literal \\[![Second](https://images.example/part')
+    const [before, image] = escaped.snapshot()[0].children
+    assert.equal(before.content, 'literal [')
+    assert.equal(image.type, 'image')
+    assert.equal(image.loading, true)
+    unconfirmed.append('[![')
+    assert.ok(unconfirmed.snapshot().every(node => node.children?.every(child => child.type !== 'link' && child.type !== 'image') ?? true))
+  }
+  finally {
+    escaped.dispose()
+    unconfirmed.dispose()
   }
 })

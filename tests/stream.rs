@@ -809,7 +809,13 @@ fn an_incomplete_table_row_is_previewed_then_committed_once() {
         .append("| A | B |\n| --- | --- |\n", &mut changes)
         .unwrap();
     changes.clear();
-    parser.append("| 1 | ", &mut changes).unwrap();
+    parser.append("| ", &mut changes).unwrap();
+    assert!(
+        matches!(changes.as_slice(), [Change::Preview { hint: Some(PreviewHint::TableRow(cells)), .. }]
+        if cells.len() == 2 && cells.iter().all(|cell| matches!(cell, InlineContent::Plain(span) if parser.source(*span).is_empty())))
+    );
+    changes.clear();
+    parser.append("1 | ", &mut changes).unwrap();
     let [
         Change::Preview {
             id,
@@ -855,7 +861,7 @@ fn markstream_previews_inline_code_in_an_incomplete_table_row() {
     };
     let id = *id;
     assert!(matches!(&cells[0], InlineContent::Parsed(nodes)
-        if matches!(nodes.as_slice(), [Inline { kind: InlineKind::Code(Text::Decoded(text)), .. }] if text.as_ref() == "a|b")));
+        if matches!(nodes.as_slice(), [Inline { kind: InlineKind::CodePreview(Text::Decoded(text)), .. }] if text.as_ref() == "a|b")));
     changes.clear();
     parser.append("` | done |\n", &mut changes).unwrap();
     assert!(

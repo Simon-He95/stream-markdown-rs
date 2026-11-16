@@ -1523,7 +1523,6 @@ impl Engine {
         if let Some(Active::Table(table)) = &self.active
             && self.options.preview == Preview::Ai
             && byte == b'|'
-            && !blank(&head[1..])
         {
             self.partial_table_row(
                 source,
@@ -3436,17 +3435,42 @@ impl Engine {
         use crate::{Inline, InlineKind, Text};
 
         let mut output = Vec::with_capacity(nodes.len());
-        for node in nodes {
+        for mut node in nodes {
             let InlineKind::Text(Text::Source(span)) = node.kind else {
+                let children = match &mut node.kind {
+                    InlineKind::Emphasis(children)
+                    | InlineKind::Strong(children)
+                    | InlineKind::Strikethrough(children)
+                    | InlineKind::Highlight(children)
+                    | InlineKind::Insert(children) => Some(children),
+                    InlineKind::Link(link) | InlineKind::LinkPreview(link)
+                        if source.as_bytes().get(node.span.start) == Some(&b'[') =>
+                    {
+                        Some(&mut link.children)
+                    }
+                    _ => None,
+                };
+                if let Some(children) = children {
+                    *children = self.apply_inline_plugins(source, std::mem::take(children))?;
+                }
                 output.push(node);
                 continue;
             };
-            if node.span != span {
+            let escaped = node.span.start != span.start;
+            if node.span.end != span.end
+                || (escaped
+                    && (node.span.start + 1 != span.start
+                        || source.as_bytes()[node.span.start] != b'\\'
+                        || span.start == span.end
+                        || !source.as_bytes()[span.start].is_ascii_punctuation()))
+            {
                 output.push(node);
                 continue;
             }
+            // An escaped first byte can share a text node with subsequent ordinary text.
+            let mut raw_start = node.span.start;
             let mut retained = span.start;
-            let mut position = retained;
+            let mut position = retained + usize::from(escaped);
             while position < span.end {
                 let byte = source.as_bytes()[position];
                 let mut matched = None;
@@ -3492,10 +3516,9 @@ impl Engine {
                 if let Some((kind, consumed, fields)) = matched.filter(|(_, width, _)| *width != 0)
                 {
                     if retained != position {
-                        let span = Span::new(retained, position);
                         output.push(Inline {
-                            span,
-                            kind: InlineKind::Text(Text::Source(span)),
+                            span: Span::new(raw_start, position),
+                            kind: InlineKind::Text(Text::Source(Span::new(retained, position))),
                         });
                     }
                     let span = Span::new(position, position + consumed);
@@ -3509,6 +3532,7 @@ impl Engine {
                     output.push(Inline { span, kind });
                     position = span.end;
                     retained = position;
+                    raw_start = position;
                 } else {
                     position += source[position..span.end]
                         .chars()
@@ -3518,10 +3542,9 @@ impl Engine {
                 }
             }
             if retained != span.end {
-                let span = Span::new(retained, span.end);
                 output.push(Inline {
-                    span,
-                    kind: InlineKind::Text(Text::Source(span)),
+                    span: Span::new(raw_start, span.end),
+                    kind: InlineKind::Text(Text::Source(Span::new(retained, span.end))),
                 });
             }
         }
@@ -3604,26 +3627,52 @@ fn preview_link_around_image(source: &str, nodes: &mut Vec<crate::Inline>) {
     ) {
         return;
     }
-    let InlineKind::Text(Text::Source(text)) = &before.kind else {
+    let InlineKind::Text(text) = &before.kind else {
         return;
     };
-    if *text != before.span || text.end != image.span.start || text.end == text.start {
-        return;
-    }
-    let start = text.end - 1;
-    if source.as_bytes()[start] != b'['
-        || start
-            .checked_sub(1)
-            .is_some_and(|previous| source.as_bytes()[previous] == b'!')
+    if before.span.end != image.span.start
+        || before.span.start == before.span.end
+        || matches!(text, Text::Source(span) if span.end != before.span.end)
     {
         return;
     }
+    let visible = text.as_str(source);
+    if !visible.ends_with('[') {
+        return;
+    }
+    let start = before.span.end - 1;
+    let bytes = source.as_bytes();
+    let preceding_backslashes = bytes[..start]
+        .iter()
+        .rev()
+        .take_while(|&&byte| byte == b'\\')
+        .count();
+    if bytes[start] != b'['
+        || start
+            .checked_sub(1)
+            .is_some_and(|previous| bytes[previous] == b'!')
+        || preceding_backslashes % 2 != 0
+    {
+        return;
+    }
+    let only_marker = visible.len() == 1;
     let image = nodes.pop().unwrap();
-    if nodes.last().unwrap().span.start == start {
+    if only_marker {
         nodes.pop();
-    } else if let Some(before) = nodes.last_mut() {
+    } else {
+        let before = nodes.last_mut().unwrap();
         before.span.end = start;
-        before.kind = InlineKind::Text(Text::Source(before.span));
+        let InlineKind::Text(text) = &mut before.kind else {
+            unreachable!()
+        };
+        match text {
+            Text::Source(span) => span.end = start,
+            Text::Decoded(decoded) => {
+                let mut trimmed: String = std::mem::take(decoded).into();
+                trimmed.pop();
+                *decoded = trimmed.into_boxed_str();
+            }
+        }
     }
     let end = image.span.end;
     nodes.push(Inline {
