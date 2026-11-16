@@ -35,6 +35,10 @@ impl View {
                             content: InlineContent::Plain(body),
                             ..
                         }
+                        | BlockData::Summary {
+                            content: InlineContent::Plain(body),
+                            ..
+                        }
                         | BlockData::Math {
                             body: stream_markdown_rs::Text::Source(body),
                         }
@@ -176,6 +180,53 @@ fn quote_preview_requires_body_and_keeps_its_block_and_leaf_ids() {
     view.apply(&mut changes);
     assert!(view.blocks.contains_key(&quote_id));
     assert!(view.blocks.contains_key(&paragraph_id));
+    assert_eq!(
+        view.blocks.into_values().collect::<Vec<_>>(),
+        parse(parser.source_text(), &options).unwrap().nodes
+    );
+}
+
+#[test]
+fn a_quote_in_open_details_publishes_under_its_parent_before_newline() {
+    let options = Options {
+        preview: Preview::Ai,
+        markstream: true,
+        ..Options::default()
+    };
+    let mut parser = Parser::new(options.clone());
+    let mut changes = Vec::new();
+    let mut view = View::default();
+    parser
+        .append(
+            "<details>\r\n<summary>Example</summary>\r\n\r\n",
+            &mut changes,
+        )
+        .unwrap();
+    let details = changes
+        .iter()
+        .find_map(|change| match change {
+            Change::Insert { block, .. } if matches!(block.data, BlockData::Details(_)) => {
+                Some(block.id)
+            }
+            _ => None,
+        })
+        .unwrap();
+    view.apply(&mut changes);
+    parser.append("> ", &mut changes).unwrap();
+    assert!(changes.is_empty());
+    parser.append("警告 `code", &mut changes).unwrap();
+    assert!(changes.iter().any(|change| matches!(change,
+        Change::Insert { block, parent: Some(parent) } if *parent == details && matches!(block.data, BlockData::Quote))));
+    view.apply(&mut changes);
+    assert_eq!(view.blocks[&details].status, BlockStatus::Open);
+    parser
+        .append("`\r\n\r\n</details>\r\n", &mut changes)
+        .unwrap();
+    assert!(!changes.iter().any(|change| matches!(change,
+        Change::Insert { block, .. } if matches!(block.data, BlockData::Quote))));
+    view.apply(&mut changes);
+    parser.finish(&mut changes).unwrap();
+    view.apply(&mut changes);
     assert_eq!(
         view.blocks.into_values().collect::<Vec<_>>(),
         parse(parser.source_text(), &options).unwrap().nodes

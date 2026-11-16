@@ -1721,8 +1721,19 @@ impl Engine {
         if !matches!(raw.as_bytes().first(), Some(b'>' | b' ')) {
             return false;
         }
-        match self.containers.as_slice() {
-            [] => {}
+        let parent_depth = match self.containers.as_slice() {
+            [] => 0,
+            [
+                Frame {
+                    kind:
+                        Kind::Html {
+                            tag: details::Name::Details,
+                            closed: false,
+                            ..
+                        },
+                    ..
+                },
+            ] => 1,
             [
                 Frame {
                     kind: Kind::List { .. },
@@ -1737,9 +1748,9 @@ impl Engine {
                         },
                     ..
                 },
-            ] if raw.starts_with('>') => {}
+            ] if raw.starts_with('>') => 0,
             _ => return false,
-        }
+        };
         let Some(prefix) = container::quote_at(raw, 0, 0).filter(|prefix| prefix.padding == 0)
         else {
             return false;
@@ -1755,7 +1766,7 @@ impl Engine {
         {
             return false;
         }
-        self.close_containers(0, output);
+        self.close_containers(parent_depth, output);
         self.open_container(Kind::Quote, self.line_start, self.scan, output);
         self.partial_container = Some(prefix);
         true
