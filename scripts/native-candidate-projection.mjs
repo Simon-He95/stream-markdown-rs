@@ -288,6 +288,24 @@ function sameLineInlineSuffix(inlines, index, context) {
   return false
 }
 
+function recoverAdjacentBracketLabel(inlines, index, nodes, label, context) {
+  const before = inlines[index - 1]
+  const previous = nodes.at(-1)
+  const current = inlines[index]
+  if (context.final || before?.kind !== 'text' || previous?.type !== 'text'
+    || before.span[1] !== current.span[0] || !context.read(current.span).startsWith('[' + label + ']('))
+    return label
+  const source = context.read(before.span)
+  if (source !== previous.content || /[\\\r\n]/u.test(source))
+    return label
+  const adjacent = /^(\[[^[\]]+\])\[([^[\]]+\][^[\]]*)$/u.exec(source)
+  if (!adjacent)
+    return label
+  // This legacy recovery starts after the second opening bracket in the plain-text run.
+  nodes[nodes.length - 1] = textNode(adjacent[1], false)
+  return adjacent[2] + '[' + label
+}
+
 function projectInlineNodes(inlines, context, insideLoadingLink = false) {
   const nodes = []
   for (let index = 0; index < inlines.length; index++) {
@@ -383,7 +401,7 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false) {
       const simpleMarkdownLink = context.markstream && kind === 'link' && raw.startsWith('[')
         && children.length === 1 && children[0].type === 'text'
       if (kind === 'link' && data.loading) {
-        const text = legacyLinkText(children, context.markstream)
+        let text = legacyLinkText(children, context.markstream)
         const hasImage = children.some(child => child.type === 'image')
         const ready = context.markstream && !hasImage ? pendingLinkDestination(destination) : destination
         const preparedHref = ready === destination ? href : markdownHref(ready)
@@ -391,8 +409,15 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false) {
           ? preparedHref
           : ''
         const linkified = Boolean(visibleHref && context.markstream && ready !== destination)
-        const visibleChildren = children.map(child => child.type === 'text' ? textNode(child.content, false) : child)
+        let visibleChildren = children.map(child => child.type === 'text' ? textNode(child.content, false) : child)
         const waitingForHref = context.markstream && !hasImage && !ready
+        if (waitingForHref && allowed && simpleMarkdownLink && title === null) {
+          const recovered = recoverAdjacentBracketLabel(inlines, index, nodes, text, context)
+          if (recovered !== text) {
+            text = recovered
+            visibleChildren = [textNode(text, false)]
+          }
+        }
         const previous = nodes.at(-1)
         if (waitingForHref && previous?.type === 'text' && !previous.content.includes('\n'))
           delete previous.center
@@ -416,7 +441,8 @@ function projectInlineNodes(inlines, context, insideLoadingLink = false) {
           if (afterLabel.startsWith('](') && closing !== -1) {
             // Legacy plain-text recovery starts after the first literal close
             // when the Markdown URL is denied before it becomes a link.
-            mergeText(nodes, textNode(text + afterLabel.slice(closing + 1), false))
+            const label = recoverAdjacentBracketLabel(inlines, index, nodes, text, context)
+            mergeText(nodes, textNode(label + afterLabel.slice(closing + 1), false))
             if (nodes.at(-1)?.type === 'text')
               delete nodes.at(-1).center
             continue

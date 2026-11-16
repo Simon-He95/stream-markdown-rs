@@ -1143,6 +1143,49 @@ test('a draft Markdown link waiting for its href preserves the legacy preceding 
   }
 })
 
+test('legacy preview keeps adjacent-bracket recovery within unresolved link text', () => {
+  const options = { parseOptions: { validateLink: href => !/^\s*javascript:/i.test(href) } }
+  const session = createSession(options)
+  const ordinary = createSession(options)
+  const confirmed = createSession(options)
+  try {
+    const prefix = '[A][ref] 与 [B](javas'
+    session.append(prefix)
+    assert.deepEqual(session.snapshot()[0], {
+      type: 'paragraph', raw: prefix,
+      children: [
+        { type: 'text', content: '[A]', raw: '[A]' },
+        {
+          type: 'link', href: '', title: null, text: 'ref] 与 [B',
+          children: [{ type: 'text', content: 'ref] 与 [B', raw: 'ref] 与 [B' }],
+          loading: true, markup: '',
+        },
+      ],
+    })
+    session.append('cript:alert(1))')
+    assert.deepEqual(session.snapshot()[0].children, [
+      { type: 'text', content: '[A]ref] 与 [B)', raw: '[A]ref] 与 [B)' },
+    ])
+    session.finish()
+    assert.deepEqual(session.snapshot()[0].children, [
+      { type: 'text', content: '[A][ref] 与 B)', raw: '[A][ref] 与 B)' },
+    ])
+
+    ordinary.append('[A] 与 [B](javas')
+    assert.equal(ordinary.snapshot()[0].children[0].content, '[A] 与 ')
+    assert.equal(ordinary.snapshot()[0].children[1].text, 'B')
+    confirmed.append('[A][ref] 与 [B](https://example.org)')
+    assert.equal(confirmed.snapshot()[0].children[0].content, '[A][ref] 与 ')
+    assert.equal(confirmed.snapshot()[0].children[1].text, 'B')
+    assert.equal(confirmed.snapshot()[0].children[1].loading, false)
+  }
+  finally {
+    session.dispose()
+    ordinary.dispose()
+    confirmed.dispose()
+  }
+})
+
 test('a loading image link after a completed link uses the image alt as its label', () => {
   const session = createSession()
   try {
