@@ -5,6 +5,15 @@ edition = "2024"
 rust-version = "1.88"
 license = "MIT"
 description = "Incremental Markdown parser for Rust terminal applications"
+exclude = [
+    "/fixtures/oracle-source.tar.gz",
+    "/package.json",
+    "/patches/",
+    "/pnpm-lock.yaml",
+    "/scripts/",
+    "/test/",
+    "/vitest.config.ts",
+]
 
 [dependencies]
 memchr = "2.8"

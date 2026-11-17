@@ -8,7 +8,7 @@
 
 ## 运行验证
 
-使用 Rust 1.88 或更新工具链及 pnpm。
+克隆仓库后，使用 Rust 1.88 或更新工具链及 pnpm 运行以下验证。
 
 ```sh
 cargo test --locked --workspace
