@@ -2489,7 +2489,11 @@ impl Engine {
             return self.line(source, Line { start, ..line }, output);
         }
 
-        if self.batch
+        if (self.batch
+            || self.containers.is_empty()
+                && self.draft.is_none()
+                && self.options.preview == Preview::Off
+                && source.as_bytes().get(line.next) == Some(&b'\n'))
             && self.active.is_none()
             && leading.columns < 4
             && head
@@ -2500,8 +2504,25 @@ impl Engine {
             && !self.options.markstream
             && self.plugins.is_empty()
         {
-            self.start_paragraph(head, start, line, output);
-            return Ok(());
+            if self.batch {
+                self.start_paragraph(head, start, line, output);
+                return Ok(());
+            }
+            // The next empty line confirms the paragraph ends in this append.
+            let (id, _) = self.block_id(start);
+            let span = Span::new(start, line.end);
+            return self.finish_leaf(
+                source,
+                Dependent {
+                    id,
+                    span,
+                    content: span,
+                    heading: None,
+                    parts: None,
+                },
+                false,
+                output,
+            );
         }
 
         if self.options.markstream
