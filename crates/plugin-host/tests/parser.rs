@@ -149,7 +149,7 @@ fn a_wasm_block_advances_across_multiple_bounded_windows_on_one_line() {
 
 #[test]
 fn a_trapping_wasm_rule_discards_the_failed_append_and_stops_the_session() {
-    use stream_markdown_rs::ParseError;
+    use stream_markdown_rs::{BorrowedParser, ParseError, SourceBuffer};
 
     let wasm = wat::parse_str(
         r#"(module
@@ -172,11 +172,13 @@ fn a_trapping_wasm_rule_discards_the_failed_append_and_stops_the_session() {
     let mut parser = Parser::new(Options::default());
     parser.add_plugin(module.instantiate().unwrap()).unwrap();
     let mut changes = Vec::new();
-    parser.append("previous reply\n\n", &mut changes).unwrap();
+    let prior = "previous reply\n\n";
+    let failed = "temporary text\n\n@broken!\n";
+    parser.append(prior, &mut changes).unwrap();
     let before = changes.clone();
 
     assert!(matches!(
-        parser.append("temporary text\n\n@broken!\n", &mut changes),
+        parser.append(failed, &mut changes),
         Err(ParseError::Plugin(error)) if error.message.contains("executing WASM rule")
     ));
     assert_eq!(changes, before);
@@ -184,6 +186,27 @@ fn a_trapping_wasm_rule_discards_the_failed_append_and_stops_the_session() {
         parser.append("more", &mut changes),
         Err(ParseError::Finished)
     ));
+
+    let mut source = SourceBuffer::new(prior.to_owned());
+    let mut borrowed = BorrowedParser::new(&source, Options::default());
+    borrowed.add_plugin(module.instantiate().unwrap()).unwrap();
+    changes.clear();
+    borrowed.append(&source, prior.len(), &mut changes).unwrap();
+    assert_eq!(changes, before);
+
+    source.push_str(failed);
+    let end = source.as_str().len();
+    assert!(matches!(
+        borrowed.append(&source, end, &mut changes),
+        Err(ParseError::Plugin(error)) if error.message.contains("executing WASM rule")
+    ));
+    assert_eq!(changes, before);
+    assert_eq!(source.as_str(), format!("{prior}{failed}"));
+    assert_eq!(borrowed.metrics().input_bytes, end);
+    assert_eq!(
+        borrowed.append(&source, end, &mut changes),
+        Err(ParseError::Finished)
+    );
 }
 
 #[test]
