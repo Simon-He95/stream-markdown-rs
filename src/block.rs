@@ -2351,6 +2351,19 @@ impl Engine {
                     line.advance(prefix);
                     line.start += marker_length;
                     line.column += marker_length;
+                    let body = &source[line.start..line.end];
+                    if line.padding == 0
+                        && !self.options.math
+                        && !self.options.markstream
+                        && body.as_bytes().first().is_some_and(|&byte| {
+                            ordinary_start(byte) && !self.has_block_plugin(byte)
+                        })
+                    {
+                        self.mark_item_content();
+                        self.extend_containers(line.next);
+                        self.start_paragraph(body, line.start, line, output);
+                        return Ok(());
+                    }
                     opened_item = true;
                 }
             }
