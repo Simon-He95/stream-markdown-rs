@@ -5,9 +5,11 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import platform
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -42,13 +44,22 @@ def run(binary, action, mode, corpus, size, args):
     command = [str(binary), action, mode, corpus, size, str(args.rounds)]
     if args.chunk_bytes is not None:
         command.append(str(args.chunk_bytes))
+    cpu_before = os.times() if os.name == "posix" else None
+    began = time.perf_counter_ns()
     child = subprocess.run(command, capture_output=True, text=True, timeout=args.timeout)
+    worker_elapsed = time.perf_counter_ns() - began
+    cpu_after = os.times() if cpu_before is not None else None
     if child.returncode:
         raise ValueError(f"{binary.name}/{action}: {child.stderr.strip() or child.returncode}")
     result = json.loads(child.stdout)
     expected = {"engine": action, "mode": mode, "case": corpus, "size": size}
     if any(result.get(key) != value for key, value in expected.items()):
         raise ValueError(f"{binary.name}/{action} emitted a result for a different workload")
+    result["worker_wall_ns"] = worker_elapsed
+    if cpu_after is not None:
+        cpu = ((cpu_after.children_user - cpu_before.children_user)
+               + (cpu_after.children_system - cpu_before.children_system))
+        result["worker_cpu_ns"] = round(cpu * 1_000_000_000)
     return result
 
 
