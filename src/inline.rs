@@ -1450,6 +1450,11 @@ fn finish_tokens<S: Storage, const MARKSTREAM: bool>(
         .iter()
         .any(|token| token.delimiter().is_some_and(|d| d.opens || d.closes))
     {
+        let count = head - start;
+        // Keep short runs from growing the output through 4, 8, then 16 slots.
+        if (9..=16).contains(&count) {
+            output.reserve_exact(count);
+        }
         for &token in &tokens[start..] {
             push_inline(&mut output, token.into_inline(payloads));
         }
