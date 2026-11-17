@@ -45,6 +45,7 @@ fn request(sessions: &mut HashMap<u64, Parser>, input: &Value) -> Result<Value, 
             .map(|tag| tag.as_str().map(str::to_owned).ok_or("invalid custom tag"))
             .collect::<Result<_, _>>()?;
         slot.insert(Parser::new(Options {
+            preview_table_header: false,
             syntax: Syntax::Gfm,
             preview: Preview::Ai,
             custom_tags,

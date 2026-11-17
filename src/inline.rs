@@ -255,7 +255,7 @@ pub(crate) fn parse(
     options: &Options,
     refs: &References,
 ) -> Vec<Inline> {
-    parse_inner(source, input, options, refs, None, None, false)
+    parse_inner(source, input, options, refs, None, None, None)
 }
 
 /// Parses a trimmed span and borrows it directly when no inline rules are needed.
@@ -412,7 +412,7 @@ fn parse_extended_content(
         return InlineContent::Plain(input);
     }
     InlineContent::Parsed(parse_inner(
-        source, input, options, refs, unresolved, None, false,
+        source, input, options, refs, unresolved, None, None,
     ))
 }
 
@@ -422,7 +422,17 @@ pub(crate) fn parse_preview(
     options: &Options,
     refs: &References,
 ) -> Vec<Inline> {
-    parse_inner(source, input, options, refs, None, None, true)
+    parse_preview_from(source, input, input.start, options, refs)
+}
+
+pub(crate) fn parse_preview_from(
+    source: &str,
+    input: Span,
+    prefix_end: usize,
+    options: &Options,
+    refs: &References,
+) -> Vec<Inline> {
+    parse_inner(source, input, options, refs, None, None, Some(prefix_end))
 }
 
 #[cfg(test)]
@@ -433,7 +443,7 @@ pub(crate) fn parse_tracked(
     refs: &References,
     unresolved: &mut Vec<String>,
 ) -> Vec<Inline> {
-    parse_inner(source, input, options, refs, Some(unresolved), None, false)
+    parse_inner(source, input, options, refs, Some(unresolved), None, None)
 }
 
 pub(crate) fn parse_fragments(
@@ -475,7 +485,15 @@ fn parse_fragments_inner(
         contiguous.end = part.end;
         next
     }) {
-        return parse_inner(source, contiguous, options, refs, unresolved, None, preview);
+        return parse_inner(
+            source,
+            contiguous,
+            options,
+            refs,
+            unresolved,
+            None,
+            preview.then_some(contiguous.start),
+        );
     }
 
     let capacity = fragments.iter().map(|part| part.end - part.start).sum();
@@ -507,7 +525,7 @@ fn parse_fragments_inner(
         refs,
         unresolved,
         Some((source, &mut references)),
-        preview,
+        preview.then_some(0),
     );
     references.sort_unstable();
     remap_nodes(&mut nodes, &joined, &mapping, &references);
@@ -728,7 +746,7 @@ fn parse_inner(
     refs: &References,
     unresolved: Option<&mut Vec<String>>,
     reference_origins: Option<(&str, &mut Vec<usize>)>,
-    preview: bool,
+    preview: Option<usize>,
 ) -> Vec<Inline> {
     // Short leaves usually fit without allocating scratch. Use Vec for longer
     // leaves, where repeatedly checking SmallVec's spill state costs more.
@@ -758,7 +776,7 @@ fn parse_inner(
         InlineContent::Parsed(nodes) => nodes,
         InlineContent::Fragments(_) => unreachable!(),
     };
-    if options.markstream && preview {
+    if options.markstream && preview.is_some() {
         markstream::strip_preview_tail(source, &mut nodes, options.math);
     }
     if options.markstream {
@@ -777,7 +795,7 @@ fn parse_storage<S: Storage>(
     refs: &References,
     unresolved: Option<&mut Vec<String>>,
     reference_origins: Option<(&str, &mut Vec<usize>)>,
-    preview: bool,
+    preview: Option<usize>,
 ) -> InlineContent {
     match (options.math, options.markstream) {
         (false, false) => parse_with::<S, false, false>(
@@ -851,22 +869,23 @@ fn parse_with<S: Storage, const MATH: bool, const MARKSTREAM: bool>(
     refs: &References,
     unresolved: Option<&mut Vec<String>>,
     reference_origins: Option<(&str, &mut Vec<usize>)>,
-    preview: bool,
+    preview: Option<usize>,
 ) -> InlineContent {
     let leading = content(source, input).trim_start_matches([' ', '\t', '\r', '\n']);
     let start = input.end - leading.len();
     let end = start + leading.trim_end_matches([' ', '\t', '\r', '\n']).len();
+    let scan_start = preview.unwrap_or(start).clamp(start, end);
     let (first, gfm_autolink) =
-        markup_probe::<MATH, MARKSTREAM>(&source[start..end], options.syntax);
+        markup_probe::<MATH, MARKSTREAM>(&source[scan_start..end], options.syntax);
     let span = span(start, end);
     let Some(first) = first else {
         return plain_or_autolink::<MARKSTREAM>(source, span, gfm_autolink);
     };
     let lex = LexStart {
         span,
-        first: start + first,
+        first: scan_start + first,
         gfm_autolink,
-        preview_end: preview.then_some(input.end),
+        preview_end: preview.map(|_| input.end),
     };
     InlineContent::Parsed(parse_scanned::<S, MATH, MARKSTREAM>(
         source,

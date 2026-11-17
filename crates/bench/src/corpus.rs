@@ -46,6 +46,16 @@ pub fn source(case: &str, target: usize) -> Option<String> {
             "[late]: https://example.com \"late title\"\n",
         ),
         "real-chat" => ("", REAL_CHAT, ""),
+        "preview-tail" => {
+            let mut unit = "The assistant checked each source and kept a short record. ".repeat(10);
+            unit.push_str(
+                "中文 **confirmed** and [open link](https://example.org) with `code`.\n\n",
+            );
+            let mut result = unit.repeat(target.div_ceil(unit.len()));
+            let end = boundary_at_or_before(&result, target);
+            result.truncate(end);
+            return Some(result);
+        }
         _ => return None,
     };
     let mut source = String::with_capacity(target.max(unit.len()));

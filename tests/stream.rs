@@ -1753,7 +1753,7 @@ fn a_partial_reference_definition_previews_only_waiting_text() {
 }
 
 #[test]
-fn a_bracket_prefix_is_literal_until_the_reference_definition_has_a_destination() {
+fn a_literal_bracket_prefix_is_withdrawn_once_it_names_a_waiting_definition() {
     let options = Options {
         markstream: true,
         preview: Preview::Ai,
@@ -1780,10 +1780,10 @@ fn a_bracket_prefix_is_literal_until_the_reference_definition_has_a_destination(
         view.apply(&mut changes);
 
         parser.append("源]:", &mut changes).unwrap();
-        view.apply(&mut changes);
-        assert_eq!(parser.source(view.blocks[&id].span), "[来源]:");
-        parser.append(ending, &mut changes).unwrap();
         assert!(changes.contains(&Change::Remove { id }));
+        view.apply(&mut changes);
+        assert!(!view.blocks.contains_key(&id));
+        parser.append(ending, &mut changes).unwrap();
         view.apply(&mut changes);
         parser.finish(&mut changes).unwrap();
         view.apply(&mut changes);
@@ -2420,4 +2420,133 @@ fn fence_info_keeps_absence_and_exact_nonempty_ranges() {
         &source[Range::from(segmented.data.code_info().unwrap())],
         "中文"
     );
+}
+
+#[test]
+fn delimited_table_header_is_opt_in_and_resolves_to_final_markdown() {
+    let mut parser = Parser::new(Options {
+        preview: Preview::Ai,
+        preview_table_header: true,
+        ..Options::default()
+    });
+    let mut changes = Vec::new();
+    parser.append("| A | B |\n", &mut changes).unwrap();
+    assert!(changes.iter().any(|change| matches!(change,
+        Change::Preview { hint: Some(PreviewHint::Table { loading: true, table }), .. }
+            if table.header().len() == 2)));
+    changes.clear();
+    parser.finish(&mut changes).unwrap();
+    assert!(changes.iter().any(|change| matches!(
+        change,
+        Change::Replace(Block {
+            data: BlockData::Paragraph(_),
+            ..
+        })
+    )));
+    assert!(
+        changes
+            .iter()
+            .any(|change| matches!(change, Change::Preview { hint: None, .. }))
+    );
+}
+
+#[test]
+fn a_completed_plain_continuation_clears_the_header_preview() {
+    let mut parser = Parser::new(Options {
+        preview: Preview::Ai,
+        preview_table_header: true,
+        ..Options::default()
+    });
+    let mut changes = Vec::new();
+    parser.append("| A | B |\n", &mut changes).unwrap();
+    let id = changes
+        .iter()
+        .find_map(|change| match change {
+            Change::Preview {
+                id,
+                hint: Some(PreviewHint::Table { .. }),
+            } => Some(*id),
+            _ => None,
+        })
+        .expect("header preview");
+    changes.clear();
+    parser
+        .append("ordinary continuation\n", &mut changes)
+        .unwrap();
+    assert!(changes.contains(&Change::Preview { id, hint: None }));
+}
+
+#[test]
+fn display_math_retains_original_outer_whitespace_when_it_can_be_borrowed() {
+    let source = "$$\r\n\\frac{a}{b}\r\n$$\r\n";
+    let document = parse(
+        source,
+        &Options {
+            math: true,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        document.nodes[0].display_math_source(source),
+        Some("\r\n\\frac{a}{b}\r\n")
+    );
+
+    let nested = "> $$\n> \\frac{a}{b}\n> $$\n";
+    let document = parse(
+        nested,
+        &Options {
+            math: true,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    let tex = document
+        .nodes
+        .iter()
+        .find_map(|block| block.display_math_source(nested));
+    assert_eq!(tex, Some("\\frac{a}{b}"));
+}
+
+#[test]
+fn waiting_reference_header_does_not_create_a_visible_paragraph() {
+    let options = Options {
+        markstream: true,
+        preview: Preview::Ai,
+        ..Options::default()
+    };
+    for destination in [" https://example.com/docs\n\n", ""] {
+        let mut parser = Parser::new(options.clone());
+        let mut view = View::default();
+        let mut changes = Vec::new();
+        parser
+            .append("补全 [参考链接][docs]。\n\n", &mut changes)
+            .unwrap();
+        view.apply(&mut changes);
+        let id = *view.blocks.keys().next().unwrap();
+        parser.append("[docs]:", &mut changes).unwrap();
+        assert!(changes.is_empty(), "{changes:?}");
+        if !destination.is_empty() {
+            parser.append(destination, &mut changes).unwrap();
+            assert!(
+                changes
+                    .iter()
+                    .any(|change| matches!(change, Change::Replace(block) if block.id == id))
+            );
+        }
+        view.apply(&mut changes);
+        parser.finish(&mut changes).unwrap();
+        view.apply(&mut changes);
+        let full = parse(parser.source_text(), &options).unwrap();
+        assert_eq!(
+            view.blocks
+                .into_values()
+                .map(|block| (block.span, block.data))
+                .collect::<Vec<_>>(),
+            full.nodes
+                .into_iter()
+                .map(|block| (block.span, block.data))
+                .collect::<Vec<_>>()
+        );
+    }
 }
