@@ -2584,6 +2584,45 @@ mod tests {
     }
 
     #[test]
+    fn terminal_inline_fast_paths_match_the_general_parser() {
+        let cases = [
+            "prefix [label]()",
+            "prefix [label](/中文)",
+            "prefix [label](12345678901234567890123456789012)",
+            "prefix [label](123456789012345678901234567890123)",
+            "prefix [label](a_(b))",
+            "prefix [label](a\\)b)",
+            "prefix [label](/a&amp;b)",
+            "prefix [label](<bare url>)",
+            "prefix [label](/path \"title\")",
+            "prefix [label](a\x7fb)",
+            "prefix www.example.test [label](/docs)",
+            "prefix **word**",
+            "prefix _more words_",
+            "prefix **文字**",
+            "mid_word_",
+            "prefix _punctuation!_",
+        ];
+        for syntax in [Syntax::CommonMark, Syntax::Gfm] {
+            let options = Options {
+                syntax,
+                ..Options::default()
+            };
+            let refs = References::default();
+            for input in cases {
+                let source = format!("外{input}unused");
+                let range = span("外".len(), "外".len() + input.len());
+                let actual = parse_content(&source, range, &options, &refs, None);
+                assert_eq!(
+                    actual,
+                    InlineContent::Parsed(parse(&source, range, &options, &refs)),
+                    "{syntax:?} {input:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn tracks_only_unresolved_labels_and_retains_original_coordinates() {
         let source = "[标签][Straße\t  例]中 [未定义] `[code]` /dest";
         let end = source.len() - 6;
