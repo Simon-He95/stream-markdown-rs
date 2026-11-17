@@ -77,3 +77,7 @@ The host accepts up to 1,024 records per match and validates the full record tab
 The host limits module bytes before compilation, uses one memory and one table per instance, and applies the configured memory and instruction budgets. Each version, reserve, and step call gets an independent fuel budget. Modules use only local linear memory and have no imports or start function. ABI version and buffer bounds are checked on instantiation before registration.
 
 A trap or invalid result terminates the rule instance and returns a core `PluginError` to the caller. The core owns document transaction handling and emitted node IDs. The fixture in [delimited.wat](tests/fixtures/delimited.wat) exercises the ABI with a rule that accepts a range from `@` through `!`, including multiple input calls.
+
+## Measure runtime cost
+
+`cargo run --locked --release -p stream-markdown-plugin-host --example measure_guest` reports median module loading, instantiation, and two incremental appends using the delimited fixture. It checks that the WASM and native rules emit identical changes before timing. Both append measurements start with the rule already registered.
