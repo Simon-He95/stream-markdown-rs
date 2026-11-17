@@ -197,6 +197,8 @@ fn timed<'a, E: Engine<'a>>(
         "median_ns": percentile(&mut totals, 50),
     });
     if matches!(mode, Mode::Stream) {
+        output["first_append_samples_ns"] = json!(&firsts);
+        output["first_output_samples_ns"] = json!(&first_outputs);
         output["first_append_median_ns"] = json!(percentile(&mut firsts, 50));
         if !first_outputs.is_empty() {
             output["first_output_median_ns"] = json!(percentile(&mut first_outputs, 50));
