@@ -336,7 +336,7 @@ fn simple_terminal_inline(
                 children: if body == bracket {
                     Vec::new()
                 } else {
-                    singleton(original(body, bracket))
+                    vec![original(body, bracket)]
                 },
             }))
         }
@@ -355,12 +355,20 @@ fn simple_terminal_inline(
             if marker == b'`' {
                 InlineKind::Code(code_content(source, body, close))
             } else {
-                let open = flanking::<false>(source, input.start, first, body, input.end);
-                let closer = flanking::<false>(source, input.start, close, input.end, input.end);
-                if !open.opens || !closer.closes || !matching(open, closer) {
-                    return None;
+                // Whitespace before the opener and alphanumerics inside fix both delimiter roles.
+                let ascii_word = (first == input.start
+                    || matches!(bytes[first - 1], b' ' | b'\t' | b'\r' | b'\n'))
+                    && bytes[body].is_ascii_alphanumeric()
+                    && bytes[close - 1].is_ascii_alphanumeric();
+                if !ascii_word {
+                    let open = flanking::<false>(source, input.start, first, body, input.end);
+                    let closer =
+                        flanking::<false>(source, input.start, close, input.end, input.end);
+                    if !open.opens || !closer.closes || !matching(open, closer) {
+                        return None;
+                    }
                 }
-                delimiter_kind(marker, width, singleton(original(body, close)))
+                delimiter_kind(marker, width, vec![original(body, close)])
             }
         }
         _ => return None,
