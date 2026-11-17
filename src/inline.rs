@@ -326,13 +326,30 @@ fn simple_terminal_inline(
             if bytes[bracket] != b']' || bytes.get(bracket + 1) != Some(&b'(') {
                 return None;
             }
-            let (end, destination, title) = link_inline(source, bracket + 1, input.end)?;
-            if end != input.end {
-                return None;
-            }
+            let target_start = bracket + 2;
+            let target_end = input.end - 1;
+            // A plain target ending here needs no separate decoding pass.
+            let (destination, title) = if target_start <= target_end
+                && bytes[target_end] == b')'
+                && target_end - target_start <= 32
+                && !bytes[target_start..target_end]
+                    .iter()
+                    .any(|&byte| matches!(byte, 0..=32 | b'(' | b')' | b'<' | b'\\' | b'&' | 127))
+            {
+                (Text::Source(span(target_start, target_end)), None)
+            } else {
+                let (end, destination, title) = link_inline(source, bracket + 1, input.end)?;
+                if end != input.end {
+                    return None;
+                }
+                (
+                    decode_span(source, destination),
+                    title.map(|span| decode_span(source, span)),
+                )
+            };
             InlineKind::Link(Box::new(Link {
-                destination: decode_span(source, destination),
-                title: title.map(|span| decode_span(source, span)),
+                destination,
+                title,
                 children: if body == bracket {
                     Vec::new()
                 } else {
