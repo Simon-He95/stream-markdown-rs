@@ -97,6 +97,21 @@ impl Output<'_> {
         }
     }
 
+    fn settle_inserted_code(&mut self, id: BlockId, body_end: usize, end: usize) -> bool {
+        if let Self::Stream(changes, first) = self
+            && changes.len() > *first
+            && let Some(Change::Insert { block, .. }) = changes.last_mut()
+            && block.id == id
+            && let BlockData::CodeBlock { body, .. } = &mut block.data
+        {
+            body.end = body_end;
+            block.span.end = end;
+            block.status = BlockStatus::Closed;
+            return true;
+        }
+        false
+    }
+
     fn reserve_single_block(&mut self) {
         if let Self::Batch(nodes, _) = self
             && nodes.capacity() == 0
@@ -671,10 +686,13 @@ impl Engine {
                 );
                 let body_end = close.map_or(complete_end, |line| line.start);
                 let end = close.map_or(complete_end, |line| line.next);
-                emit_append(&mut output, fence.id, &mut fence.body.end, body_end);
                 self.metrics.scanned_bytes += end - self.scan;
                 self.scan = end;
                 self.line_start = end;
+                if close.is_some() && output.settle_inserted_code(fence.id, body_end, end) {
+                    continue;
+                }
+                emit_append(&mut output, fence.id, &mut fence.body.end, body_end);
                 if close.is_some() {
                     self.close_code(fence, end, BlockStatus::Closed, &mut output);
                 } else {

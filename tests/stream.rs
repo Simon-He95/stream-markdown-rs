@@ -478,6 +478,24 @@ fn finish_closes_fences_once_and_preserves_the_body() {
 }
 
 #[test]
+fn a_complete_fence_in_a_large_append_is_inserted_once() {
+    let options = Options::default();
+    let body = "let answer = 42;\n".repeat(256);
+    let code = format!("```rust\n{body}```\n");
+    let mut parser = Parser::new(options);
+    let mut changes = Vec::new();
+    parser.append(&code, &mut changes).unwrap();
+    let [Change::Insert { block, .. }] = changes.as_slice() else {
+        panic!("expected a single closed code block");
+    };
+    assert_eq!(parser.source(block.span), code);
+    assert_eq!(block.status, BlockStatus::Closed);
+    assert!(
+        matches!(block.data, BlockData::CodeBlock { body: span, .. } if parser.source(span) == body)
+    );
+}
+
+#[test]
 fn a_large_fence_append_keeps_a_partial_closer_out_of_its_body() {
     let options = Options::default();
     let body = format!("{}    ```\r\n", "text ``` inside\r\n".repeat(280));
