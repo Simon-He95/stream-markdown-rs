@@ -3143,7 +3143,7 @@ impl Engine {
             && !line.skip_block_plugins
             && let Some(stop) = self.start_plugin(source, start, line.next, *byte, output)?
         {
-            if stop < line.end && !source[stop..line.end].trim().is_empty() {
+            if stop < line.end && !blank(&source[stop..line.end]) {
                 return self.replay_plugin_work(
                     source,
                     PluginReplay::Fragment(Line::new(stop, line.end, line.next)),
@@ -4125,7 +4125,7 @@ impl Engine {
                     };
                     if !fragment {
                         self.source_line(source, line, output)?;
-                    } else if rejected || !source[span.start..stop].trim().is_empty() {
+                    } else if rejected || !blank(&source[span.start..stop]) {
                         self.line(source, line, output)?;
                     }
                 }

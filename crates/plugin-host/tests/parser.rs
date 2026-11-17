@@ -393,7 +393,8 @@ fn a_buffered_wasm_match_reparses_all_unconsumed_lines() {
 fn repeated_wasm_matches_do_not_recurse_through_line_remainders() {
     const MATCHES: usize = 2048;
     let input = "@".repeat(MATCHES);
-    let source = format!("{input}\n# Tail\n");
+    let tail = "\u{a0}\n# Tail\n";
+    let source = format!("{input}{tail}");
     let options = Options::default();
     for probe in [8589934593u64, 4294967296] {
         let wasm = wat::parse_str(format!(
@@ -423,20 +424,23 @@ fn repeated_wasm_matches_do_not_recurse_through_line_remainders() {
             vec![Box::new(module.instantiate().unwrap())],
         )
         .unwrap();
-        assert_eq!(batch.nodes.len(), MATCHES + 1);
+        assert_eq!(batch.nodes.len(), MATCHES + 2);
         for (index, block) in batch.nodes[..MATCHES].iter().enumerate() {
             assert_eq!(block.span, stream_markdown_rs::Span::new(index, index + 1));
             assert!(matches!(block.data, BlockData::Extension { kind: 7 }));
         }
+        assert!(matches!(batch.nodes[MATCHES].data, BlockData::Paragraph(_)));
+        let span = batch.nodes[MATCHES].span;
+        assert_eq!(&source[span.start..span.end], "\u{a0}");
         assert!(matches!(
-            batch.nodes[MATCHES].data,
+            batch.nodes[MATCHES + 1].data,
             BlockData::Heading { level: 1, .. }
         ));
 
         let mut parser = Parser::new(options.clone());
         parser.add_plugin(module.instantiate().unwrap()).unwrap();
         let mut changes = Vec::new();
-        for part in [&input[..], "\n# Tail\n"] {
+        for part in [&input[..], tail] {
             parser.append(part, &mut changes).unwrap();
         }
         parser.finish(&mut changes).unwrap();
