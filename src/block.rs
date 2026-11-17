@@ -4938,7 +4938,7 @@ fn html_start(line: &str, allow_type_seven: bool) -> Option<HtmlEnd> {
     None
 }
 
-fn reference_prefix(source: &str, start: usize, end: usize) -> Option<(&str, Reference, usize)> {
+fn reference_label(source: &str, start: usize, end: usize) -> Option<(&str, usize)> {
     let bytes = source.as_bytes();
     let start = skip_horizontal(bytes, start, end);
     if bytes.get(start) != Some(&b'[') || start == end {
@@ -4962,8 +4962,13 @@ fn reference_prefix(source: &str, start: usize, end: usize) -> Option<(&str, Ref
     if label.trim().is_empty() || label.chars().take(1000).count() > 999 {
         return None;
     }
+    Some((label, stop + 2))
+}
 
-    let offset = skip_horizontal(bytes, stop + 2, end);
+fn reference_prefix(source: &str, start: usize, end: usize) -> Option<(&str, Reference, usize)> {
+    let (label, after_colon) = reference_label(source, start, end)?;
+    let bytes = source.as_bytes();
+    let offset = skip_horizontal(bytes, after_colon, end);
     let offset =
         line_break(bytes, offset, end).map_or(offset, |next| skip_horizontal(bytes, next, end));
     let (destination, tail) = inline::link_destination(source, offset, end)?;

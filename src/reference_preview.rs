@@ -1,4 +1,4 @@
-use super::{Active, Dependency, Engine, Output, reference_prefix, unindent};
+use super::{Active, Dependency, Engine, Output, reference_label, reference_prefix, unindent};
 use crate::{BlockId, Change, Preview, Span, inline};
 
 pub(super) struct ReferencePreview {
@@ -48,16 +48,25 @@ impl Engine {
             return false;
         }
         let Some((label, reference, next)) = reference_prefix(source, start, span.end) else {
+            // Hold a bare definition header when earlier inlines already use its label.
+            // The ordinary block parser still decides what survives at EOF.
+            if raw
+                .trim_end_matches([' ', '\t', '\r', '\n'])
+                .ends_with("]:")
+                && let Some((label, _)) = reference_label(source, start, span.end)
+                && self.waiting.as_ref().is_some_and(|waiting| {
+                    waiting.contains_key(inline::normalize_label(label).as_ref())
+                })
+            {
+                self.discard_reference_draft(start, output);
+                return true;
+            }
             return false;
         };
         if !source[next..span.end].trim().is_empty() {
             return false;
         }
-        if let Some(draft) = self.draft.filter(|draft| draft.start == start) {
-            self.draft = None;
-            self.clear_inline_preview(draft.id, output);
-            output.update(Change::Remove { id: draft.id });
-        }
+        self.discard_reference_draft(start, output);
         let label = inline::normalize_label(label);
         if self.refs.get(label.as_ref()).is_some() {
             return true;
@@ -100,6 +109,14 @@ impl Engine {
             .get_or_insert_with(Box::default)
             .reference = Some(ReferencePreview { span, blocks });
         true
+    }
+
+    fn discard_reference_draft(&mut self, start: usize, output: &mut Output<'_>) {
+        if let Some(draft) = self.draft.filter(|draft| draft.start == start) {
+            self.draft = None;
+            self.clear_inline_preview(draft.id, output);
+            output.update(Change::Remove { id: draft.id });
+        }
     }
 
     pub(super) fn clear_reference_preview(&mut self, output: &mut Output<'_>) {

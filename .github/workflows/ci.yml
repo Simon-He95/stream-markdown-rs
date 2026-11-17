@@ -1,0 +1,44 @@
+name: Parser CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rust: [stable, "1.88.0"]
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install ${{ matrix.rust }} --profile minimal
+      - run: cargo +${{ matrix.rust }} test --locked --workspace
+      - if: matrix.rust == 'stable'
+        run: |
+          rustup component add --toolchain stable rustfmt clippy
+          cargo +stable fmt --all -- --check
+          cargo +stable clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+  compatibility:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - run: pnpm test:spec --native
+      - run: pnpm test:spec --native-stream
+      - run: cargo build --locked --release --example node_candidate
+      - run: node --test test/native-candidate.test.mjs
+      - run: pnpm test:candidate
+        env:
+          PARSER_CANDIDATE: ./scripts/native-candidate.mjs

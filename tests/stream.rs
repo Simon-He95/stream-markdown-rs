@@ -1753,7 +1753,7 @@ fn a_partial_reference_definition_previews_only_waiting_text() {
 }
 
 #[test]
-fn a_bracket_prefix_is_literal_until_the_reference_definition_has_a_destination() {
+fn a_literal_bracket_prefix_is_withdrawn_once_it_names_a_waiting_definition() {
     let options = Options {
         markstream: true,
         preview: Preview::Ai,
@@ -1780,10 +1780,10 @@ fn a_bracket_prefix_is_literal_until_the_reference_definition_has_a_destination(
         view.apply(&mut changes);
 
         parser.append("源]:", &mut changes).unwrap();
-        view.apply(&mut changes);
-        assert_eq!(parser.source(view.blocks[&id].span), "[来源]:");
-        parser.append(ending, &mut changes).unwrap();
         assert!(changes.contains(&Change::Remove { id }));
+        view.apply(&mut changes);
+        assert!(!view.blocks.contains_key(&id));
+        parser.append(ending, &mut changes).unwrap();
         view.apply(&mut changes);
         parser.finish(&mut changes).unwrap();
         view.apply(&mut changes);
@@ -2506,4 +2506,47 @@ fn display_math_retains_original_outer_whitespace_when_it_can_be_borrowed() {
         .iter()
         .find_map(|block| block.display_math_source(nested));
     assert_eq!(tex, Some("\\frac{a}{b}"));
+}
+
+#[test]
+fn waiting_reference_header_does_not_create_a_visible_paragraph() {
+    let options = Options {
+        markstream: true,
+        preview: Preview::Ai,
+        ..Options::default()
+    };
+    for destination in [" https://example.com/docs\n\n", ""] {
+        let mut parser = Parser::new(options.clone());
+        let mut view = View::default();
+        let mut changes = Vec::new();
+        parser
+            .append("补全 [参考链接][docs]。\n\n", &mut changes)
+            .unwrap();
+        view.apply(&mut changes);
+        let id = *view.blocks.keys().next().unwrap();
+        parser.append("[docs]:", &mut changes).unwrap();
+        assert!(changes.is_empty(), "{changes:?}");
+        if !destination.is_empty() {
+            parser.append(destination, &mut changes).unwrap();
+            assert!(
+                changes
+                    .iter()
+                    .any(|change| matches!(change, Change::Replace(block) if block.id == id))
+            );
+        }
+        view.apply(&mut changes);
+        parser.finish(&mut changes).unwrap();
+        view.apply(&mut changes);
+        let full = parse(parser.source_text(), &options).unwrap();
+        assert_eq!(
+            view.blocks
+                .into_values()
+                .map(|block| (block.span, block.data))
+                .collect::<Vec<_>>(),
+            full.nodes
+                .into_iter()
+                .map(|block| (block.span, block.data))
+                .collect::<Vec<_>>()
+        );
+    }
 }
