@@ -3982,8 +3982,7 @@ impl Engine {
             probe = false;
             let result = plugin_step(plugin, source, running.cursor, end, phase)?;
             match result {
-                accepted @ (RuleResult::Accept { consumed }
-                | RuleResult::AcceptWithFields { consumed, .. }) => {
+                RuleResult::Accept { consumed } | RuleResult::AcceptWithFields { consumed, .. } => {
                     let stop = running.cursor + consumed;
                     if stop == running.start {
                         return Err(
@@ -3991,7 +3990,7 @@ impl Engine {
                         );
                     }
                     let span = Span::new(running.start, stop);
-                    let data = match accepted {
+                    let data = match result {
                         RuleResult::AcceptWithFields { fields, .. } if !fields.is_empty() => {
                             crate::plugin::validate_fields(&fields, &source[Range::from(span)])?;
                             BlockData::ExtensionWithFields { kind, fields }
