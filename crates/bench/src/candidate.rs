@@ -1,18 +1,18 @@
 use crate::{
     consume_stream,
     trace::{self, Trace},
-    Engine, Mode, OwnedPulldown, Pulldown,
+    Engine, Input, Mode, OwnedPulldown, Pulldown,
 };
 use serde_json::{json, Value};
 use stream_markdown_rs::{
-    parse, Alignment, Block, BlockData, BlockId, BlockStatus, Change, Document, Inline,
-    InlineContent, InlineKind, Options, Parser, RawLine, Span,
+    parse, Alignment, Block, BlockData, BlockId, BlockStatus, BorrowedParser, Change, Document,
+    Inline, InlineContent, InlineKind, Options, Parser, RawLine, Span,
 };
 
 pub struct Candidate;
 
-pub struct Session {
-    parser: Parser,
+pub struct Session<P = Parser> {
+    parser: P,
     changes: Vec<Change>,
     nodes: Vec<Option<Block>>,
     parents: Vec<Option<BlockId>>,
@@ -26,7 +26,7 @@ impl<'a> Engine<'a> for Candidate {
         parse(source, &Options::default()).map_err(|error| error.to_string())
     }
 
-    fn start() -> Self::Session {
+    fn start(_: &'a Input) -> Self::Session {
         Session {
             parser: Parser::new(Options::default()),
             changes: Vec::new(),
@@ -59,7 +59,64 @@ impl<'a> Engine<'a> for Candidate {
     }
 }
 
-impl Session {
+pub struct BorrowedCandidate;
+
+pub struct BorrowedSession<'src> {
+    source: &'src Input,
+    view: Session<BorrowedParser>,
+}
+
+impl<'a> Engine<'a> for BorrowedCandidate {
+    type Document = Document<'a>;
+    type Session = BorrowedSession<'a>;
+
+    fn parse(source: &'a str) -> Result<Self::Document, String> {
+        Candidate::parse(source)
+    }
+
+    fn start(source: &'a Input) -> Self::Session {
+        BorrowedSession {
+            source,
+            view: Session {
+                parser: BorrowedParser::new(source, Options::default()),
+                changes: Vec::new(),
+                nodes: Vec::new(),
+                parents: Vec::new(),
+            },
+        }
+    }
+
+    fn append(session: &mut Self::Session, prefix: &'a str, _: usize) -> Result<(), String> {
+        session
+            .view
+            .parser
+            .append(session.source, prefix.len(), &mut session.view.changes)
+            .map_err(|error| error.to_string())?;
+        session.view.apply()
+    }
+
+    fn finish(session: &mut Self::Session) -> Result<(), String> {
+        session
+            .view
+            .parser
+            .finish(
+                session.source,
+                session.source.as_str().len(),
+                &mut session.view.changes,
+            )
+            .map_err(|error| error.to_string())?;
+        session.view.apply()?;
+        session.view.changes = Vec::new();
+        Ok(())
+    }
+
+    #[cfg(not(feature = "count-allocations"))]
+    fn has_output(session: &Self::Session) -> bool {
+        session.view.nodes.iter().any(Option::is_some)
+    }
+}
+
+impl<P> Session<P> {
     fn apply(&mut self) -> Result<(), String> {
         for change in self.changes.drain(..) {
             match change {
@@ -184,7 +241,8 @@ fn node_mut(nodes: &mut [Option<Block>], id: BlockId) -> Result<&mut Block, Stri
         .ok_or_else(|| format!("candidate update to unknown node {}", id.0))
 }
 
-pub fn verify(mode: Mode, source: &str, ends: &[usize]) -> Result<Value, String> {
+pub fn verify(mode: Mode, input: &Input, ends: &[usize], borrowed: bool) -> Result<Value, String> {
+    let source = input.as_str();
     let expected = trace::pulldown(Pulldown::parse(source)?)?;
     let document = Candidate::parse(source)?;
     if document
@@ -205,7 +263,7 @@ pub fn verify(mode: Mode, source: &str, ends: &[usize]) -> Result<Value, String>
     let mut counters = Value::Null;
 
     if matches!(mode, Mode::Stream) && difference.is_none() {
-        let mut pulldown = Pulldown::start();
+        let mut pulldown = Pulldown::start(input);
         consume_stream::<Pulldown>(&mut pulldown, source, ends, Pulldown::append)?;
         Pulldown::finish(&mut pulldown)?;
         if let Some(difference) = expected.difference(&trace::pulldown(pulldown)?) {
@@ -214,45 +272,61 @@ pub fn verify(mode: Mode, source: &str, ends: &[usize]) -> Result<Value, String>
             ));
         }
 
-        let mut owned = OwnedPulldown::start();
-        consume_stream::<OwnedPulldown>(&mut owned, source, ends, OwnedPulldown::append)?;
-        OwnedPulldown::finish(&mut owned)?;
-        if owned.source != source {
-            return Err("source-owning pulldown replay did not retain appended input".into());
-        }
-        if let Some(difference) = expected.difference(&trace::pulldown(owned.events)?) {
-            return Err(format!(
-                "source-owning pulldown replay diverged from its full parse: {difference}"
-            ));
+        if !borrowed {
+            let mut owned = OwnedPulldown::start(input);
+            consume_stream::<OwnedPulldown>(&mut owned, source, ends, OwnedPulldown::append)?;
+            OwnedPulldown::finish(&mut owned)?;
+            if owned.source != source {
+                return Err("source-owning pulldown replay did not retain appended input".into());
+            }
+            if let Some(difference) = expected.difference(&trace::pulldown(owned.events)?) {
+                return Err(format!(
+                    "source-owning pulldown replay diverged from its full parse: {difference}"
+                ));
+            }
         }
 
-        let mut session = Candidate::start();
-        consume_stream::<Candidate>(&mut session, source, ends, Candidate::append)?;
-        Candidate::finish(&mut session)?;
-        if session.parser.source_text() != source {
-            return Err("candidate did not retain the appended source".into());
-        }
+        let (nodes, parents, metrics) = if borrowed {
+            let mut session = BorrowedCandidate::start(input);
+            consume_stream::<BorrowedCandidate>(
+                &mut session,
+                source,
+                ends,
+                BorrowedCandidate::append,
+            )?;
+            BorrowedCandidate::finish(&mut session)?;
+            (
+                session.view.nodes,
+                session.view.parents,
+                session.view.parser.metrics(),
+            )
+        } else {
+            let mut session = Candidate::start(input);
+            consume_stream::<Candidate>(&mut session, source, ends, Candidate::append)?;
+            Candidate::finish(&mut session)?;
+            if session.parser.source_text() != source {
+                return Err("candidate did not retain the appended source".into());
+            }
+            (session.nodes, session.parents, session.parser.metrics())
+        };
         let streamed = blocks(
             source,
-            session
-                .nodes
+            nodes
                 .iter()
                 .flatten()
-                .map(|block| (block, session.parents.get(block.id.0).copied().flatten())),
+                .map(|block| (block, parents.get(block.id.0).copied().flatten())),
         )?;
         difference = expected.difference(&streamed).or_else(|| {
             let mut ordered = document.nodes.iter().collect::<Vec<_>>();
             ordered.sort_unstable_by_key(|block| block.id);
             let full_states = ordered.into_iter().map(|block| (block.span, block.status));
-            let stream_states = session
-                .nodes
+            let stream_states = nodes
                 .iter()
                 .flatten()
                 .map(|block| (block.span, block.status));
             (!full_states.eq(stream_states))
                 .then(|| "candidate full and streaming source ranges or final states differ".into())
         });
-        let metrics = session.parser.metrics();
         counters = json!({
             "input_bytes": metrics.input_bytes,
             "scanned_bytes": metrics.scanned_bytes,
@@ -551,7 +625,8 @@ mod tests {
             for size in [4096, 8192, 16384] {
                 let source = corpus::source(case, size).unwrap();
                 let ends = corpus::chunk_ends(&source, 64);
-                let mut session = Candidate::start();
+                let input = Input::new(source.clone());
+                let mut session = Candidate::start(&input);
                 consume_stream::<Candidate>(&mut session, &source, &ends, Candidate::append)
                     .unwrap();
                 Candidate::finish(&mut session).unwrap();

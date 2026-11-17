@@ -16,6 +16,11 @@ use std::process::ExitCode;
 #[cfg(not(feature = "count-allocations"))]
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "candidate")]
+type Input = stream_markdown_rs::SourceBuffer;
+#[cfg(not(feature = "candidate"))]
+type Input = String;
+
 const PULLDOWN_VERSION: &str = "0.13.6";
 
 fn pulldown_options() -> Options {
@@ -30,7 +35,7 @@ trait Engine<'a> {
     type Session;
 
     fn parse(source: &'a str) -> Result<Self::Document, String>;
-    fn start() -> Self::Session;
+    fn start(input: &'a Input) -> Self::Session;
     fn append(session: &mut Self::Session, source: &'a str, start: usize) -> Result<(), String>;
     fn finish(session: &mut Self::Session) -> Result<(), String>;
     #[cfg(not(feature = "count-allocations"))]
@@ -47,7 +52,7 @@ impl<'a> Engine<'a> for Pulldown {
         Ok(Parser::new_ext(source, pulldown_options()).collect())
     }
 
-    fn start() -> Self::Session {
+    fn start(_: &'a Input) -> Self::Session {
         Vec::new()
     }
 
@@ -114,10 +119,11 @@ fn percentile(values: &mut [u128], fraction: usize) -> u128 {
 #[cfg(not(feature = "count-allocations"))]
 fn timed<'a, E: Engine<'a>>(
     mode: Mode,
-    source: &'a str,
+    input: &'a Input,
     ends: &[usize],
     rounds: usize,
 ) -> Result<Value, String> {
+    let source = input.as_str();
     let mut totals = Vec::with_capacity(rounds);
     let mut firsts = Vec::with_capacity(rounds);
     let mut first_outputs = Vec::with_capacity(rounds);
@@ -145,7 +151,7 @@ fn timed<'a, E: Engine<'a>>(
             }
         }
         Mode::Stream => {
-            let mut warmup = E::start();
+            let mut warmup = E::start(input);
             consume_stream::<E>(&mut warmup, source, ends, E::append)?;
             E::finish(&mut warmup)?;
             drop(warmup);
@@ -153,7 +159,7 @@ fn timed<'a, E: Engine<'a>>(
             for _ in 0..rounds {
                 commits.clear();
                 let began = Instant::now();
-                let mut session = E::start();
+                let mut session = E::start(input);
                 let mut first_output = None;
                 consume_stream::<E>(&mut session, source, ends, |session, prefix, start| {
                     let commit = Instant::now();
@@ -204,7 +210,12 @@ fn timed<'a, E: Engine<'a>>(
 }
 
 #[cfg(feature = "count-allocations")]
-fn memory<'a, E: Engine<'a>>(mode: Mode, source: &'a str, ends: &[usize]) -> Result<Value, String> {
+fn memory<'a, E: Engine<'a>>(
+    mode: Mode,
+    input: &'a Input,
+    ends: &[usize],
+) -> Result<Value, String> {
+    let source = input.as_str();
     let baseline = allocator::Baseline::start();
     let live_at_finish = match mode {
         Mode::Full => {
@@ -215,7 +226,7 @@ fn memory<'a, E: Engine<'a>>(mode: Mode, source: &'a str, ends: &[usize]) -> Res
             live
         }
         Mode::Stream => {
-            let mut session = E::start();
+            let mut session = E::start(input);
             consume_stream::<E>(&mut session, source, ends, E::append)?;
             E::finish(&mut session)?;
             black_box(&session);
@@ -242,21 +253,21 @@ fn memory<'a, E: Engine<'a>>(mode: Mode, source: &'a str, ends: &[usize]) -> Res
 
 fn measure<'a, E: Engine<'a>>(
     mode: Mode,
-    source: &'a str,
+    input: &'a Input,
     ends: &[usize],
     rounds: usize,
 ) -> Result<Value, String> {
     #[cfg(feature = "count-allocations")]
     {
         let _ = rounds;
-        memory::<E>(mode, source, ends)
+        memory::<E>(mode, input, ends)
     }
     #[cfg(not(feature = "count-allocations"))]
-    timed::<E>(mode, source, ends, rounds)
+    timed::<E>(mode, input, ends, rounds)
 }
 
 fn run(args: &[String]) -> Result<Value, String> {
-    let usage = "usage: stream-markdown-bench <pulldown|pulldown-owned|candidate|verify> <full|stream> <case> <size> [rounds] [chunk-bytes]";
+    let usage = "usage: stream-markdown-bench <pulldown|pulldown-owned|candidate|candidate-borrowed|verify|verify-borrowed> <full|stream> <case> <size> [rounds] [chunk-bytes]";
     let [action, mode, case, size, remaining @ ..] = args else {
         return Err(usage.into());
     };
@@ -270,24 +281,39 @@ fn run(args: &[String]) -> Result<Value, String> {
         .ok_or_else(|| format!("unknown size {size}; expected {:?}", corpus::SIZES))?;
     let source = corpus::source(case, target)
         .ok_or_else(|| format!("unknown case {case}; expected {:?}", corpus::CASES))?;
+    #[cfg(feature = "candidate")]
+    let input = Input::new(source);
+    #[cfg(not(feature = "candidate"))]
+    let input = source;
+    let source = input.as_str();
     let rounds = positive_number(remaining.first(), 5)?;
     let chunk_bytes = positive_number(remaining.get(1), 32.max(target / 256))?;
     let ends = match mode {
         Mode::Full => Vec::new(),
-        Mode::Stream => corpus::chunk_ends(&source, chunk_bytes),
+        Mode::Stream => corpus::chunk_ends(source, chunk_bytes),
     };
     let mut result = match action.as_str() {
-        "pulldown" => measure::<Pulldown>(mode, &source, &ends, rounds)?,
+        "pulldown" => measure::<Pulldown>(mode, &input, &ends, rounds)?,
         "pulldown-owned" if matches!(mode, Mode::Stream) => {
-            measure::<OwnedPulldown>(mode, &source, &ends, rounds)?
+            measure::<OwnedPulldown>(mode, &input, &ends, rounds)?
         }
         "pulldown-owned" => return Err("pulldown-owned measures streaming input only".into()),
         #[cfg(feature = "candidate")]
-        "candidate" => measure::<candidate::Candidate>(mode, &source, &ends, rounds)?,
+        "candidate" => measure::<candidate::Candidate>(mode, &input, &ends, rounds)?,
         #[cfg(feature = "candidate")]
-        "verify" => candidate::verify(mode, &source, &ends)?,
+        "verify" => candidate::verify(mode, &input, &ends, false)?,
+        #[cfg(feature = "candidate")]
+        "verify-borrowed" if matches!(mode, Mode::Stream) => {
+            candidate::verify(mode, &input, &ends, true)?
+        }
+        #[cfg(feature = "candidate")]
+        "candidate-borrowed" if matches!(mode, Mode::Stream) => {
+            measure::<candidate::BorrowedCandidate>(mode, &input, &ends, rounds)?
+        }
         #[cfg(not(feature = "candidate"))]
-        "candidate" | "verify" => return Err("rebuild with the candidate feature".into()),
+        "candidate" | "candidate-borrowed" | "verify" | "verify-borrowed" => {
+            return Err("rebuild with the candidate feature".into());
+        }
         _ => return Err(usage.into()),
     };
     result["engine"] = json!(action);

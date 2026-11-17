@@ -79,15 +79,17 @@ def check_sample(sample, verification, measurement):
 
 def collect(mode, corpus, size, args):
     row = {"mode": mode, "case": corpus, "size": size, "ok": False}
+    candidate = "candidate-borrowed" if args.borrowed_source else "candidate"
+    verifier = "verify-borrowed" if args.borrowed_source else "verify"
     try:
-        verification = run(args.timing_binary, "verify", mode, corpus, size, args)
+        verification = run(args.timing_binary, verifier, mode, corpus, size, args)
         row["verification"] = verification
         if not verification.get("verified"):
             return row
 
-        engines = ["pulldown", "candidate"]
+        engines = ["pulldown", candidate]
         primary = "pulldown"
-        if mode == "stream":
+        if mode == "stream" and not args.borrowed_source:
             primary = "pulldown-owned"
             engines.insert(1, primary)
         timing = {
@@ -103,16 +105,16 @@ def collect(mode, corpus, size, args):
             check_sample(memory[engine], verification, "allocations")
         timing_fields = TIMING_FIELDS if mode == "stream" else ("median_ns",)
         borrowed_timing, _ = compare(
-            timing["pulldown"], timing["candidate"], timing_fields, None,
+            timing["pulldown"], timing[candidate], timing_fields, None,
         )
         borrowed_memory, _ = compare(
-            memory["pulldown"], memory["candidate"], MEMORY_FIELDS, None,
+            memory["pulldown"], memory[candidate], MEMORY_FIELDS, None,
         )
         primary_timing, slow = compare(
-            timing[primary], timing["candidate"], timing_fields, args.min_speedup,
+            timing[primary], timing[candidate], timing_fields, args.min_speedup,
         )
         primary_memory, memory_failures = compare(
-            memory[primary], memory["candidate"], MEMORY_FIELDS, args.min_memory_ratio,
+            memory[primary], memory[candidate], MEMORY_FIELDS, args.min_memory_ratio,
             allow_zero=True,
         )
         row.update(
@@ -125,7 +127,7 @@ def collect(mode, corpus, size, args):
             timing_failures=slow,
             memory_failures=memory_failures,
         )
-        if mode == "stream":
+        if primary == "pulldown-owned":
             row["pulldown_owned_over_candidate_timing"] = primary_timing
             row["pulldown_owned_over_candidate_memory"] = primary_memory
     except (OSError, ValueError, subprocess.TimeoutExpired) as error:
@@ -173,7 +175,10 @@ def main():
     parser.add_argument("--revision", help="revision or source snapshot label for these binaries")
     parser.add_argument("--min-speedup", type=positive_ratio)
     parser.add_argument("--min-memory-ratio", type=positive_ratio)
+    parser.add_argument("--borrowed-source", action="store_true")
     args = parser.parse_args()
+    if args.borrowed_source and args.mode != ["stream"]:
+        parser.error("--borrowed-source requires --mode stream")
     args.timing_binary = args.timing_binary.resolve()
     args.memory_binary = args.memory_binary.resolve()
     environment = {
@@ -198,6 +203,7 @@ def main():
                       file=sys.stderr, flush=True)
     report = {
         "revision": args.revision,
+        "borrowed_candidate": args.borrowed_source,
         "environment": environment,
         "thresholds": {
             "min_speedup": args.min_speedup,

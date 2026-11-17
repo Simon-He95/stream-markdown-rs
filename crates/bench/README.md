@@ -13,6 +13,8 @@ python3 crates/bench/run_matrix.py \
 
 Omit selectors to run both modes across eight corpus shapes and five target sizes. The nominal sizes are 1 KiB, 16 KiB, 128 KiB, 1 MiB and 8 MiB. Synthetic workloads end at complete source fragments. The real-chat workload is a prefix or repetitions of the repository's chat fixture. The report records actual UTF-8 byte length and a source fingerprint so allocation and timing binaries cannot silently compare different corpora. Streaming also reports the sum of the prefix lengths submitted to the replay parser. Streaming uses identical code-point-aligned chunks for both engines. The default chunks are `max(32, target_bytes / 256)`. Pass `--chunk-bytes 32` to measure tiny LLM chunks across sizes. Very large prefix replays can exhaust the per-worker time budget. The matrix reports the timeout with no ratios for the row and continues to the next workload.
 
+Pass `--borrowed-source --mode stream` when the caller already owns the input. Both engines then borrow identical prefixes of the source allocated before measurement. The Rust candidate uses `BorrowedParser` and applies the same block changes as the source-owning candidate. The gates compare against the borrowed `pulldown` replay.
+
 ## Equivalent outputs and timing
 
 - **Full** collects all native pulldown-cmark 0.13.6 events into a retained buffer and materializes the candidate's final typed document. It measures parsing plus materializing each engine's native semantic output.

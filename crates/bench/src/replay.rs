@@ -1,4 +1,4 @@
-use crate::{pulldown_options, Engine, Pulldown};
+use crate::{pulldown_options, Engine, Input, Pulldown};
 use pulldown_cmark::{CodeBlockKind, CowStr, Event, Parser, Tag};
 
 pub struct OwnedPulldown;
@@ -16,7 +16,7 @@ impl<'a> Engine<'a> for OwnedPulldown {
         Pulldown::parse(source)
     }
 
-    fn start() -> Self::Session {
+    fn start(_: &'a Input) -> Self::Session {
         Replay {
             source: String::new(),
             events: Vec::new(),
@@ -114,7 +114,11 @@ mod tests {
     #[test]
     fn owning_chunks_preserves_native_events_across_buffer_growth() {
         let source = "中文 [link][id] and ![image](/pic) `code` &amp; <i>word</i>.\n\n[id]: /x \"title\"\n\n```rust\ncode\n```\n";
-        let mut replay = OwnedPulldown::start();
+        #[cfg(feature = "candidate")]
+        let input = Input::new(source.to_owned());
+        #[cfg(not(feature = "candidate"))]
+        let input = source.to_owned();
+        let mut replay = OwnedPulldown::start(&input);
         let mut start = 0;
         for end in crate::corpus::chunk_ends(source, 8) {
             let prefix = &source[..end];
