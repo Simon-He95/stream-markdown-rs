@@ -6,16 +6,18 @@ use crate::{
 use serde_json::{json, Value};
 use stream_markdown_rs::{
     parse, Alignment, Block, BlockData, BlockId, BlockStatus, BorrowedParser, Change, Document,
-    Inline, InlineContent, InlineKind, Options, Parser, RawLine, Span,
+    Inline, InlineContent, InlineKind, Options, Parser, Preview, RawLine, Span,
 };
 
 pub struct Candidate;
+pub struct PreviewCandidate;
 
 pub struct Session<P = Parser> {
     parser: P,
     changes: Vec<Change>,
     nodes: Vec<Option<Block>>,
     parents: Vec<Option<BlockId>>,
+    preview: Option<(BlockId, Vec<Inline>)>,
 }
 
 impl<'a> Engine<'a> for Candidate {
@@ -27,12 +29,7 @@ impl<'a> Engine<'a> for Candidate {
     }
 
     fn start(_: &'a Input) -> Self::Session {
-        Session {
-            parser: Parser::new(Options::default()),
-            changes: Vec::new(),
-            nodes: Vec::new(),
-            parents: Vec::new(),
-        }
+        Session::new(Parser::new(Options::default()))
     }
 
     fn append(session: &mut Self::Session, source: &'a str, start: usize) -> Result<(), String> {
@@ -59,6 +56,35 @@ impl<'a> Engine<'a> for Candidate {
     }
 }
 
+impl<'a> Engine<'a> for PreviewCandidate {
+    type Document = Document<'a>;
+    type Session = Session;
+
+    fn parse(source: &'a str) -> Result<Self::Document, String> {
+        Candidate::parse(source)
+    }
+
+    fn start(_: &'a Input) -> Self::Session {
+        Session::new(Parser::new(Options {
+            preview: Preview::Ai,
+            ..Options::default()
+        }))
+    }
+
+    fn append(session: &mut Self::Session, source: &'a str, start: usize) -> Result<(), String> {
+        Candidate::append(session, source, start)
+    }
+
+    fn finish(session: &mut Self::Session) -> Result<(), String> {
+        Candidate::finish(session)
+    }
+
+    #[cfg(not(feature = "count-allocations"))]
+    fn has_output(session: &Self::Session) -> bool {
+        Candidate::has_output(session)
+    }
+}
+
 pub struct BorrowedCandidate;
 
 pub struct BorrowedSession<'src> {
@@ -77,12 +103,7 @@ impl<'a> Engine<'a> for BorrowedCandidate {
     fn start(source: &'a Input) -> Self::Session {
         BorrowedSession {
             source,
-            view: Session {
-                parser: BorrowedParser::new(source, Options::default()),
-                changes: Vec::new(),
-                nodes: Vec::new(),
-                parents: Vec::new(),
-            },
+            view: Session::new(BorrowedParser::new(source, Options::default())),
         }
     }
 
@@ -117,6 +138,16 @@ impl<'a> Engine<'a> for BorrowedCandidate {
 }
 
 impl<P> Session<P> {
+    fn new(parser: P) -> Self {
+        Self {
+            parser,
+            changes: Vec::new(),
+            nodes: Vec::new(),
+            parents: Vec::new(),
+            preview: None,
+        }
+    }
+
     fn apply(&mut self) -> Result<(), String> {
         for change in self.changes.drain(..) {
             match change {
@@ -141,9 +172,23 @@ impl<P> Session<P> {
                 }
                 Change::Replace(block) => {
                     let id = block.id;
+                    if self
+                        .preview
+                        .as_ref()
+                        .is_some_and(|(active, _)| *active == id)
+                    {
+                        self.preview = None;
+                    }
                     *node_mut(&mut self.nodes, id)? = block;
                 }
                 Change::Remove { id } => {
+                    if self
+                        .preview
+                        .as_ref()
+                        .is_some_and(|(active, _)| *active == id)
+                    {
+                        self.preview = None;
+                    }
                     node_mut(&mut self.nodes, id)?;
                     self.nodes[id.0] = None;
                     if let Some(slot) = self.parents.get_mut(id.0) {
@@ -222,7 +267,10 @@ impl<P> Session<P> {
                     table.add_row(cells);
                     block.span.end = end;
                 }
-                Change::Preview { hint: None, .. } => {}
+                Change::Preview { .. } => {}
+                Change::PreviewInlines { id, nodes } => {
+                    self.preview = (!nodes.is_empty()).then_some((id, nodes));
+                }
                 change => {
                     return Err(format!(
                         "unsupported candidate change projection: {change:?}"
@@ -232,6 +280,67 @@ impl<P> Session<P> {
         }
         Ok(())
     }
+}
+
+pub fn verify_preview(input: &Input, ends: &[usize]) -> Result<Value, String> {
+    use std::fmt::Write;
+    use std::hash::{DefaultHasher, Hasher};
+
+    let source = input.as_str();
+    let document = Candidate::parse(source)?;
+    let mut session = PreviewCandidate::start(input);
+    let mut hash = DefaultHasher::new();
+    let mut debug = String::new();
+    let mut previous = 0;
+    for &end in ends {
+        session
+            .parser
+            .append(&source[previous..end], &mut session.changes)
+            .map_err(|error| error.to_string())?;
+        debug.clear();
+        write!(debug, "{end}:{:?}", session.changes).unwrap();
+        hash.write(debug.as_bytes());
+        session.apply()?;
+        previous = end;
+    }
+    PreviewCandidate::finish(&mut session)?;
+    let expected = blocks(
+        source,
+        document
+            .nodes
+            .iter()
+            .map(|block| (block, document.parent(block.id))),
+    )?;
+    let actual = blocks(
+        source,
+        session
+            .nodes
+            .iter()
+            .flatten()
+            .map(|block| (block, session.parents.get(block.id.0).copied().flatten())),
+    )?;
+    let difference = expected.difference(&actual).or_else(|| {
+        let mut full = document.nodes.iter();
+        let mut streamed = session.nodes.iter().flatten();
+        loop {
+            match (full.next(), streamed.next()) {
+                (None, None) => return None,
+                (Some(a), Some(b))
+                    if (a.span, a.status, &a.data) == (b.span, b.status, &b.data) => {}
+                _ => return Some("source ranges, final states or typed node data differ".into()),
+            }
+        }
+    });
+    let metrics = session.parser.metrics();
+    Ok(json!({
+        "measurement": "verification",
+        "verified": difference.is_none(),
+        "difference": difference,
+        "packet_fingerprint": format!("{:016x}", hash.finish()),
+        "preview_probe_bytes": metrics.preview_probe_bytes,
+        "preview_inline_bytes": metrics.preview_inline_bytes,
+        "parser_stack_bytes": std::mem::size_of::<Parser>(),
+    }))
 }
 
 fn node_mut(nodes: &mut [Option<Block>], id: BlockId) -> Result<&mut Block, String> {

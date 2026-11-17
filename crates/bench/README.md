@@ -34,3 +34,11 @@ cargo run --release -p stream-markdown-bench --no-default-features --features co
 ```
 
 [Pulldown-cmark source](https://github.com/pulldown-cmark/pulldown-cmark) · [Rust allocator contract](https://doc.rust-lang.org/std/alloc/trait.GlobalAlloc.html)
+
+## Active preview and history restore
+
+`candidate-preview stream` enables AI previews and applies their inline overlays. `verify-preview stream` checks the final typed content against full parsing and fingerprints each packet's updates. Run `preview-tail` for long plain prefixes and `real-chat` for the existing chat fixture. Use the same 32 B packet size for both builds. The counters cover paragraph and heading preview probes and lexer inputs.
+
+`history-eager full` and `history-batched full` use independent messages constructed by the `preview-tail` fixture. The eager case publishes the first view after all messages are parsed. The batched case publishes the last four messages first, then processes up to 32 remaining messages per batch. Both retain every final document. `verify-history` compares the resulting slots with the eager parse. History p95 measures batch duration.
+
+`python3 -B crates/bench/compare_preview_history.py --help` shows how to compare two builds with these benchmark commands. It alternates measurement order in five trials with eleven rounds each by default and records the raw timings and binary digests.

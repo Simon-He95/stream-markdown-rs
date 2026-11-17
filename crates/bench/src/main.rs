@@ -3,6 +3,8 @@ mod allocator;
 #[cfg(feature = "candidate")]
 mod candidate;
 mod corpus;
+#[cfg(feature = "candidate")]
+mod history;
 mod replay;
 #[cfg(feature = "candidate")]
 mod trace;
@@ -269,7 +271,7 @@ fn measure<'a, E: Engine<'a>>(
 }
 
 fn run(args: &[String]) -> Result<Value, String> {
-    let usage = "usage: stream-markdown-bench <pulldown|pulldown-owned|candidate|candidate-borrowed|verify|verify-borrowed> <full|stream> <case> <size> [rounds] [chunk-bytes]";
+    let usage = "usage: stream-markdown-bench <pulldown|pulldown-owned|candidate|candidate-borrowed|verify|verify-borrowed|candidate-preview|verify-preview|history-eager|history-batched|verify-history> <full|stream> <case> <size> [rounds] [chunk-bytes]";
     let [action, mode, case, size, remaining @ ..] = args else {
         return Err(usage.into());
     };
@@ -302,6 +304,25 @@ fn run(args: &[String]) -> Result<Value, String> {
         "pulldown-owned" => return Err("pulldown-owned measures streaming input only".into()),
         #[cfg(feature = "candidate")]
         "candidate" => measure::<candidate::Candidate>(mode, &input, &ends, rounds)?,
+        #[cfg(feature = "candidate")]
+        "candidate-preview" if matches!(mode, Mode::Stream) => {
+            measure::<candidate::PreviewCandidate>(mode, &input, &ends, rounds)?
+        }
+        #[cfg(feature = "candidate")]
+        "verify-preview" if matches!(mode, Mode::Stream) => {
+            candidate::verify_preview(&input, &ends)?
+        }
+        #[cfg(feature = "candidate")]
+        "history-eager" | "history-batched" | "verify-history"
+            if matches!(mode, Mode::Full) && case == "preview-tail" =>
+        {
+            history::run(
+                source,
+                rounds,
+                action == "history-batched",
+                action == "verify-history",
+            )?
+        }
         #[cfg(feature = "candidate")]
         "verify" => candidate::verify(mode, &input, &ends, false)?,
         #[cfg(feature = "candidate")]

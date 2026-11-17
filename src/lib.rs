@@ -72,6 +72,8 @@ pub enum Preview {
 pub struct Options {
     pub syntax: Syntax,
     pub preview: Preview,
+    /// Preview a complete pipe-delimited header before its separator arrives.
+    pub preview_table_header: bool,
     pub math: bool,
     pub footnotes: bool,
     /// Enables Markstream syntax and typography extensions.
@@ -226,6 +228,26 @@ pub struct Block {
 }
 
 impl Block {
+    /// Borrow display TeX, retaining surrounding whitespace when it is contiguous.
+    pub fn display_math_source<'a>(&'a self, source: &'a str) -> Option<&'a str> {
+        let BlockData::Math { body } = &self.data else {
+            return None;
+        };
+        if self.status == BlockStatus::Closed
+            && let Text::Source(content) = body
+            && let Some(delimiter) = math_block::opening(&source[Range::from(self.span)])
+            && let Some(close) = delimiter.closes(source, content.end, self.span.end)
+        {
+            let start = self.span.start + delimiter.width();
+            let before = &source[start..content.start];
+            let after = &source[content.end..close.start];
+            if before.trim().is_empty() && after.trim().is_empty() {
+                return Some(&source[start..close.start]);
+            }
+        }
+        Some(body.as_str(source))
+    }
+
     pub fn summary_opening(&self) -> Option<HtmlOpening> {
         match self.data {
             BlockData::Summary { opening_end, .. } => Some(HtmlOpening {
@@ -400,6 +422,10 @@ pub struct Metrics {
     pub scanned_bytes: usize,
     pub inline_bytes: usize,
     pub invalidated_blocks: usize,
+    /// Bytes submitted to the active paragraph or heading preview probe.
+    pub preview_probe_bytes: usize,
+    /// Bytes submitted to the active paragraph or heading preview lexer.
+    pub preview_inline_bytes: usize,
 }
 
 pub struct Parser {
@@ -607,6 +633,22 @@ impl StreamState {
 /// Parses borrowed source and materializes the final nodes once.
 pub fn parse<'src>(source: &'src str, options: &Options) -> Result<Document<'src>, ParseError> {
     parse_with_plugins(source, options, Vec::new())
+}
+
+/// Lazily parses independent chat messages, yielding visible messages first.
+/// The index identifies the message in the input. The visible range is clamped
+/// to the input. Pull as many items as the current restore batch can process.
+pub fn restore_history<'src, 'work>(
+    messages: &'work [&'src str],
+    visible: Range<usize>,
+    options: &'work Options,
+) -> impl Iterator<Item = (usize, Result<Document<'src>, ParseError>)> + use<'src, 'work> {
+    let start = visible.start.min(messages.len());
+    let end = visible.end.clamp(start, messages.len());
+    (start..end)
+        .chain(0..start)
+        .chain(end..messages.len())
+        .map(move |index| (index, parse(messages[index], options)))
 }
 
 pub fn parse_with_plugins<'src>(

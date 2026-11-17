@@ -555,6 +555,52 @@ struct PreviewState {
     separator: Option<SeparatorProbe>,
 }
 
+#[derive(Default)]
+struct PreviewPrefix {
+    start: usize,
+    checked: u16,
+    stable: u16,
+}
+
+impl PreviewPrefix {
+    fn advance(&mut self, source: &str, body: Span) -> (usize, usize) {
+        let size = body.end - body.start;
+        debug_assert!(u16::try_from(size).is_ok());
+        if self.start != body.start || usize::from(self.checked) > size {
+            *self = Self {
+                start: body.start,
+                ..Self::default()
+            };
+        }
+        let bytes = source.as_bytes();
+        let begin = body.start + usize::from(self.checked);
+        let mut at = begin;
+        while at < body.end {
+            match bytes[at] {
+                b' ' | b'\t' => self.stable = (at + 1 - body.start) as u16,
+                b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z' | 0x80..=0xff => {}
+                b'.' if at + 1 < body.end
+                    && matches!(bytes[at + 1], b' ' | b'\t')
+                    && !(at - body.start >= 3
+                        && bytes[at - 3..at].eq_ignore_ascii_case(b"www")) => {}
+                _ => break,
+            }
+            at += 1;
+        }
+        self.checked = (at - body.start) as u16;
+        // A word boundary also prevents an autolink in the tail from reaching into the prefix.
+        (self.resume_at(), at - begin + usize::from(at < body.end))
+    }
+
+    fn resume_at(&self) -> usize {
+        if self.stable >= 64 {
+            self.start + usize::from(self.stable)
+        } else {
+            self.start
+        }
+    }
+}
+
 pub(crate) struct Engine {
     options: Options,
     batch: bool,
@@ -571,6 +617,7 @@ pub(crate) struct Engine {
     preview: Option<BlockId>,
     row_preview_end: usize,
     inline_preview: Option<(BlockId, usize)>,
+    preview_prefix: PreviewPrefix,
     preview_state: Option<Box<PreviewState>>,
     custom_closure: Option<Box<custom_closure::State>>,
     fence_probe: Option<FenceProbe>,
@@ -608,6 +655,7 @@ impl Engine {
             preview: None,
             row_preview_end: 0,
             inline_preview: None,
+            preview_prefix: PreviewPrefix::default(),
             preview_state: None,
             custom_closure: None,
             fence_probe: None,
@@ -1105,6 +1153,10 @@ impl Engine {
             self.clear_inline_preview(id, output);
             return true;
         }
+        self.metrics.preview_inline_bytes += spans
+            .iter()
+            .map(|span| span.end - span.start)
+            .sum::<usize>();
         let mut nodes = inline::parse_fragments_preview(source, &spans, &self.options, &self.refs);
         if self.options.footnotes {
             self.resolve_footnote_nodes(source, &mut nodes, false);
@@ -1227,8 +1279,17 @@ impl Engine {
             if self.inline_preview == Some((id, body.end)) {
                 return;
             }
-            if self.inline_preview_candidate(&source[Range::from(body)]) {
-                let mut nodes = inline::parse_preview(source, body, &self.options, &self.refs);
+            let (prefix_end, inspected) = if size >= 128 {
+                self.preview_prefix.advance(source, body)
+            } else {
+                (body.start, 0)
+            };
+            let tail = &source[prefix_end..body.end];
+            self.metrics.preview_probe_bytes += inspected + tail.len();
+            if self.inline_preview_candidate(tail) {
+                self.metrics.preview_inline_bytes += tail.len();
+                let mut nodes =
+                    inline::parse_preview_from(source, body, prefix_end, &self.options, &self.refs);
                 if self.options.footnotes {
                     self.resolve_footnote_nodes(source, &mut nodes, false);
                 }
@@ -1920,6 +1981,41 @@ impl Engine {
     fn partial(&mut self, source: &str, output: &mut Output<'_>) {
         let end = self.scan;
         let start = self.line_start + self.partial_container.map_or(0, |prefix| prefix.bytes);
+        if start == end
+            && self.options.preview_table_header
+            && self.options.preview == Preview::Ai
+            && self.options.syntax == Syntax::Gfm
+            && self.containers.is_empty()
+            && self.preview.is_none()
+            && let Some(Active::Paragraph(paragraph)) = &self.active
+            && paragraph.visible
+            && paragraph.lines == 1
+            && paragraph.first.end - paragraph.first.start <= 1024
+        {
+            let header = source[Range::from(paragraph.first)].trim_matches([' ', '\t']);
+            if header.starts_with('|') && header.ends_with('|') {
+                let cells: Vec<_> = cell_spans(source, paragraph.first)
+                    .map(InlineContent::Plain)
+                    .collect();
+                if cells.len() >= 2
+                    && cells.iter().all(
+                        |cell| matches!(cell, InlineContent::Plain(span) if span.start < span.end),
+                    )
+                {
+                    self.preview = Some(paragraph.id);
+                    output.update(Change::Preview {
+                        id: paragraph.id,
+                        hint: Some(PreviewHint::Table {
+                            table: Box::new(TableData {
+                                alignments: vec![Alignment::None; cells.len()],
+                                cells,
+                            }),
+                            loading: true,
+                        }),
+                    });
+                }
+            }
+        }
         if self.running.is_some()
             || start >= end
             || (self.partial_container.is_none()
@@ -5013,4 +5109,63 @@ fn separator_alignments(source: &str, span: Span) -> Option<Vec<Alignment>> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+
+    #[test]
+    fn lexical_prefix_preserves_preview_at_every_character_boundary() {
+        let prefix = "前文 A plain sentence. ".repeat(10);
+        for suffix in [
+            "www.example.org **bold**",
+            "WWW.example.org and https://example.org",
+            "name@example.org with a [draft](https://example.org",
+            " **bold** [link](https://example.org) and `code`",
+            "  \nnext line and ~~removed~~",
+            " $x+y$ .. -- \"quoted\" ++added++",
+            " [^note] <tool-call id='x' />",
+            " ... and a dangling (",
+        ] {
+            let source = format!("skip {prefix}{suffix}");
+            let start = "skip ".len();
+            for syntax in [Syntax::Gfm, Syntax::CommonMark] {
+                for markstream in [false, true] {
+                    let options = Options {
+                        syntax,
+                        markstream,
+                        math: true,
+                        ..Options::default()
+                    };
+                    let engine = Engine::new(options, false);
+                    let mut cache = PreviewPrefix::default();
+                    for end in source
+                        .char_indices()
+                        .map(|(i, ch)| i + ch.len_utf8())
+                        .filter(|&end| end > start)
+                    {
+                        let body = Span::new(start, end);
+                        let (resume, _) = cache.advance(&source, body);
+                        assert_eq!(
+                            engine.inline_preview_candidate(&source[resume..end]),
+                            engine.inline_preview_candidate(&source[start..end]),
+                            "{suffix:?}, {end}, {syntax:?}, Markstream {markstream}",
+                        );
+                        assert_eq!(
+                            inline::parse_preview_from(
+                                &source,
+                                body,
+                                resume,
+                                &engine.options,
+                                &engine.refs
+                            ),
+                            inline::parse_preview(&source, body, &engine.options, &engine.refs),
+                            "{suffix:?}, {end}, {syntax:?}, Markstream {markstream}",
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
