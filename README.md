@@ -1,5 +1,9 @@
 # stream-markdown-rs
 
+Incremental CommonMark and GitHub Flavored Markdown parser for Rust terminal UIs. It delivers typed block updates with lifecycle state, optional AI streaming previews, and full-document parsing.
+
+[Performance report and reproduction protocol](docs/benchmarks.md) · [Parser design (中文)](docs/design.md)
+
 为 Rust TUI 解析 AI 流式 Markdown 的库。解析器把每次追加转换成带类型、内容变化和生命周期状态的块更新。终端 UI 可以用同一条流逐步显示段落、代码、表格和列表，按块状态决定何时提交最终样式。原生追加延迟、内存占用和更新范围是首要指标。默认 GFM，AI 预判可与 GFM 或 CommonMark 同时开启，运行时插件作为可选宿主层接入。
 
 仓库包含 Rust 批处理和增量解析核心、可选 WASM 插件宿主、规范测试和原生基准。TUI 可以使用 `Parser::append` 获取变化批次，通过 `Parser::finish` 收尾，或用 `parse` 得到完整结构。 将 `Options::math` 与 `Options::footnotes` 设为 `true` 可启用数学和命名脚注扩展。`Options::markstream` 开启 VMR 容器、提示块、CJK 强调和排版扩展。通过 `Options::custom_tags` 注册的标签可借用属性和原始正文，同时携带解析后的行内子节点。AI 预览可为打开的段落和标题交付临时行内覆盖，关闭节点时交付最终结构。一次追加的变化批次可以合并同一节点的临时更新，已经返回给调用方的历史批次保持原样。

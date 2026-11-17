@@ -196,6 +196,7 @@ fn timed<'a, E: Engine<'a>>(
     let mut output = json!({
         "measurement": "timing",
         "rounds": rounds,
+        "total_samples_ns": &totals,
         "median_ns": percentile(&mut totals, 50),
     });
     if matches!(mode, Mode::Stream) {
@@ -207,6 +208,7 @@ fn timed<'a, E: Engine<'a>>(
             output["first_output_commit_median"] = json!(percentile(&mut first_output_commits, 50));
         }
         output["max_append_median_ns"] = json!(percentile(&mut maxima, 50));
+        output["append_p95_samples_ns"] = json!(&tails);
         output["append_p95_median_ns"] = json!(percentile(&mut tails, 50));
         output["finish_median_ns"] = json!(percentile(&mut finishes, 50));
     }
@@ -255,6 +257,51 @@ fn memory<'a, E: Engine<'a>>(
     }))
 }
 
+#[cfg(all(feature = "candidate", feature = "count-allocations"))]
+fn soak<'a, E: Engine<'a>>(
+    mode: Mode,
+    input: &'a Input,
+    ends: &[usize],
+    rounds: usize,
+) -> Result<Value, String> {
+    let source = input.as_str();
+    let mut checkpoints = Vec::with_capacity(rounds.min(22));
+    let baseline = allocator::Baseline::start();
+    let mut min_live = 0;
+    let mut max_live = 0;
+    for iteration in 1..=rounds {
+        match mode {
+            Mode::Full => {
+                let output = E::parse(black_box(source))?;
+                black_box(&output);
+            }
+            Mode::Stream => {
+                let mut session = E::start(input);
+                consume_stream::<E>(&mut session, source, ends, E::append)?;
+                E::finish(&mut session)?;
+                black_box(&session);
+            }
+        }
+        let live = baseline.live_delta();
+        min_live = min_live.min(live);
+        max_live = max_live.max(live);
+        if iteration == 1 || iteration == rounds || iteration % rounds.div_ceil(20) == 0 {
+            checkpoints.push((iteration, live));
+        }
+    }
+    let peak = baseline.peak_delta();
+    let returned = baseline.live_delta();
+    Ok(json!({
+        "measurement": "allocation-soak",
+        "rounds": rounds,
+        "peak_live_bytes_delta": peak,
+        "min_after_drop_bytes_delta": min_live,
+        "max_after_drop_bytes_delta": max_live,
+        "live_after_drop_bytes_delta": returned,
+        "checkpoints": checkpoints,
+    }))
+}
+
 fn measure<'a, E: Engine<'a>>(
     mode: Mode,
     input: &'a Input,
@@ -271,7 +318,7 @@ fn measure<'a, E: Engine<'a>>(
 }
 
 fn run(args: &[String]) -> Result<Value, String> {
-    let usage = "usage: stream-markdown-bench <pulldown|pulldown-owned|candidate|candidate-borrowed|verify|verify-borrowed|candidate-preview|verify-preview|history-eager|history-batched|verify-history> <full|stream> <case> <size> [rounds] [chunk-bytes]";
+    let usage = "usage: stream-markdown-bench <pulldown|pulldown-owned|candidate|candidate-borrowed|verify|verify-borrowed|candidate-preview|verify-preview|history-eager|history-batched|verify-history|soak|soak-preview> <full|stream> <case> <size> [rounds] [chunk-bytes]";
     let [action, mode, case, size, remaining @ ..] = args else {
         return Err(usage.into());
     };
@@ -307,6 +354,12 @@ fn run(args: &[String]) -> Result<Value, String> {
         #[cfg(feature = "candidate")]
         "candidate-preview" if matches!(mode, Mode::Stream) => {
             measure::<candidate::PreviewCandidate>(mode, &input, &ends, rounds)?
+        }
+        #[cfg(all(feature = "candidate", feature = "count-allocations"))]
+        "soak" => soak::<candidate::Candidate>(mode, &input, &ends, rounds)?,
+        #[cfg(all(feature = "candidate", feature = "count-allocations"))]
+        "soak-preview" if matches!(mode, Mode::Stream) => {
+            soak::<candidate::PreviewCandidate>(mode, &input, &ends, rounds)?
         }
         #[cfg(feature = "candidate")]
         "verify-preview" if matches!(mode, Mode::Stream) => {

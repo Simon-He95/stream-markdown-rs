@@ -10,6 +10,9 @@ import platform
 import subprocess
 import sys
 import time
+
+if os.name == "posix":
+    import resource
 from pathlib import Path
 
 
@@ -44,11 +47,11 @@ def run(binary, action, mode, corpus, size, args):
     command = [str(binary), action, mode, corpus, size, str(args.rounds)]
     if args.chunk_bytes is not None:
         command.append(str(args.chunk_bytes))
-    cpu_before = os.times() if os.name == "posix" else None
+    cpu_before = resource.getrusage(resource.RUSAGE_CHILDREN) if os.name == "posix" else None
     began = time.perf_counter_ns()
     child = subprocess.run(command, capture_output=True, text=True, timeout=args.timeout)
     worker_elapsed = time.perf_counter_ns() - began
-    cpu_after = os.times() if cpu_before is not None else None
+    cpu_after = resource.getrusage(resource.RUSAGE_CHILDREN) if cpu_before is not None else None
     if child.returncode:
         raise ValueError(f"{binary.name}/{action}: {child.stderr.strip() or child.returncode}")
     result = json.loads(child.stdout)
@@ -57,8 +60,8 @@ def run(binary, action, mode, corpus, size, args):
         raise ValueError(f"{binary.name}/{action} emitted a result for a different workload")
     result["worker_wall_ns"] = worker_elapsed
     if cpu_after is not None:
-        cpu = ((cpu_after.children_user - cpu_before.children_user)
-               + (cpu_after.children_system - cpu_before.children_system))
+        cpu = ((cpu_after.ru_utime - cpu_before.ru_utime)
+               + (cpu_after.ru_stime - cpu_before.ru_stime))
         result["worker_cpu_ns"] = round(cpu * 1_000_000_000)
     return result
 
@@ -88,7 +91,7 @@ def check_sample(sample, verification, measurement):
         raise ValueError("sample and verification measured different inputs")
 
 
-def collect(mode, corpus, size, args):
+def collect(mode, corpus, size, args, reverse):
     row = {"mode": mode, "case": corpus, "size": size, "ok": False}
     candidate = "candidate-borrowed" if args.borrowed_source else "candidate"
     verifier = "verify-borrowed" if args.borrowed_source else "verify"
@@ -103,6 +106,8 @@ def collect(mode, corpus, size, args):
         if mode == "stream" and not args.borrowed_source:
             primary = "pulldown-owned"
             engines.insert(1, primary)
+        if reverse:
+            engines.reverse()
         timing = {
             engine: run(args.timing_binary, engine, mode, corpus, size, args)
             for engine in engines
@@ -147,8 +152,9 @@ def collect(mode, corpus, size, args):
 
 
 def fingerprint(path):
+    relative = path.relative_to(Path.cwd()) if path.is_relative_to(Path.cwd()) else path.name
     with path.open("rb") as binary:
-        return {"path": str(path), "sha256": hashlib.file_digest(binary, "sha256").hexdigest()}
+        return {"path": str(relative), "sha256": hashlib.file_digest(binary, "sha256").hexdigest()}
 
 
 def progress_details(row):
@@ -204,8 +210,10 @@ def main():
     rows = []
     for corpus in args.case or CASES:
         for size in args.size or SIZES:
-            for mode in args.mode or MODES:
-                row = collect(mode, corpus, size, args)
+            modes = args.mode or MODES
+            for mode_index, mode in enumerate(modes):
+                reverse = bool((len(rows) // len(modes) + mode_index) % 2)
+                row = collect(mode, corpus, size, args, reverse)
                 rows.append(row)
                 status = "MEASURED" if row["ok"] else "FAIL"
                 if row["ok"] and (args.min_speedup is not None or args.min_memory_ratio is not None):
