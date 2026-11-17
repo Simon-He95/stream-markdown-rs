@@ -1,0 +1,838 @@
+{
+  "revision": "a16a31b0ba3e8b59a27016f8d64376ce41772f86",
+  "borrowed_candidate": false,
+  "environment": {
+    "os": "Darwin",
+    "os_release": "27.2.0",
+    "arch": "arm64",
+    "processor": "arm",
+    "timing_binary": {
+      "path": "target/public-timing/release/stream-markdown-bench",
+      "sha256": "20489626c0a2c0ebc7ec57b8075c84f265326d10f85dea14888024bd8b9b7bb2"
+    },
+    "memory_binary": {
+      "path": "target/public-allocations/release/stream-markdown-bench",
+      "sha256": "5b3378f0ae970c0469952094034a97fe5633161173dec4ebdabf5fe9172b2793"
+    }
+  },
+  "thresholds": {
+    "min_speedup": null,
+    "min_memory_ratio": null
+  },
+  "cases": [
+    {
+      "mode": "full",
+      "case": "mixed",
+      "size": "very-huge",
+      "ok": true,
+      "verification": {
+        "case": "mixed",
+        "chunk_bytes": null,
+        "commits": 0,
+        "difference": null,
+        "engine": "verify",
+        "measurement": "verification",
+        "mode": "full",
+        "native_layout_bytes": {
+          "block": 72,
+          "change": 88,
+          "inline_content": 24,
+          "pulldown_event": 80,
+          "span": 16,
+          "stream_block_slot": 72
+        },
+        "prefix_replay_bytes": null,
+        "pulldown_version": "0.13.6",
+        "scope": "final-semantic-trace",
+        "size": "very-huge",
+        "source_bytes": 8388586,
+        "source_fingerprint": "d21c88c1e66907e9",
+        "stream_work": null,
+        "target_bytes": 8388608,
+        "verified": true,
+        "worker_wall_ns": 319306000,
+        "worker_cpu_ns": 312657000
+      },
+      "gate_reference": "pulldown",
+      "timing": {
+        "pulldown": {
+          "case": "mixed",
+          "chunk_bytes": null,
+          "commits": 0,
+          "engine": "pulldown",
+          "measurement": "timing",
+          "median_ns": 100346625,
+          "mode": "full",
+          "prefix_replay_bytes": null,
+          "pulldown_version": "0.13.6",
+          "rounds": 3,
+          "size": "very-huge",
+          "source_bytes": 8388586,
+          "source_fingerprint": "d21c88c1e66907e9",
+          "target_bytes": 8388608,
+          "total_samples_ns": [
+            98365125,
+            100346625,
+            105843500
+          ],
+          "worker_wall_ns": 484608083,
+          "worker_cpu_ns": 477880000
+        },
+        "candidate": {
+          "case": "mixed",
+          "chunk_bytes": null,
+          "commits": 0,
+          "engine": "candidate",
+          "measurement": "timing",
+          "median_ns": 48431125,
+          "mode": "full",
+          "prefix_replay_bytes": null,
+          "pulldown_version": "0.13.6",
+          "rounds": 3,
+          "size": "very-huge",
+          "source_bytes": 8388586,
+          "source_fingerprint": "d21c88c1e66907e9",
+          "target_bytes": 8388608,
+          "total_samples_ns": [
+            51912458,
+            47190167,
+            48431125
+          ],
+          "worker_wall_ns": 251928834,
+          "worker_cpu_ns": 247047000
+        }
+      },
+      "memory": {
+        "pulldown": {
+          "allocation_requests": 7,
+          "case": "mixed",
+          "chunk_bytes": null,
+          "commits": 0,
+          "engine": "pulldown",
+          "live_after_drop_bytes_delta": 0,
+          "live_at_finish_bytes_delta": 167772160,
+          "measurement": "allocations",
+          "mode": "full",
+          "peak_live_bytes_delta": 285212512,
+          "prefix_replay_bytes": null,
+          "pulldown_version": "0.13.6",
+          "reallocation_requests": 48,
+          "size": "very-huge",
+          "source_bytes": 8388586,
+          "source_fingerprint": "d21c88c1e66907e9",
+          "target_bytes": 8388608,
+          "total_requested_bytes": 557831280,
+          "worker_wall_ns": 123389959,
+          "worker_cpu_ns": 117485000
+        },
+        "candidate": {
+          "allocation_requests": 391991,
+          "case": "mixed",
+          "chunk_bytes": null,
+          "commits": 0,
+          "engine": "candidate",
+          "live_after_drop_bytes_delta": 0,
+          "live_at_finish_bytes_delta": 88550640,
+          "measurement": "allocations",
+          "mode": "full",
+          "peak_live_bytes_delta": 88550640,
+          "prefix_replay_bytes": null,
+          "pulldown_version": "0.13.6",
+          "reallocation_requests": 17,
+          "size": "very-huge",
+          "source_bytes": 8388586,
+          "source_fingerprint": "d21c88c1e66907e9",
+          "target_bytes": 8388608,
+          "total_requested_bytes": 126299088,
+          "worker_wall_ns": 75884833,
+          "worker_cpu_ns": 72531000
+        }
+      },
+      "pulldown_over_candidate_timing": {
+        "median_ns": 2.0719449527550724
+      },
+      "pulldown_over_candidate_memory": {
+        "peak_live_bytes_delta": 3.2208972402683935,
+        "live_at_finish_bytes_delta": 1.8946464983200573,
+        "total_requested_bytes": 4.416748282457907
+      },
+      "timing_failures": [],
+      "memory_failures": []
+    },
+    {
+      "mode": "stream",
+      "case": "mixed",
+      "size": "very-huge",
+      "ok": true,
+      "verification": {
+        "case": "mixed",
+        "chunk_bytes": 32768,
+        "commits": 256,
+        "difference": null,
+        "engine": "verify",
+        "measurement": "verification",
+        "mode": "stream",
+        "native_layout_bytes": {
+          "block": 72,
+          "change": 88,
+          "inline_content": 24,
+          "pulldown_event": 80,
+          "span": 16,
+          "stream_block_slot": 72
+        },
+        "prefix_replay_bytes": 1077934608,
+        "pulldown_version": "0.13.6",
+        "scope": "final-semantic-trace",
+        "size": "very-huge",
+        "source_bytes": 8388586,
+        "source_fingerprint": "d21c88c1e66907e9",
+        "stream_work": {
+          "inline_bytes": 5095870,
+          "input_bytes": 8388586,
+          "invalidated_blocks": 0,
+          "scanned_bytes": 8388586
+        },
+        "target_bytes": 8388608,
+        "verified": true,
+        "worker_wall_ns": 27907088292,
+        "worker_cpu_ns": 27613167000
+      },
+      "gate_reference": "pulldown-owned",
+      "timing": {
+        "candidate": {
+          "append_p95_median_ns": 244208,
+          "append_p95_samples_ns": [
+            260417,
+            244208,
+            243791
+          ],
+          "case": "mixed",
+          "chunk_bytes": 32768,
+          "commits": 256,
+          "engine": "candidate",
+          "finish_median_ns": 3333,
+          "first_append_median_ns": 333792,
+          "first_append_samples_ns": [
+            383333,
+            331375,
+            333792
+          ],
+          "first_output_commit_median": 1,
+          "first_output_median_ns": 335042,
+          "first_output_samples_ns": [
+            384458,
+            332541,
+            335042
+          ],
+          "max_append_median_ns": 469750,
+          "measurement": "timing",
+          "median_ns": 52042625,
+          "mode": "stream",
+          "prefix_replay_bytes": 1077934608,
+          "pulldown_version": "0.13.6",
+          "rounds": 3,
+          "size": "very-huge",
+          "source_bytes": 8388586,
+          "source_fingerprint": "d21c88c1e66907e9",
+          "target_bytes": 8388608,
+          "total_samples_ns": [
+            56024583,
+            51837958,
+            52042625
+          ],
+          "worker_wall_ns": 272356041,
+          "worker_cpu_ns": 267141000
+        },
+        "pulldown-owned": {
+          "append_p95_median_ns": 113385500,
+          "append_p95_samples_ns": [
+            113385500,
+            113906292,
+            111973416
+          ],
+          "case": "mixed",
+          "chunk_bytes": 32768,
+          "commits": 256,
+          "engine": "pulldown-owned",
+          "finish_median_ns": 0,
+          "first_append_median_ns": 430042,
+          "first_append_samples_ns": [
+            403750,
+            430042,
+            463833
+          ],
+          "first_output_commit_median": 1,
+          "first_output_median_ns": 430750,
+          "first_output_samples_ns": [
+            404709,
+            430750,
+            464667
+          ],
+          "max_append_median_ns": 130413000,
+          "measurement": "timing",
+          "median_ns": 15257636375,
+          "mode": "stream",
+          "prefix_replay_bytes": 1077934608,
+          "pulldown_version": "0.13.6",
+          "rounds": 3,
+          "size": "very-huge",
+          "source_bytes": 8388586,
+          "source_fingerprint": "d21c88c1e66907e9",
+          "target_bytes": 8388608,
+          "total_samples_ns": [
+            15291063334,
+            15257636375,
+            15100893500
+          ],
+          "worker_wall_ns": 60441529667,
+          "worker_cpu_ns": 59293570000
+        },
+        "pulldown": {
+          "append_p95_median_ns": 94872625,
+          "append_p95_samples_ns": [
+            94872625,
+            94141709,
+            95418834
+          ],
+          "case": "mixed",
+          "chunk_bytes": 32768,
+          "commits": 256,
+          "engine": "pulldown",
+          "finish_median_ns": 0,
+          "first_append_median_ns": 328000,
+          "first_append_samples_ns": [
+            328000,
+            327750,
+            329208
+          ],
+          "first_output_commit_median": 1,
+          "first_output_median_ns": 328708,
+          "first_output_samples_ns": [
+            328708,
+            328458,
+            329625
+          ],
+          "max_append_median_ns": 136526166,
+          "measurement": "timing",
+          "median_ns": 12906696791,
+          "mode": "stream",
+          "prefix_replay_bytes": 1077934608,
+          "pulldown_version": "0.13.6",
+          "rounds": 3,
+          "size": "very-huge",
+          "source_bytes": 8388586,
+          "source_fingerprint": "d21c88c1e66907e9",
+          "target_bytes": 8388608,
+          "total_samples_ns": [
+            12906696791,
+            13053204291,
+            12599857333
+          ],
+          "worker_wall_ns": 51338057375,
+          "worker_cpu_ns": 49418965000
+        }
+      },
+      "memory": {
+        "candidate": {
+          "allocation_requests": 391993,
+          "case": "mixed",
+          "chunk_bytes": 32768,
+          "commits": 256,
+          "engine": "candidate",
+          "live_after_drop_bytes_delta": 0,
+          "live_at_finish_bytes_delta": 96939248,
+          "measurement": "allocations",
+          "mode": "stream",
+          "peak_live_bytes_delta": 97119472,
+          "prefix_replay_bytes": 1077934608,
+          "pulldown_version": "0.13.6",
+          "reallocation_requests": 34,
+          "size": "very-huge",
+          "source_bytes": 8388586,
+          "source_fingerprint": "d21c88c1e66907e9",
+          "target_bytes": 8388608,
+          "total_requested_bytes": 143403632,
+          "worker_wall_ns": 123791667,
+          "worker_cpu_ns": 94778000
+        },
+        "pulldown-owned": {
+          "allocation_requests": 1538,
+          "case": "mixed",
+          "chunk_bytes": 32768,
+          "commits": 256,
+          "engine": "pulldown-owned",
+          "live_after_drop_bytes_delta": 0,
+          "live_at_finish_bytes_delta": 176160768,
+          "measurement": "allocations",
+          "mode": "stream",
+          "peak_live_bytes_delta": 293601120,
+          "prefix_replay_bytes": 1077934608,
+          "pulldown_version": "0.13.6",
+          "reallocation_requests": 6605,
+          "size": "very-huge",
+          "source_bytes": 8388586,
+          "source_fingerprint": "d21c88c1e66907e9",
+          "target_bytes": 8388608,
+          "total_requested_bytes": 28410624144,
+          "worker_wall_ns": 15308955875,
+          "worker_cpu_ns": 14912376000
+        },
+        "pulldown": {
+          "allocation_requests": 1537,
+          "case": "mixed",
+          "chunk_bytes": 32768,
+          "commits": 256,
+          "engine": "pulldown",
+          "live_after_drop_bytes_delta": 0,
+          "live_at_finish_bytes_delta": 167772160,
+          "measurement": "allocations",
+          "mode": "stream",
+          "peak_live_bytes_delta": 285212512,
+          "prefix_replay_bytes": 1077934608,
+          "pulldown_version": "0.13.6",
+          "reallocation_requests": 6597,
+          "size": "very-huge",
+          "source_bytes": 8388586,
+          "source_fingerprint": "d21c88c1e66907e9",
+          "target_bytes": 8388608,
+          "total_requested_bytes": 28393879696,
+          "worker_wall_ns": 12344643042,
+          "worker_cpu_ns": 12162320000
+        }
+      },
+      "pulldown_over_candidate_timing": {
+        "median_ns": 248.0024170763869,
+        "first_append_median_ns": 0.9826478765219059,
+        "first_output_median_ns": 0.9810949075041339,
+        "append_p95_median_ns": 388.49106089890586,
+        "max_append_median_ns": 290.6357977647685
+      },
+      "pulldown_over_candidate_memory": {
+        "peak_live_bytes_delta": 2.936718107363681,
+        "live_at_finish_bytes_delta": 1.730693846521277,
+        "total_requested_bytes": 197.99972497209833
+      },
+      "timing_failures": [],
+      "memory_failures": [],
+      "pulldown_owned_over_candidate_timing": {
+        "median_ns": 293.17576457759384,
+        "first_append_median_ns": 1.2883532259610775,
+        "first_output_median_ns": 1.2856597083350745,
+        "append_p95_median_ns": 464.29887636768655,
+        "max_append_median_ns": 277.62213943587017
+      },
+      "pulldown_owned_over_candidate_memory": {
+        "peak_live_bytes_delta": 3.0230922177995367,
+        "live_at_finish_bytes_delta": 1.8172285388473408,
+        "total_requested_bytes": 198.11648943452144
+      }
+    },
+    {
+      "mode": "full",
+      "case": "real-chat",
+      "size": "very-huge",
+      "ok": true,
+      "verification": {
+        "case": "real-chat",
+        "chunk_bytes": null,
+        "commits": 0,
+        "difference": null,
+        "engine": "verify",
+        "measurement": "verification",
+        "mode": "full",
+        "native_layout_bytes": {
+          "block": 72,
+          "change": 88,
+          "inline_content": 24,
+          "pulldown_event": 80,
+          "span": 16,
+          "stream_block_slot": 72
+        },
+        "prefix_replay_bytes": null,
+        "pulldown_version": "0.13.6",
+        "scope": "final-semantic-trace",
+        "size": "very-huge",
+        "source_bytes": 8379385,
+        "source_fingerprint": "d0dd321d64f3e23f",
+        "stream_work": null,
+        "target_bytes": 8388608,
+        "verified": true,
+        "worker_wall_ns": 97436750,
+        "worker_cpu_ns": 91270000
+      },
+      "gate_reference": "pulldown",
+      "timing": {
+        "candidate": {
+          "case": "real-chat",
+          "chunk_bytes": null,
+          "commits": 0,
+          "engine": "candidate",
+          "measurement": "timing",
+          "median_ns": 16935542,
+          "mode": "full",
+          "prefix_replay_bytes": null,
+          "pulldown_version": "0.13.6",
+          "rounds": 3,
+          "size": "very-huge",
+          "source_bytes": 8379385,
+          "source_fingerprint": "d0dd321d64f3e23f",
+          "target_bytes": 8388608,
+          "total_samples_ns": [
+            17018667,
+            16935542,
+            16534750
+          ],
+          "worker_wall_ns": 85721750,
+          "worker_cpu_ns": 82711000
+        },
+        "pulldown": {
+          "case": "real-chat",
+          "chunk_bytes": null,
+          "commits": 0,
+          "engine": "pulldown",
+          "measurement": "timing",
+          "median_ns": 23938584,
+          "mode": "full",
+          "prefix_replay_bytes": null,
+          "pulldown_version": "0.13.6",
+          "rounds": 3,
+          "size": "very-huge",
+          "source_bytes": 8379385,
+          "source_fingerprint": "d0dd321d64f3e23f",
+          "target_bytes": 8388608,
+          "total_samples_ns": [
+            24201541,
+            23483291,
+            23938584
+          ],
+          "worker_wall_ns": 115774541,
+          "worker_cpu_ns": 111104000
+        }
+      },
+      "memory": {
+        "candidate": {
+          "allocation_requests": 54743,
+          "case": "real-chat",
+          "chunk_bytes": null,
+          "commits": 0,
+          "engine": "candidate",
+          "live_after_drop_bytes_delta": 0,
+          "live_at_finish_bytes_delta": 21000600,
+          "measurement": "allocations",
+          "mode": "full",
+          "peak_live_bytes_delta": 21000792,
+          "prefix_replay_bytes": null,
+          "pulldown_version": "0.13.6",
+          "reallocation_requests": 11930,
+          "size": "very-huge",
+          "source_bytes": 8379385,
+          "source_fingerprint": "d0dd321d64f3e23f",
+          "target_bytes": 8388608,
+          "total_requested_bytes": 34432672,
+          "worker_wall_ns": 31468958,
+          "worker_cpu_ns": 28181000
+        },
+        "pulldown": {
+          "allocation_requests": 603,
+          "case": "real-chat",
+          "chunk_bytes": null,
+          "commits": 0,
+          "engine": "pulldown",
+          "live_after_drop_bytes_delta": 0,
+          "live_at_finish_bytes_delta": 41947800,
+          "measurement": "allocations",
+          "mode": "full",
+          "peak_live_bytes_delta": 69338904,
+          "prefix_replay_bytes": null,
+          "pulldown_version": "0.13.6",
+          "reallocation_requests": 46,
+          "size": "very-huge",
+          "source_bytes": 8379385,
+          "source_fingerprint": "d0dd321d64f3e23f",
+          "target_bytes": 8388608,
+          "total_requested_bytes": 126093032,
+          "worker_wall_ns": 40182750,
+          "worker_cpu_ns": 36122000
+        }
+      },
+      "pulldown_over_candidate_timing": {
+        "median_ns": 1.4135115368613536
+      },
+      "pulldown_over_candidate_memory": {
+        "peak_live_bytes_delta": 3.301728049113576,
+        "live_at_finish_bytes_delta": 1.9974572155081283,
+        "total_requested_bytes": 3.6620170517118162
+      },
+      "timing_failures": [],
+      "memory_failures": []
+    },
+    {
+      "mode": "stream",
+      "case": "real-chat",
+      "size": "very-huge",
+      "ok": true,
+      "verification": {
+        "case": "real-chat",
+        "chunk_bytes": 32768,
+        "commits": 256,
+        "difference": null,
+        "engine": "verify",
+        "measurement": "verification",
+        "mode": "stream",
+        "native_layout_bytes": {
+          "block": 72,
+          "change": 88,
+          "inline_content": 24,
+          "pulldown_event": 80,
+          "span": 16,
+          "stream_block_slot": 72
+        },
+        "prefix_replay_bytes": 1077926905,
+        "pulldown_version": "0.13.6",
+        "scope": "final-semantic-trace",
+        "size": "very-huge",
+        "source_bytes": 8379385,
+        "source_fingerprint": "d0dd321d64f3e23f",
+        "stream_work": {
+          "inline_bytes": 5739370,
+          "input_bytes": 8379385,
+          "invalidated_blocks": 0,
+          "scanned_bytes": 8379385
+        },
+        "target_bytes": 8388608,
+        "verified": true,
+        "worker_wall_ns": 6585947834,
+        "worker_cpu_ns": 6528210000
+      },
+      "gate_reference": "pulldown-owned",
+      "timing": {
+        "pulldown": {
+          "append_p95_median_ns": 21310166,
+          "append_p95_samples_ns": [
+            21253000,
+            21310166,
+            21347125
+          ],
+          "case": "real-chat",
+          "chunk_bytes": 32768,
+          "commits": 256,
+          "engine": "pulldown",
+          "finish_median_ns": 42,
+          "first_append_median_ns": 133042,
+          "first_append_samples_ns": [
+            135375,
+            111375,
+            133042
+          ],
+          "first_output_commit_median": 1,
+          "first_output_median_ns": 133792,
+          "first_output_samples_ns": [
+            135916,
+            111375,
+            133792
+          ],
+          "max_append_median_ns": 23257916,
+          "measurement": "timing",
+          "median_ns": 2940481000,
+          "mode": "stream",
+          "prefix_replay_bytes": 1077926905,
+          "pulldown_version": "0.13.6",
+          "rounds": 3,
+          "size": "very-huge",
+          "source_bytes": 8379385,
+          "source_fingerprint": "d0dd321d64f3e23f",
+          "target_bytes": 8388608,
+          "total_samples_ns": [
+            2958181416,
+            2940481000,
+            2926062375
+          ],
+          "worker_wall_ns": 11807855625,
+          "worker_cpu_ns": 11730719000
+        },
+        "pulldown-owned": {
+          "append_p95_median_ns": 25013959,
+          "append_p95_samples_ns": [
+            25011291,
+            25536875,
+            25013959
+          ],
+          "case": "real-chat",
+          "chunk_bytes": 32768,
+          "commits": 256,
+          "engine": "pulldown-owned",
+          "finish_median_ns": 41,
+          "first_append_median_ns": 141875,
+          "first_append_samples_ns": [
+            141875,
+            137875,
+            146209
+          ],
+          "first_output_commit_median": 1,
+          "first_output_median_ns": 142541,
+          "first_output_samples_ns": [
+            142541,
+            137917,
+            146583
+          ],
+          "max_append_median_ns": 48010500,
+          "measurement": "timing",
+          "median_ns": 3638692500,
+          "mode": "stream",
+          "prefix_replay_bytes": 1077926905,
+          "pulldown_version": "0.13.6",
+          "rounds": 3,
+          "size": "very-huge",
+          "source_bytes": 8379385,
+          "source_fingerprint": "d0dd321d64f3e23f",
+          "target_bytes": 8388608,
+          "total_samples_ns": [
+            3454402291,
+            3638692500,
+            3767678583
+          ],
+          "worker_wall_ns": 14376228750,
+          "worker_cpu_ns": 13834474000
+        },
+        "candidate": {
+          "append_p95_median_ns": 108709,
+          "append_p95_samples_ns": [
+            136750,
+            108709,
+            103834
+          ],
+          "case": "real-chat",
+          "chunk_bytes": 32768,
+          "commits": 256,
+          "engine": "candidate",
+          "finish_median_ns": 3083,
+          "first_append_median_ns": 141625,
+          "first_append_samples_ns": [
+            141625,
+            173875,
+            119875
+          ],
+          "first_output_commit_median": 1,
+          "first_output_median_ns": 144667,
+          "first_output_samples_ns": [
+            144667,
+            175209,
+            120750
+          ],
+          "max_append_median_ns": 462042,
+          "measurement": "timing",
+          "median_ns": 20530709,
+          "mode": "stream",
+          "prefix_replay_bytes": 1077926905,
+          "pulldown_version": "0.13.6",
+          "rounds": 3,
+          "size": "very-huge",
+          "source_bytes": 8379385,
+          "source_fingerprint": "d0dd321d64f3e23f",
+          "target_bytes": 8388608,
+          "total_samples_ns": [
+            22445709,
+            20530709,
+            20114333
+          ],
+          "worker_wall_ns": 106268417,
+          "worker_cpu_ns": 102337000
+        }
+      },
+      "memory": {
+        "pulldown": {
+          "allocation_requests": 78445,
+          "case": "real-chat",
+          "chunk_bytes": 32768,
+          "commits": 256,
+          "engine": "pulldown",
+          "live_after_drop_bytes_delta": 0,
+          "live_at_finish_bytes_delta": 41947800,
+          "measurement": "allocations",
+          "mode": "stream",
+          "peak_live_bytes_delta": 69338904,
+          "prefix_replay_bytes": 1077926905,
+          "pulldown_version": "0.13.6",
+          "reallocation_requests": 6363,
+          "size": "very-huge",
+          "source_bytes": 8379385,
+          "source_fingerprint": "d0dd321d64f3e23f",
+          "target_bytes": 8388608,
+          "total_requested_bytes": 5609326160,
+          "worker_wall_ns": 2999080459,
+          "worker_cpu_ns": 2951363000
+        },
+        "pulldown-owned": {
+          "allocation_requests": 78446,
+          "case": "real-chat",
+          "chunk_bytes": 32768,
+          "commits": 256,
+          "engine": "pulldown-owned",
+          "live_after_drop_bytes_delta": 0,
+          "live_at_finish_bytes_delta": 50336408,
+          "measurement": "allocations",
+          "mode": "stream",
+          "peak_live_bytes_delta": 77727512,
+          "prefix_replay_bytes": 1077926905,
+          "pulldown_version": "0.13.6",
+          "reallocation_requests": 6371,
+          "size": "very-huge",
+          "source_bytes": 8379385,
+          "source_fingerprint": "d0dd321d64f3e23f",
+          "target_bytes": 8388608,
+          "total_requested_bytes": 5626070608,
+          "worker_wall_ns": 3463682292,
+          "worker_cpu_ns": 3443128000
+        },
+        "candidate": {
+          "allocation_requests": 57125,
+          "case": "real-chat",
+          "chunk_bytes": 32768,
+          "commits": 256,
+          "engine": "candidate",
+          "live_after_drop_bytes_delta": 0,
+          "live_at_finish_bytes_delta": 30437784,
+          "measurement": "allocations",
+          "mode": "stream",
+          "peak_live_bytes_delta": 30483056,
+          "prefix_replay_bytes": 1077926905,
+          "pulldown_version": "0.13.6",
+          "reallocation_requests": 11945,
+          "size": "very-huge",
+          "source_bytes": 8379385,
+          "source_fingerprint": "d0dd321d64f3e23f",
+          "target_bytes": 8388608,
+          "total_requested_bytes": 53535360,
+          "worker_wall_ns": 37277583,
+          "worker_cpu_ns": 33054000
+        }
+      },
+      "pulldown_over_candidate_timing": {
+        "median_ns": 143.22354868504542,
+        "first_append_median_ns": 0.9393962930273609,
+        "first_output_median_ns": 0.9248273621489351,
+        "append_p95_median_ns": 196.02945478295266,
+        "max_append_median_ns": 50.33723341168119
+      },
+      "pulldown_over_candidate_memory": {
+        "peak_live_bytes_delta": 2.2746703611343952,
+        "live_at_finish_bytes_delta": 1.3781489480311708,
+        "total_requested_bytes": 104.77796656266064
+      },
+      "timing_failures": [],
+      "memory_failures": [],
+      "pulldown_owned_over_candidate_timing": {
+        "median_ns": 177.23170203230683,
+        "first_append_median_ns": 1.001765225066196,
+        "first_output_median_ns": 0.9853041813267711,
+        "append_p95_median_ns": 230.10016649955386,
+        "max_append_median_ns": 103.90938486111652
+      },
+      "pulldown_owned_over_candidate_memory": {
+        "peak_live_bytes_delta": 2.5498595678858447,
+        "live_at_finish_bytes_delta": 1.653747460721845,
+        "total_requested_bytes": 105.0907401762125
+      }
+    }
+  ]
+}

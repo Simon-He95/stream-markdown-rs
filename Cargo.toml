@@ -4,8 +4,13 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
-description = "Incremental Markdown parser for Rust terminal applications"
+description = "Incremental CommonMark and GFM parser with typed updates and AI streaming previews for Rust TUIs"
+repository = "https://github.com/Simon-He95/stream-markdown-rs"
+readme = "README.md"
+keywords = ["markdown", "commonmark", "gfm", "incremental", "tui"]
+categories = ["parser-implementations", "text-processing"]
 exclude = [
+    "/docs/benchmarks/data/",
     "/fixtures/oracle-source.tar.gz",
     "/package.json",
     "/patches/",

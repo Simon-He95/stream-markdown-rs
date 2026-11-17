@@ -1,0 +1,1410 @@
+{
+  "revision": "a16a31b0ba3e8b59a27016f8d64376ce41772f86",
+  "timing_binary": {
+    "path": "target/public-timing/release/stream-markdown-bench",
+    "sha256": "20489626c0a2c0ebc7ec57b8075c84f265326d10f85dea14888024bd8b9b7bb2"
+  },
+  "memory_binary": {
+    "path": "target/public-allocations/release/stream-markdown-bench",
+    "sha256": "5b3378f0ae970c0469952094034a97fe5633161173dec4ebdabf5fe9172b2793"
+  },
+  "previews": [
+    {
+      "verification": {
+        "case": "real-chat",
+        "chunk_bytes": 32,
+        "commits": 3962,
+        "difference": null,
+        "engine": "verify-preview",
+        "measurement": "verification",
+        "mode": "stream",
+        "packet_fingerprint": "62e398127b4765fe",
+        "parser_stack_bytes": 864,
+        "prefix_replay_bytes": 251210936,
+        "preview_inline_bytes": 134068,
+        "preview_probe_bytes": 165282,
+        "pulldown_version": "0.13.6",
+        "size": "large",
+        "source_bytes": 126747,
+        "source_fingerprint": "039da58cdec55e54",
+        "target_bytes": 131072,
+        "verified": true,
+        "worker_wall_ns": 11806041,
+        "worker_cpu_ns": 9558000
+      },
+      "timing": {
+        "append_p95_median_ns": 875,
+        "append_p95_samples_ns": [
+          875,
+          833,
+          833,
+          1041,
+          958,
+          917,
+          958,
+          917,
+          833,
+          833,
+          875
+        ],
+        "case": "real-chat",
+        "chunk_bytes": 32,
+        "commits": 3962,
+        "engine": "candidate-preview",
+        "finish_median_ns": 958,
+        "first_append_median_ns": 667,
+        "first_append_samples_ns": [
+          750,
+          709,
+          500,
+          542,
+          666,
+          958,
+          625,
+          792,
+          667,
+          3000,
+          542
+        ],
+        "first_output_commit_median": 1,
+        "first_output_median_ns": 834,
+        "first_output_samples_ns": [
+          2375,
+          834,
+          625,
+          625,
+          1042,
+          1250,
+          792,
+          1042,
+          792,
+          3041,
+          666
+        ],
+        "max_append_median_ns": 7584,
+        "measurement": "timing",
+        "median_ns": 1285625,
+        "mode": "stream",
+        "prefix_replay_bytes": 251210936,
+        "pulldown_version": "0.13.6",
+        "rounds": 11,
+        "size": "large",
+        "source_bytes": 126747,
+        "source_fingerprint": "039da58cdec55e54",
+        "target_bytes": 131072,
+        "total_samples_ns": [
+          1257709,
+          1205917,
+          1200417,
+          1540042,
+          1399917,
+          1314458,
+          1349042,
+          1331875,
+          1219250,
+          1202708,
+          1285625
+        ],
+        "worker_wall_ns": 21046250,
+        "worker_cpu_ns": 19029000
+      },
+      "memory": {
+        "allocation_requests": 3097,
+        "case": "real-chat",
+        "chunk_bytes": 32,
+        "commits": 3962,
+        "engine": "candidate-preview",
+        "live_after_drop_bytes_delta": 0,
+        "live_at_finish_bytes_delta": 470344,
+        "measurement": "allocations",
+        "mode": "stream",
+        "peak_live_bytes_delta": 473011,
+        "prefix_replay_bytes": 251210936,
+        "pulldown_version": "0.13.6",
+        "reallocation_requests": 918,
+        "size": "large",
+        "source_bytes": 126747,
+        "source_fingerprint": "039da58cdec55e54",
+        "target_bytes": 131072,
+        "total_requested_bytes": 1480481,
+        "worker_wall_ns": 6881125,
+        "worker_cpu_ns": 4748000
+      }
+    },
+    {
+      "verification": {
+        "case": "preview-tail",
+        "chunk_bytes": 32,
+        "commits": 32776,
+        "difference": null,
+        "engine": "verify-preview",
+        "measurement": "verification",
+        "mode": "stream",
+        "packet_fingerprint": "f399c7c434f9346f",
+        "parser_stack_bytes": 864,
+        "prefix_replay_bytes": 17184793942,
+        "preview_inline_bytes": 100892,
+        "preview_probe_bytes": 1519778,
+        "pulldown_version": "0.13.6",
+        "size": "huge",
+        "source_bytes": 1048576,
+        "source_fingerprint": "b07387e9ad66b16e",
+        "target_bytes": 1048576,
+        "verified": true,
+        "worker_wall_ns": 33181167,
+        "worker_cpu_ns": 30959000
+      },
+      "timing": {
+        "append_p95_median_ns": 958,
+        "append_p95_samples_ns": [
+          958,
+          958,
+          958,
+          958,
+          958,
+          958,
+          958,
+          958,
+          958,
+          958,
+          958
+        ],
+        "case": "preview-tail",
+        "chunk_bytes": 32,
+        "commits": 32776,
+        "engine": "candidate-preview",
+        "finish_median_ns": 3958,
+        "first_append_median_ns": 500,
+        "first_append_samples_ns": [
+          3833,
+          500,
+          541,
+          292,
+          333,
+          4500,
+          375,
+          542,
+          292,
+          2708,
+          291
+        ],
+        "first_output_commit_median": 1,
+        "first_output_median_ns": 875,
+        "first_output_samples_ns": [
+          10459,
+          875,
+          1000,
+          2250,
+          459,
+          4625,
+          667,
+          709,
+          541,
+          3042,
+          583
+        ],
+        "max_append_median_ns": 35625,
+        "measurement": "timing",
+        "median_ns": 8028125,
+        "mode": "stream",
+        "prefix_replay_bytes": 17184793942,
+        "pulldown_version": "0.13.6",
+        "rounds": 11,
+        "size": "huge",
+        "source_bytes": 1048576,
+        "source_fingerprint": "b07387e9ad66b16e",
+        "target_bytes": 1048576,
+        "total_samples_ns": [
+          8273750,
+          7960125,
+          8084000,
+          8041791,
+          8019709,
+          8120500,
+          8064875,
+          7948042,
+          8028125,
+          7884542,
+          7990000
+        ],
+        "worker_wall_ns": 105118625,
+        "worker_cpu_ns": 102588000
+      },
+      "memory": {
+        "allocation_requests": 22913,
+        "case": "preview-tail",
+        "chunk_bytes": 32,
+        "commits": 32776,
+        "engine": "candidate-preview",
+        "live_after_drop_bytes_delta": 0,
+        "live_at_finish_bytes_delta": 2070088,
+        "measurement": "allocations",
+        "mode": "stream",
+        "peak_live_bytes_delta": 2071309,
+        "prefix_replay_bytes": 17184793942,
+        "pulldown_version": "0.13.6",
+        "reallocation_requests": 4531,
+        "size": "huge",
+        "source_bytes": 1048576,
+        "source_fingerprint": "b07387e9ad66b16e",
+        "target_bytes": 1048576,
+        "total_requested_bytes": 6534901,
+        "worker_wall_ns": 13328417,
+        "worker_cpu_ns": 11166000
+      }
+    }
+  ],
+  "history": [
+    {
+      "verification": {
+        "case": "preview-tail",
+        "chunk_bytes": null,
+        "commits": 0,
+        "engine": "verify-history",
+        "measurement": "verification",
+        "messages": 2,
+        "mode": "full",
+        "prefix_replay_bytes": null,
+        "pulldown_version": "0.13.6",
+        "size": "small",
+        "source_bytes": 1024,
+        "source_fingerprint": "e14f03c0d3e09b59",
+        "target_bytes": 1024,
+        "verified": true,
+        "worker_wall_ns": 4988750,
+        "worker_cpu_ns": 3384000
+      },
+      "timing": {
+        "history-eager": {
+          "batch_p95_median_ns": 1417,
+          "batch_p95_samples_ns": [
+            2417,
+            1500,
+            1334,
+            1292,
+            1250,
+            3042,
+            1417,
+            1292,
+            1250,
+            4417,
+            1417
+          ],
+          "case": "preview-tail",
+          "chunk_bytes": null,
+          "commits": 0,
+          "engine": "history-eager",
+          "first_output_median_ns": 1417,
+          "first_output_samples_ns": [
+            2417,
+            1500,
+            1334,
+            1292,
+            1250,
+            3042,
+            1417,
+            1292,
+            1250,
+            4417,
+            1417
+          ],
+          "measurement": "timing",
+          "median_ns": 1458,
+          "messages": 2,
+          "mode": "full",
+          "prefix_replay_bytes": null,
+          "pulldown_version": "0.13.6",
+          "size": "small",
+          "source_bytes": 1024,
+          "source_fingerprint": "e14f03c0d3e09b59",
+          "target_bytes": 1024,
+          "total_samples_ns": [
+            2708,
+            1500,
+            1375,
+            1334,
+            1250,
+            3083,
+            1459,
+            1333,
+            1291,
+            4459,
+            1458
+          ],
+          "worker_wall_ns": 5041209,
+          "worker_cpu_ns": 3315000
+        },
+        "history-batched": {
+          "batch_p95_median_ns": 1417,
+          "batch_p95_samples_ns": [
+            2375,
+            1500,
+            1291,
+            1292,
+            1250,
+            3250,
+            1417,
+            1250,
+            2875,
+            2667,
+            1292
+          ],
+          "case": "preview-tail",
+          "chunk_bytes": null,
+          "commits": 0,
+          "engine": "history-batched",
+          "first_output_median_ns": 1417,
+          "first_output_samples_ns": [
+            2375,
+            1500,
+            1291,
+            1292,
+            1250,
+            3250,
+            1417,
+            1250,
+            2875,
+            2667,
+            1292
+          ],
+          "measurement": "timing",
+          "median_ns": 1458,
+          "messages": 2,
+          "mode": "full",
+          "prefix_replay_bytes": null,
+          "pulldown_version": "0.13.6",
+          "size": "small",
+          "source_bytes": 1024,
+          "source_fingerprint": "e14f03c0d3e09b59",
+          "target_bytes": 1024,
+          "total_samples_ns": [
+            2666,
+            1500,
+            1333,
+            1292,
+            1292,
+            3292,
+            1458,
+            1291,
+            2875,
+            2708,
+            1334
+          ],
+          "worker_wall_ns": 5150709,
+          "worker_cpu_ns": 3294000
+        }
+      },
+      "memory": {
+        "history-eager": {
+          "case": "preview-tail",
+          "chunk_bytes": null,
+          "commits": 0,
+          "engine": "history-eager",
+          "live_after_drop_bytes_delta": 0,
+          "measurement": "allocations",
+          "messages": 2,
+          "mode": "full",
+          "peak_live_bytes_delta": 1256,
+          "prefix_replay_bytes": null,
+          "pulldown_version": "0.13.6",
+          "size": "small",
+          "source_bytes": 1024,
+          "source_fingerprint": "e14f03c0d3e09b59",
+          "target_bytes": 1024,
+          "worker_wall_ns": 4981833,
+          "worker_cpu_ns": 3154000
+        },
+        "history-batched": {
+          "case": "preview-tail",
+          "chunk_bytes": null,
+          "commits": 0,
+          "engine": "history-batched",
+          "live_after_drop_bytes_delta": 0,
+          "measurement": "allocations",
+          "messages": 2,
+          "mode": "full",
+          "peak_live_bytes_delta": 1256,
+          "prefix_replay_bytes": null,
+          "pulldown_version": "0.13.6",
+          "size": "small",
+          "source_bytes": 1024,
+          "source_fingerprint": "e14f03c0d3e09b59",
+          "target_bytes": 1024,
+          "worker_wall_ns": 5043791,
+          "worker_cpu_ns": 3421000
+        }
+      }
+    },
+    {
+      "verification": {
+        "case": "preview-tail",
+        "chunk_bytes": null,
+        "commits": 0,
+        "engine": "verify-history",
+        "measurement": "verification",
+        "messages": 25,
+        "mode": "full",
+        "prefix_replay_bytes": null,
+        "pulldown_version": "0.13.6",
+        "size": "medium",
+        "source_bytes": 16384,
+        "source_fingerprint": "688e2de0525d31ba",
+        "target_bytes": 16384,
+        "verified": true,
+        "worker_wall_ns": 7849375,
+        "worker_cpu_ns": 3352000
+      },
+      "timing": {
+        "history-batched": {
+          "batch_p95_median_ns": 18125,
+          "batch_p95_samples_ns": [
+            21500,
+            18500,
+            17917,
+            18208,
+            18125,
+            18333,
+            17667,
+            17708,
+            17917,
+            18291,
+            17625
+          ],
+          "case": "preview-tail",
+          "chunk_bytes": null,
+          "commits": 0,
+          "engine": "history-batched",
+          "first_output_median_ns": 3125,
+          "first_output_samples_ns": [
+            8375,
+            3542,
+            3125,
+            4709,
+            2958,
+            2959,
+            3042,
+            2917,
+            3125,
+            3125,
+            2875
+          ],
+          "measurement": "timing",
+          "median_ns": 21125,
+          "messages": 25,
+          "mode": "full",
+          "prefix_replay_bytes": null,
+          "pulldown_version": "0.13.6",
+          "size": "medium",
+          "source_bytes": 16384,
+          "source_fingerprint": "688e2de0525d31ba",
+          "target_bytes": 16384,
+          "total_samples_ns": [
+            29917,
+            22083,
+            21083,
+            22959,
+            21125,
+            21375,
+            20750,
+            20667,
+            21083,
+            21458,
+            20542
+          ],
+          "worker_wall_ns": 5962750,
+          "worker_cpu_ns": 3506000
+        },
+        "history-eager": {
+          "batch_p95_median_ns": 20166,
+          "batch_p95_samples_ns": [
+            27375,
+            20958,
+            20292,
+            21625,
+            20209,
+            20125,
+            20000,
+            19875,
+            20166,
+            19875,
+            19834
+          ],
+          "case": "preview-tail",
+          "chunk_bytes": null,
+          "commits": 0,
+          "engine": "history-eager",
+          "first_output_median_ns": 20166,
+          "first_output_samples_ns": [
+            27375,
+            20958,
+            20292,
+            21625,
+            20209,
+            20125,
+            20000,
+            19875,
+            20166,
+            19875,
+            19834
+          ],
+          "measurement": "timing",
+          "median_ns": 20167,
+          "messages": 25,
+          "mode": "full",
+          "prefix_replay_bytes": null,
+          "pulldown_version": "0.13.6",
+          "size": "medium",
+          "source_bytes": 16384,
+          "source_fingerprint": "688e2de0525d31ba",
+          "target_bytes": 16384,
+          "total_samples_ns": [
+            27583,
+            21000,
+            20334,
+            21625,
+            20209,
+            20167,
+            20041,
+            19917,
+            20166,
+            19917,
+            19875
+          ],
+          "worker_wall_ns": 5427292,
+          "worker_cpu_ns": 3474000
+        }
+      },
+      "memory": {
+        "history-batched": {
+          "case": "preview-tail",
+          "chunk_bytes": null,
+          "commits": 0,
+          "engine": "history-batched",
+          "live_after_drop_bytes_delta": 0,
+          "measurement": "allocations",
+          "messages": 25,
+          "mode": "full",
+          "peak_live_bytes_delta": 22048,
+          "prefix_replay_bytes": null,
+          "pulldown_version": "0.13.6",
+          "size": "medium",
+          "source_bytes": 16384,
+          "source_fingerprint": "688e2de0525d31ba",
+          "target_bytes": 16384,
+          "worker_wall_ns": 5205666,
+          "worker_cpu_ns": 3653000
+        },
+        "history-eager": {
+          "case": "preview-tail",
+          "chunk_bytes": null,
+          "commits": 0,
+          "engine": "history-eager",
+          "live_after_drop_bytes_delta": 0,
+          "measurement": "allocations",
+          "messages": 25,
+          "mode": "full",
+          "peak_live_bytes_delta": 22048,
+          "prefix_replay_bytes": null,
+          "pulldown_version": "0.13.6",
+          "size": "medium",
+          "source_bytes": 16384,
+          "source_fingerprint": "688e2de0525d31ba",
+          "target_bytes": 16384,
+          "worker_wall_ns": 4994250,
+          "worker_cpu_ns": 3072000
+        }
+      }
+    },
+    {
+      "verification": {
+        "case": "preview-tail",
+        "chunk_bytes": null,
+        "commits": 0,
+        "engine": "verify-history",
+        "measurement": "verification",
+        "messages": 198,
+        "mode": "full",
+        "prefix_replay_bytes": null,
+        "pulldown_version": "0.13.6",
+        "size": "large",
+        "source_bytes": 131072,
+        "source_fingerprint": "980fcbdaab801fff",
+        "target_bytes": 131072,
+        "verified": true,
+        "worker_wall_ns": 6306000,
+        "worker_cpu_ns": 4253000
+      },
+      "timing": {
+        "history-eager": {
+          "batch_p95_median_ns": 165792,
+          "batch_p95_samples_ns": [
+            166833,
+            165708,
+            165583,
+            165792,
+            165583,
+            165792,
+            186458,
+            170375,
+            169084,
+            163458,
+            200167
+          ],
+          "case": "preview-tail",
+          "chunk_bytes": null,
+          "commits": 0,
+          "engine": "history-eager",
+          "first_output_median_ns": 165792,
+          "first_output_samples_ns": [
+            166833,
+            165708,
+            165583,
+            165792,
+            165583,
+            165792,
+            186458,
+            170375,
+            169084,
+            163458,
+            200167
+          ],
+          "measurement": "timing",
+          "median_ns": 165833,
+          "messages": 198,
+          "mode": "full",
+          "prefix_replay_bytes": null,
+          "pulldown_version": "0.13.6",
+          "size": "large",
+          "source_bytes": 131072,
+          "source_fingerprint": "980fcbdaab801fff",
+          "target_bytes": 131072,
+          "total_samples_ns": [
+            167000,
+            165750,
+            165625,
+            165792,
+            165625,
+            165833,
+            186625,
+            170417,
+            169125,
+            163500,
+            200375
+          ],
+          "worker_wall_ns": 7549375,
+          "worker_cpu_ns": 5508000
+        },
+        "history-batched": {
+          "batch_p95_median_ns": 26625,
+          "batch_p95_samples_ns": [
+            27125,
+            26625,
+            86458,
+            67667,
+            27459,
+            26750,
+            26625,
+            26625,
+            26542,
+            26458,
+            26625
+          ],
+          "case": "preview-tail",
+          "chunk_bytes": null,
+          "commits": 0,
+          "engine": "history-batched",
+          "first_output_median_ns": 3834,
+          "first_output_samples_ns": [
+            6708,
+            4042,
+            3916,
+            4000,
+            4875,
+            3834,
+            3666,
+            3667,
+            3625,
+            3583,
+            3666
+          ],
+          "measurement": "timing",
+          "median_ns": 164333,
+          "messages": 198,
+          "mode": "full",
+          "prefix_replay_bytes": null,
+          "pulldown_version": "0.13.6",
+          "size": "large",
+          "source_bytes": 131072,
+          "source_fingerprint": "980fcbdaab801fff",
+          "target_bytes": 131072,
+          "total_samples_ns": [
+            167708,
+            164167,
+            249083,
+            206708,
+            166000,
+            165000,
+            164250,
+            163792,
+            163542,
+            163750,
+            164333
+          ],
+          "worker_wall_ns": 8136000,
+          "worker_cpu_ns": 5768000
+        }
+      },
+      "memory": {
+        "history-eager": {
+          "case": "preview-tail",
+          "chunk_bytes": null,
+          "commits": 0,
+          "engine": "history-eager",
+          "live_after_drop_bytes_delta": 0,
+          "measurement": "allocations",
+          "messages": 198,
+          "mode": "full",
+          "peak_live_bytes_delta": 178992,
+          "prefix_replay_bytes": null,
+          "pulldown_version": "0.13.6",
+          "size": "large",
+          "source_bytes": 131072,
+          "source_fingerprint": "980fcbdaab801fff",
+          "target_bytes": 131072,
+          "worker_wall_ns": 5144667,
+          "worker_cpu_ns": 3297000
+        },
+        "history-batched": {
+          "case": "preview-tail",
+          "chunk_bytes": null,
+          "commits": 0,
+          "engine": "history-batched",
+          "live_after_drop_bytes_delta": 0,
+          "measurement": "allocations",
+          "messages": 198,
+          "mode": "full",
+          "peak_live_bytes_delta": 178992,
+          "prefix_replay_bytes": null,
+          "pulldown_version": "0.13.6",
+          "size": "large",
+          "source_bytes": 131072,
+          "source_fingerprint": "980fcbdaab801fff",
+          "target_bytes": 131072,
+          "worker_wall_ns": 5018708,
+          "worker_cpu_ns": 3213000
+        }
+      }
+    },
+    {
+      "verification": {
+        "case": "preview-tail",
+        "chunk_bytes": null,
+        "commits": 0,
+        "engine": "verify-history",
+        "measurement": "verification",
+        "messages": 1584,
+        "mode": "full",
+        "prefix_replay_bytes": null,
+        "pulldown_version": "0.13.6",
+        "size": "huge",
+        "source_bytes": 1048576,
+        "source_fingerprint": "b07387e9ad66b16e",
+        "target_bytes": 1048576,
+        "verified": true,
+        "worker_wall_ns": 9615875,
+        "worker_cpu_ns": 7385000
+      },
+      "timing": {
+        "history-batched": {
+          "batch_p95_median_ns": 32333,
+          "batch_p95_samples_ns": [
+            26792,
+            51958,
+            27125,
+            36667,
+            32333
+          ],
+          "case": "preview-tail",
+          "chunk_bytes": null,
+          "commits": 0,
+          "engine": "history-batched",
+          "first_output_median_ns": 8208,
+          "first_output_samples_ns": [
+            13792,
+            6334,
+            8208,
+            8917,
+            7000
+          ],
+          "measurement": "timing",
+          "median_ns": 1382375,
+          "messages": 1584,
+          "mode": "full",
+          "prefix_replay_bytes": null,
+          "pulldown_version": "0.13.6",
+          "size": "huge",
+          "source_bytes": 1048576,
+          "source_fingerprint": "b07387e9ad66b16e",
+          "target_bytes": 1048576,
+          "total_samples_ns": [
+            1322542,
+            1430709,
+            1382375,
+            1393667,
+            1346000
+          ],
+          "worker_wall_ns": 15596958,
+          "worker_cpu_ns": 13374000
+        },
+        "history-eager": {
+          "batch_p95_median_ns": 1363792,
+          "batch_p95_samples_ns": [
+            1350291,
+            1351500,
+            1415250,
+            1363792,
+            1438875
+          ],
+          "case": "preview-tail",
+          "chunk_bytes": null,
+          "commits": 0,
+          "engine": "history-eager",
+          "first_output_median_ns": 1363792,
+          "first_output_samples_ns": [
+            1350291,
+            1351500,
+            1415250,
+            1363792,
+            1438875
+          ],
+          "measurement": "timing",
+          "median_ns": 1364000,
+          "messages": 1584,
+          "mode": "full",
+          "prefix_replay_bytes": null,
+          "pulldown_version": "0.13.6",
+          "size": "huge",
+          "source_bytes": 1048576,
+          "source_fingerprint": "b07387e9ad66b16e",
+          "target_bytes": 1048576,
+          "total_samples_ns": [
+            1350500,
+            1351666,
+            1415333,
+            1364000,
+            1438958
+          ],
+          "worker_wall_ns": 15693834,
+          "worker_cpu_ns": 13358000
+        }
+      },
+      "memory": {
+        "history-batched": {
+          "case": "preview-tail",
+          "chunk_bytes": null,
+          "commits": 0,
+          "engine": "history-batched",
+          "live_after_drop_bytes_delta": 0,
+          "measurement": "allocations",
+          "messages": 1584,
+          "mode": "full",
+          "peak_live_bytes_delta": 1431624,
+          "prefix_replay_bytes": null,
+          "pulldown_version": "0.13.6",
+          "size": "huge",
+          "source_bytes": 1048576,
+          "source_fingerprint": "b07387e9ad66b16e",
+          "target_bytes": 1048576,
+          "worker_wall_ns": 26872416,
+          "worker_cpu_ns": 8665000
+        },
+        "history-eager": {
+          "case": "preview-tail",
+          "chunk_bytes": null,
+          "commits": 0,
+          "engine": "history-eager",
+          "live_after_drop_bytes_delta": 0,
+          "measurement": "allocations",
+          "messages": 1584,
+          "mode": "full",
+          "peak_live_bytes_delta": 1431624,
+          "prefix_replay_bytes": null,
+          "pulldown_version": "0.13.6",
+          "size": "huge",
+          "source_bytes": 1048576,
+          "source_fingerprint": "b07387e9ad66b16e",
+          "target_bytes": 1048576,
+          "worker_wall_ns": 10675500,
+          "worker_cpu_ns": 5994000
+        }
+      }
+    },
+    {
+      "verification": {
+        "case": "preview-tail",
+        "chunk_bytes": null,
+        "commits": 0,
+        "engine": "verify-history",
+        "measurement": "verification",
+        "messages": 12672,
+        "mode": "full",
+        "prefix_replay_bytes": null,
+        "pulldown_version": "0.13.6",
+        "size": "very-huge",
+        "source_bytes": 8388608,
+        "source_fingerprint": "0890d8955e77f324",
+        "target_bytes": 8388608,
+        "verified": true,
+        "worker_wall_ns": 43702583,
+        "worker_cpu_ns": 39565000
+      },
+      "timing": {
+        "history-eager": {
+          "batch_p95_median_ns": 10801625,
+          "batch_p95_samples_ns": [
+            10843417,
+            10960834,
+            10801625,
+            10749708,
+            10713709
+          ],
+          "case": "preview-tail",
+          "chunk_bytes": null,
+          "commits": 0,
+          "engine": "history-eager",
+          "first_output_median_ns": 10801625,
+          "first_output_samples_ns": [
+            10843417,
+            10960834,
+            10801625,
+            10749708,
+            10713709
+          ],
+          "measurement": "timing",
+          "median_ns": 10801792,
+          "messages": 12672,
+          "mode": "full",
+          "prefix_replay_bytes": null,
+          "pulldown_version": "0.13.6",
+          "size": "very-huge",
+          "source_bytes": 8388608,
+          "source_fingerprint": "0890d8955e77f324",
+          "target_bytes": 8388608,
+          "total_samples_ns": [
+            10843542,
+            10961084,
+            10801792,
+            10749958,
+            10713875
+          ],
+          "worker_wall_ns": 86558458,
+          "worker_cpu_ns": 83957000
+        },
+        "history-batched": {
+          "batch_p95_median_ns": 28958,
+          "batch_p95_samples_ns": [
+            28958,
+            28291,
+            34416,
+            30583,
+            27417
+          ],
+          "case": "preview-tail",
+          "chunk_bytes": null,
+          "commits": 0,
+          "engine": "history-batched",
+          "first_output_median_ns": 36208,
+          "first_output_samples_ns": [
+            112125,
+            34666,
+            26125,
+            42084,
+            36208
+          ],
+          "measurement": "timing",
+          "median_ns": 10938750,
+          "messages": 12672,
+          "mode": "full",
+          "prefix_replay_bytes": null,
+          "pulldown_version": "0.13.6",
+          "size": "very-huge",
+          "source_bytes": 8388608,
+          "source_fingerprint": "0890d8955e77f324",
+          "target_bytes": 8388608,
+          "total_samples_ns": [
+            11105708,
+            10762791,
+            11645625,
+            10938750,
+            10701875
+          ],
+          "worker_wall_ns": 88326583,
+          "worker_cpu_ns": 85341000
+        }
+      },
+      "memory": {
+        "history-eager": {
+          "case": "preview-tail",
+          "chunk_bytes": null,
+          "commits": 0,
+          "engine": "history-eager",
+          "live_after_drop_bytes_delta": 0,
+          "measurement": "allocations",
+          "messages": 12672,
+          "mode": "full",
+          "peak_live_bytes_delta": 11454936,
+          "prefix_replay_bytes": null,
+          "pulldown_version": "0.13.6",
+          "size": "very-huge",
+          "source_bytes": 8388608,
+          "source_fingerprint": "0890d8955e77f324",
+          "target_bytes": 8388608,
+          "worker_wall_ns": 27484541,
+          "worker_cpu_ns": 24589000
+        },
+        "history-batched": {
+          "case": "preview-tail",
+          "chunk_bytes": null,
+          "commits": 0,
+          "engine": "history-batched",
+          "live_after_drop_bytes_delta": 0,
+          "measurement": "allocations",
+          "messages": 12672,
+          "mode": "full",
+          "peak_live_bytes_delta": 11454936,
+          "prefix_replay_bytes": null,
+          "pulldown_version": "0.13.6",
+          "size": "very-huge",
+          "source_bytes": 8388608,
+          "source_fingerprint": "0890d8955e77f324",
+          "target_bytes": 8388608,
+          "worker_wall_ns": 25870458,
+          "worker_cpu_ns": 23520000
+        }
+      }
+    }
+  ],
+  "soaks": [
+    {
+      "case": "real-chat",
+      "checkpoints": [
+        [
+          1,
+          0
+        ],
+        [
+          50,
+          0
+        ],
+        [
+          100,
+          0
+        ],
+        [
+          150,
+          0
+        ],
+        [
+          200,
+          0
+        ],
+        [
+          250,
+          0
+        ],
+        [
+          300,
+          0
+        ],
+        [
+          350,
+          0
+        ],
+        [
+          400,
+          0
+        ],
+        [
+          450,
+          0
+        ],
+        [
+          500,
+          0
+        ],
+        [
+          550,
+          0
+        ],
+        [
+          600,
+          0
+        ],
+        [
+          650,
+          0
+        ],
+        [
+          700,
+          0
+        ],
+        [
+          750,
+          0
+        ],
+        [
+          800,
+          0
+        ],
+        [
+          850,
+          0
+        ],
+        [
+          900,
+          0
+        ],
+        [
+          950,
+          0
+        ],
+        [
+          1000,
+          0
+        ]
+      ],
+      "chunk_bytes": null,
+      "commits": 0,
+      "engine": "soak",
+      "live_after_drop_bytes_delta": 0,
+      "max_after_drop_bytes_delta": 0,
+      "measurement": "allocation-soak",
+      "min_after_drop_bytes_delta": 0,
+      "mode": "full",
+      "peak_live_bytes_delta": 38344,
+      "prefix_replay_bytes": null,
+      "pulldown_version": "0.13.6",
+      "rounds": 1000,
+      "size": "medium",
+      "source_bytes": 14083,
+      "source_fingerprint": "fd85780ca9cd845c",
+      "target_bytes": 16384,
+      "worker_wall_ns": 36230542,
+      "worker_cpu_ns": 33756000
+    },
+    {
+      "case": "real-chat",
+      "checkpoints": [
+        [
+          1,
+          0
+        ],
+        [
+          50,
+          0
+        ],
+        [
+          100,
+          0
+        ],
+        [
+          150,
+          0
+        ],
+        [
+          200,
+          0
+        ],
+        [
+          250,
+          0
+        ],
+        [
+          300,
+          0
+        ],
+        [
+          350,
+          0
+        ],
+        [
+          400,
+          0
+        ],
+        [
+          450,
+          0
+        ],
+        [
+          500,
+          0
+        ],
+        [
+          550,
+          0
+        ],
+        [
+          600,
+          0
+        ],
+        [
+          650,
+          0
+        ],
+        [
+          700,
+          0
+        ],
+        [
+          750,
+          0
+        ],
+        [
+          800,
+          0
+        ],
+        [
+          850,
+          0
+        ],
+        [
+          900,
+          0
+        ],
+        [
+          950,
+          0
+        ],
+        [
+          1000,
+          0
+        ]
+      ],
+      "chunk_bytes": 32,
+      "commits": 441,
+      "engine": "soak",
+      "live_after_drop_bytes_delta": 0,
+      "max_after_drop_bytes_delta": 0,
+      "measurement": "allocation-soak",
+      "min_after_drop_bytes_delta": 0,
+      "mode": "stream",
+      "peak_live_bytes_delta": 57480,
+      "prefix_replay_bytes": 3118589,
+      "pulldown_version": "0.13.6",
+      "rounds": 1000,
+      "size": "medium",
+      "source_bytes": 14083,
+      "source_fingerprint": "fd85780ca9cd845c",
+      "target_bytes": 16384,
+      "worker_wall_ns": 66216250,
+      "worker_cpu_ns": 63823000
+    },
+    {
+      "case": "real-chat",
+      "checkpoints": [
+        [
+          1,
+          0
+        ],
+        [
+          50,
+          0
+        ],
+        [
+          100,
+          0
+        ],
+        [
+          150,
+          0
+        ],
+        [
+          200,
+          0
+        ],
+        [
+          250,
+          0
+        ],
+        [
+          300,
+          0
+        ],
+        [
+          350,
+          0
+        ],
+        [
+          400,
+          0
+        ],
+        [
+          450,
+          0
+        ],
+        [
+          500,
+          0
+        ],
+        [
+          550,
+          0
+        ],
+        [
+          600,
+          0
+        ],
+        [
+          650,
+          0
+        ],
+        [
+          700,
+          0
+        ],
+        [
+          750,
+          0
+        ],
+        [
+          800,
+          0
+        ],
+        [
+          850,
+          0
+        ],
+        [
+          900,
+          0
+        ],
+        [
+          950,
+          0
+        ],
+        [
+          1000,
+          0
+        ]
+      ],
+      "chunk_bytes": 32,
+      "commits": 441,
+      "engine": "soak-preview",
+      "live_after_drop_bytes_delta": 0,
+      "max_after_drop_bytes_delta": 0,
+      "measurement": "allocation-soak",
+      "min_after_drop_bytes_delta": 0,
+      "mode": "stream",
+      "peak_live_bytes_delta": 59491,
+      "prefix_replay_bytes": 3118589,
+      "pulldown_version": "0.13.6",
+      "rounds": 1000,
+      "size": "medium",
+      "source_bytes": 14083,
+      "source_fingerprint": "fd85780ca9cd845c",
+      "target_bytes": 16384,
+      "worker_wall_ns": 127148708,
+      "worker_cpu_ns": 124364000
+    }
+  ]
+}

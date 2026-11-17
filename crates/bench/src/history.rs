@@ -73,11 +73,12 @@ pub fn run(source: &str, rounds: usize, batched: bool, verify: bool) -> Result<V
         black_box(&docs);
         let peak = baseline.peak_delta();
         drop(docs);
+        let returned = baseline.live_delta();
         Ok(json!({
             "measurement": "allocations",
             "messages": messages.len(),
             "peak_live_bytes_delta": peak,
-            "live_after_drop_bytes_delta": baseline.live_delta(),
+            "live_after_drop_bytes_delta": returned,
         }))
     }
     #[cfg(not(feature = "count-allocations"))]
@@ -108,6 +109,9 @@ pub fn run(source: &str, rounds: usize, batched: bool, verify: bool) -> Result<V
         Ok(json!({
             "measurement": "timing",
             "messages": messages.len(),
+            "first_output_samples_ns": &first,
+            "total_samples_ns": &totals,
+            "batch_p95_samples_ns": &tails,
             "first_output_median_ns": crate::percentile(&mut first, 50),
             "median_ns": crate::percentile(&mut totals, 50),
             "batch_p95_median_ns": crate::percentile(&mut tails, 50),

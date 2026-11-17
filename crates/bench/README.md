@@ -1,5 +1,7 @@
 # Native parser benchmark
 
+[Measured results and reproduction protocol](../../docs/benchmarks.md)
+
 Use Python 3.11 or later for the matrix runner. Build two release binaries. The timing build uses the ordinary allocator. The allocation build counts requests and live requested bytes. `--target-dir` gives each binary its own path so the matrix runner can launch each scenario in a fresh process.
 
 ```sh
