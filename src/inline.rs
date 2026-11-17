@@ -302,7 +302,7 @@ pub(crate) fn parse_content(
         gfm_autolink,
         preview_end: None,
     };
-    let nodes = if input.end - first <= 128 {
+    let nodes = if input.end - first <= 384 {
         parse_scanned::<Local, false, false>(source, options, refs, unresolved, None, lex)
     } else {
         parse_scanned::<Heap, false, false>(source, options, refs, unresolved, None, lex)
