@@ -12,6 +12,7 @@
     "bench": "node scripts/unpack-reference.mjs && tsx --expose-gc scripts/benchmark.mjs"
   },
   "devDependencies": {
+    "linkify-it": "6.1.0",
     "markdown-it-cjk-friendly": "3.0.0",
     "markdown-it-container": "4.0.0",
     "markdown-it-footnote": "4.0.0",

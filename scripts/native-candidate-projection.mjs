@@ -1,0 +1,1863 @@
+// Converts the native delta view to the legacy ParsedNode test contract.
+// This module never tokenizes Markdown or calls the reference parser.
+import { domainToASCII } from 'node:url'
+import { Buffer } from 'node:buffer'
+import { LinkifyIt } from 'linkify-it'
+
+const VOID = new Set('area base br col embed hr img input link meta param source track wbr'.split(' '))
+const HTML_START = /^<([A-Z][\w:.-]*)(\s(?:[^"'<>]|"[^"]*"|'[^']*')*)?\s*\/?>/i
+const HTML_ATTRIBUTE = /([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g
+const MARKDOWN_FILENAME = /(^|[\s([,"'“‘])([A-Z0-9](?:[A-Z0-9-]*[A-Z0-9])?)\.[mM][dD](?=$|[\s)\],;"'”’]|[.!?:](?:\s|$))/gu
+const PENDING_BADGE_ALT = /^\[!\[([^\[\]\\<>*&`\r\n]*)(?:\])?$/u
+const legacyLinkify = new LinkifyIt({ fuzzyLink: true })
+const draftCodeSource = new WeakMap()
+const mathLabelCodeSource = new WeakMap()
+
+export function projectBlocks(nodes, roots, context) {
+  const blocks = projectChildren(nodes, roots, context)
+  if (context.markstream && !context.final) {
+    const start = context.lineStarts.at(-1)
+    const last = nodes.get(roots.at(-1))
+    const view = blocks.at(-1)
+    const text = view?.children?.length === 1 ? view.children[0] : undefined
+    if (last?.kind === 'paragraph' && last.status === 'open' && text?.type === 'text' && text.raw === view.raw) {
+      const source = view.raw
+      const complete = HTML_START.exec(source)
+      if (complete?.[0] === source && source.endsWith('/>') && !context.customTags.includes(complete[1].toLowerCase()))
+        delete text.center
+      else if (source.includes('\n') && !source.includes('>')) {
+        const opening = /^<([a-z][\w:.-]*)[ \t]+[\w:.-]+[ \t]*=[ \t]*(["'])/iu.exec(source)
+        if (opening && !context.customTags.includes(opening[1].toLowerCase())
+          && !source.slice(opening[0].length).includes(opening[2]))
+          blocks.pop()
+      }
+    }
+    if (start < context.length && last?.kind === 'list' && last.status === 'open' && view?.type === 'list'
+      && !view.ordered && nodes.get(last.children.at(-1))?.span[1] <= start) {
+      const markers = /^([-+*]) {1,4}[-+*][ \t]*$/u.exec(context.read([start, context.length]))
+      if (markers?.[1] === context.read([last.span[0], last.span[0] + 1])) {
+        const map = sourceMap([start, context.length], context)
+        const empty = { type: 'list_item', children: [], raw: '', ...map }
+        const nested = { type: 'list', ordered: false, start: undefined, items: [empty], raw: '', ...map }
+        view.items.push({ type: 'list_item', children: [nested], raw: '', ...map })
+        view.raw += '\n'
+        Object.assign(view, sourceMap([last.span[0], context.length], context))
+      }
+    }
+    if (start < context.length && (!last || (last.status !== 'open' && last.span[1] <= start))) {
+      const marker = /^ {0,3}(#{1,6}|`{1,2}|\||<\/?)[ \t]*$/u.exec(context.read([start, context.length]))?.[1]
+      if (marker) {
+        const map = sourceMap([start, context.length], context)
+        if (marker.startsWith('#'))
+          blocks.push({ type: 'heading', level: marker.length, text: '', raw: '', children: [], ...map })
+        else
+          blocks.push({
+            type: 'paragraph', raw: marker.startsWith('<') ? '' : marker,
+            children: marker === '``' ? [textNode(marker, false)] : [], ...map,
+          })
+      }
+    }
+  }
+  const definitions = new Map()
+  for (const node of blocks) {
+    if (node.type === 'footnote' && !definitions.has(node.id))
+      definitions.set(node.id, node)
+  }
+  if (!definitions.size)
+    return blocks
+
+  const visible = blocks.filter(node => node.type !== 'footnote')
+  const notes = []
+  const seen = new Set()
+  function collectReferences(children) {
+    for (const child of children) {
+      if (child.type === 'footnote_reference' && definitions.has(child.id) && !seen.has(child.id)) {
+        seen.add(child.id)
+        notes.push(definitions.get(child.id))
+      }
+      collectReferences(child.children ?? child.items ?? child.cells ?? [])
+      if (child.type === 'table')
+        collectReferences([child.header, ...child.rows])
+    }
+  }
+  collectReferences(visible)
+  for (const note of notes)
+    collectReferences(note.children)
+  return [...visible, ...notes]
+}
+
+function projectChildren(nodes, ids, context) {
+  const projected = []
+  for (let index = 0; index < ids.length; index++) {
+    const block = nodes.get(ids[index])
+    const view = projectBlock(block, nodes, context)
+    const next = nodes.get(ids[index + 1])
+    const end = block.span[1]
+    if (context.markstream && block.kind === 'custom' && view.type === 'paragraph'
+      && next?.kind === 'paragraph' && next.span[0] >= end
+      && lineAt(context.lineStarts, end - 1) === lineAt(context.lineStarts, next.span[0])) {
+      // A native custom block can split a physical line into two blocks.
+      // The legacy view keeps the typed inline element and its text suffix together.
+      const gap = context.read([end, next.span[0]])
+      if (/^[ \t]*$/.test(gap)) {
+        const tail = projectBlock(next, nodes, context)
+        if (tail.type === 'paragraph') {
+          const first = tail.children[0]
+          if (gap && first?.type === 'text')
+            tail.children[0] = { ...first, content: gap + first.content, raw: gap + first.raw }
+          else if (gap)
+            tail.children.unshift(textNode(gap))
+          view.children.push(...tail.children)
+          view.raw += gap + tail.raw
+          Object.assign(view, sourceMap([block.span[0], next.span[1]], context))
+          index++
+        }
+      }
+    }
+    projected.push(view)
+  }
+  return projected
+}
+
+function lineAt(starts, offset) {
+  let left = 0
+  let right = starts.length
+  while (left + 1 < right) {
+    const mid = (left + right) >>> 1
+    if (starts[mid] <= offset)
+      left = mid
+    else
+      right = mid
+  }
+  return left
+}
+
+function sourceMap(span, { lineStarts, parseOptions }) {
+  if (!parseOptions.includeSourceMap)
+    return {}
+  const [start, end] = span
+  return { sourceMap: {
+    startLine: lineAt(lineStarts, start),
+    endLine: lineAt(lineStarts, Math.max(start, end - 1)) + 1,
+  } }
+}
+
+function normalize(value) {
+  return value.replace(/\r\n?/g, '\n').replaceAll('\0', '\uFFFD')
+}
+
+function textNode(content, center = true) {
+  return { type: 'text', content, raw: content, ...(center && { center: false }) }
+}
+
+function readText(value, context) {
+  return normalize(typeof value === 'string' ? value : context.read(value))
+}
+
+function rawLines(lines, context) {
+  return normalize(lines.map(line => ' '.repeat(line.leading) + context.read(line.span)).join(''))
+}
+
+function inlineRaw(content, range, context, end = Infinity) {
+  if (content.plain)
+    return readText(content.plain, context).trim()
+  if (content.fragments)
+    return normalize(content.fragments.map(span => context.read(span)).join('')).trim()
+  const first = content.parsed.at(0)
+  const last = content.parsed.at(-1)
+  return first && last ? normalize(context.read([first.span[0], Math.min(last.span[1], end)])).trim() : range ?? ''
+}
+
+function htmlHeader(raw) {
+  const header = raw.match(HTML_START)
+  if (!header)
+    return
+  const { 0: markup, 1: tag, 2: fields = '' } = header
+  const attrs = Array.from(fields.matchAll(HTML_ATTRIBUTE), ([, name, quote, single, bare]) => [
+    name, quote ?? single ?? bare ?? '',
+  ])
+  return { tag: tag.toLowerCase(), attrs, closed: markup.endsWith('/>') || VOID.has(tag.toLowerCase()) }
+}
+
+function anchorExtent(raw, preview, appendedWhitespace) {
+  const last = preview ? raw.lastIndexOf('<') : -1
+  const held = last > 0 && /[ \t\n]/u.test(raw[last - 1])
+    && /^<\/?[a-z][\w:.-]*(?=$|[ \t\n/])[^<>]*$/iu.test(raw.slice(last))
+  if (!held && !appendedWhitespace && !/<\/a[ \t\n]*>[ \t\n]*$/iu.test(raw))
+    return
+
+  let depth = 0
+  let offset = 0
+  while ((offset = raw.indexOf('<', offset)) !== -1) {
+    if (held && offset === last)
+      return { raw: raw.slice(0, offset), closed: false }
+    const tail = raw.slice(offset)
+    if (tail.startsWith('<!--')) {
+      const end = raw.indexOf('-->', offset + 4)
+      if (end === -1)
+        return
+      offset = end + 3
+      continue
+    }
+    const closer = /^<\/([a-z][\w:.-]*)[ \t\n]*>/iu.exec(tail)
+    if (closer) {
+      offset += closer[0].length
+      if (closer[1].toLowerCase() === 'a' && --depth === 0)
+        return raw.slice(offset).trim() ? undefined : { raw: raw.slice(0, offset), closed: true }
+      continue
+    }
+    const opener = HTML_START.exec(tail)
+    if (!opener || /^(?:iframe|noembed|noframes|noscript|plaintext|script|style|textarea|title|xmp)$/iu.test(opener[1]))
+      return
+    if (opener[1].toLowerCase() === 'a' && !opener[0].endsWith('/>'))
+      depth++
+    offset += opener[0].length
+  }
+  if (appendedWhitespace)
+    return { raw, closed: false }
+}
+
+function displayText(nodes) {
+  return nodes.map(node => (node.type === 'math_inline' ? node.raw : node.content) ?? node.code ?? node.alt ?? (
+    node.children ? displayText(node.children) : node.raw
+  )).join('')
+}
+
+function mergeText(nodes, node) {
+  if (node.type !== 'text') {
+    nodes.push(node)
+    return
+  }
+  const previous = nodes.at(-1)
+  if (previous?.type !== 'text') {
+    if (node.content)
+      nodes.push(node)
+    return
+  }
+  previous.content += node.content
+  previous.raw = previous.content
+}
+
+function allowsLink(href, context, kind = 'link') {
+  const validation = context.validateLink?.(href)
+  if (validation !== undefined)
+    return validation
+  const url = href.trimStart()
+  if (/^file:/i.test(url))
+    return kind === 'link' && /^file:\/\/\/(?![/\\])/i.test(url)
+  return !/^(?:javascript|vbscript):/i.test(url)
+}
+
+function legacyLinkText(children, useImageAlt = false) {
+  return children.map(child => useImageAlt && child.type === 'image' ? child.alt : child.content ?? child.raw).join('')
+}
+
+function markdownHref(href) {
+  const url = /^((?:https?|ftp):\/\/)([^/?#]*)/iu.exec(href)
+  if (url && /[^\x00-\x7f]/u.test(url[2])) {
+    const [, scheme, authority] = url
+    const hostStart = authority.lastIndexOf('@') + 1
+    const hostAndPort = /^([^:]+)(:\d+)?$/u.exec(authority.slice(hostStart))
+    if (hostAndPort) {
+      const [, hostname, port = ''] = hostAndPort
+      const ascii = domainToASCII(hostname)
+      if (ascii)
+        href = scheme + authority.slice(0, hostStart) + ascii + port + href.slice(url[0].length)
+    }
+  }
+  return href.replace(/%(?![0-9a-fA-F]{2})|[^!-~]|[<>"`{}|\\^]/gu, encodeURIComponent)
+}
+
+function pendingLinkDestination(destination) {
+  if (/^(?:https?|ftp):\/\/(?:\[[0-9a-f:.]+\]|[\p{L}\p{N}])/iu.test(destination)
+    || /^(?:mailto|xmpp):[^@\s]+@[^@\s]/iu.test(destination))
+    return destination
+  if (/^www\.[^./?#\s]+\.[^./?#\s]+/iu.test(destination))
+    return 'http://' + destination
+  return ''
+}
+
+function linkNode(href, title, children, markup, raw, attrs) {
+  const text = legacyLinkText(children)
+  return {
+    type: 'link', href, title, text, children, loading: false,
+    raw: raw ?? `[${text}](${href}${title ? ` "${title}"` : ''})`,
+    attrs: attrs ?? [['href', href], ...(title === null ? [] : [['title', title]])],
+    markup,
+  }
+}
+
+function projectDraftHttpHost(children, source, context) {
+  const tail = children.at(-1)
+  if (!context.markstream || context.final || tail?.type !== 'text'
+    || tail.content !== tail.raw || !source.endsWith(tail.raw))
+    return
+  const host = /(?<![\w@./])https?:\/\/[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/iu.exec(tail.raw)
+  if (!host)
+    return
+  const [match] = legacyLinkify.match(host[0]) ?? []
+  if (match?.index !== 0 || match.lastIndex !== host[0].length || !allowsLink(match.url, context))
+    return
+  if (host.index)
+    tail.raw = tail.content = tail.raw.slice(0, host.index)
+  else
+    children.pop()
+  children.push(linkNode(match.url, null, [textNode(host[0])], 'linkify'))
+}
+
+function projectDraftTextTail(children, source) {
+  const tail = children.at(-1)
+  if (tail?.type !== 'text' || tail.content !== tail.raw)
+    return
+  const escapes = /\\+$/u.exec(source)?.[0].length ?? 0
+  if (escapes % 2 && tail.content.endsWith('\\'.repeat(escapes >> 1))) {
+    if (escapes > 1)
+      tail.content += '\\'
+    tail.raw += '\\'
+    return
+  }
+  const strike = /(?<![\\~])~~([^\s~][^~\r\n]*)$/u.exec(tail.content)
+  if (!strike || !source.endsWith(strike[0]))
+    return
+  children.pop()
+  if (strike.index)
+    children.push(textNode(tail.content.slice(0, strike.index), false))
+  children.push({ type: 'strikethrough', children: [textNode(strike[1])], raw: strike[0] + '~~' })
+}
+
+function pendingBadgeLink(image) {
+  return {
+    type: 'link', href: '', title: null, text: image.alt, children: [image],
+    raw: `[${image.alt}]()`, loading: true, markup: '',
+  }
+}
+
+function projectFormattedDraftBadge(node, nodes, context) {
+  const [image] = node.data.children
+  if (node.data.children.length !== 1 || image.kind !== 'image' || !image.data.loading
+    || image.span[0] !== node.span[0] + 1 || image.span[1] !== node.span[1]
+    || context.read([node.span[0], image.span[0]]) !== '[')
+    return false
+  const [label, formatted] = image.data.children
+  const destination = image.data.destination
+  if (image.data.children.length !== 2 || label.kind !== 'text' || formatted.kind !== 'emphasis'
+    || !Array.isArray(destination) || context.read([formatted.span[1], destination[0]]) !== ']('
+    || destination[1] !== image.span[1])
+    return false
+  const alt = readText(label.data, context)
+  if (!/[\p{L}\p{N}]/u.test(alt))
+    return false
+  const url = readText(destination, context)
+  const [match] = url ? legacyLinkify.match(url) ?? [] : []
+  if (url && (match?.index !== 0 || match.lastIndex !== url.length || !allowsLink(match.url, context)))
+    return false
+
+  nodes.push(pendingBadgeLink({
+    type: 'image', src: '', alt, title: null,
+    raw: readText([image.span[0], formatted.span[0]], context), loading: true,
+  }))
+  nodes.push(...projectInlineNodes([formatted], context))
+  nodes.push({ ...textNode(url ? '](' : ']'), raw: '](' })
+  if (match) {
+    const link = linkNode(match.url, null, [textNode(url)], 'linkify')
+    link.loading = true
+    nodes.push(link)
+  }
+  return true
+}
+
+function projectDraftBadge(children, source, context, withheldHtml, standalone) {
+  const tail = children.at(-1)
+  if (withheldHtml && tail?.type === 'link' && tail.markup === 'html' && !tail.loading
+    && tail.children.some(child => child.type === 'html_inline' && child.tag === 'img')) {
+    const pending = normalize(withheldHtml)
+    const lead = /^\n {0,3}/u.exec(pending)?.[0]
+    const markup = lead && HTML_START.exec(pending.slice(lead.length))?.[0]
+    const header = markup && htmlHeader(markup)
+    const href = header?.tag === 'a' && !header.closed && attrValue(header.attrs, 'href')
+    if (href && /^<img(?:[ \t]|$)[^<>\r\n]*$/iu.test(pending.slice(lead.length + markup.length))
+      && allowsLink(href, context)) {
+      const title = attrValue(header.attrs, 'title')
+      const attrs = title === '' ? [...header.attrs, ['title', title]] : header.attrs
+      const link = linkNode(href, title, [textNode(href, false)], 'html', markup, attrs)
+      link.loading = true
+      children.push(textNode('\n', false), link)
+      return lead + markup
+    }
+  }
+  const lineStart = source.lastIndexOf('\n')
+  if (lineStart < 0) {
+    if (standalone && children.length === 1 && tail?.type === 'text'
+      && tail.content === source && tail.raw === source) {
+      const alt = PENDING_BADGE_ALT.exec(source)?.[1]
+      // The legacy view reserves an empty badge slot while the native node is still text.
+      if (source === '[![' || (alt && /[\p{L}\p{N}]/u.test(alt)))
+        children[0] = pendingBadgeLink({ type: 'image', src: '', alt, title: null, raw: source.slice(1), loading: true })
+    }
+    return
+  }
+  const line = source.slice(lineStart + 1).replace(/^ {0,3}/u, '')
+  const previous = children.at(-2)
+  const hasBadge = node => node?.type === 'link' && !node.loading && node.children.some(child => child.type === 'image')
+  if (tail?.type !== 'text' || tail.raw !== tail.content)
+    return
+  if (hasBadge(previous) && tail.raw === `\n${line}`) {
+    const alt = PENDING_BADGE_ALT.exec(line)
+    if (alt) {
+      tail.content = tail.raw = '\n'
+      children.push(pendingBadgeLink({ type: 'image', src: '', alt: alt[1], title: null, raw: line.slice(1), loading: true }))
+    }
+  }
+  else if (tail.raw === ']' && previous?.type === 'image' && !previous.loading && line.startsWith('[![') && line.endsWith(')]')
+    && children.at(-3)?.type === 'text' && children.at(-3).raw === '\n[' && hasBadge(children.at(-4))) {
+    children.splice(-3, 2, textNode('\n', false), pendingBadgeLink(previous))
+  }
+}
+
+function attrValue(attrs, name) {
+  for (let i = attrs.length - 1; i >= 0; i--) {
+    if (attrs[i][0].toLowerCase() === name)
+      return attrs[i][1]
+  }
+  return null
+}
+
+function mathNode(type, body, raw, loading, context) {
+  const delimiters = [
+    ['\\[', '\\]'], ['\\(', '\\)'], ['$$', '$$'], ['[', ']'], ['(', ')'], ['$', '$'],
+  ]
+  const [open, close] = delimiters.find(([left]) => raw.startsWith(left)) ?? delimiters.at(-1)
+  const markup = open === close ? open : open + close
+  const text = readText(body, context)
+  const draft = type === 'math_inline' && loading && context.markstream && !context.final
+  const content = draft ? text.trimEnd() : text.trim()
+  const rendered = draft && !raw.includes('\n') ? raw.trimEnd() + close : open + content + close
+  return { type, content, raw: rendered, loading, markup }
+}
+
+function needsLegacyCenter(text, context) {
+  // The strict legacy strong fallback omits center on text already left literal by the parser.
+  return !(context.markstream && !context.final
+    && context.parseOptions.requireClosingStrong && text.includes('**'))
+}
+
+function appendMarkdownFilenameText(nodes, text, center, final) {
+  let previous
+  for (const match of text.matchAll(MARKDOWN_FILENAME)) {
+    if (!/[A-Z].*[A-Z]/u.test(match[2]))
+      continue
+    if (!final && !/[\p{L}\p{N}]/u.test(text.slice(match.index + match[0].length)))
+      continue
+    const start = match.index + match[1].length
+    if (previous !== undefined)
+      nodes.push(textNode(text.slice(previous, start), false))
+    else if (start)
+      mergeText(nodes, textNode(text.slice(0, start), center))
+    previous = start
+  }
+  if (previous === undefined)
+    return false
+  nodes.push(textNode(text.slice(previous), false))
+  return true
+}
+
+function endsInSingleBacktick(text) {
+  return text.length > 1 && text.indexOf('`') === text.length - 1 && !text.endsWith('\\`')
+}
+
+function projectInlines(content, context) {
+  if (content.plain || content.fragments) {
+    const text = inlineRaw(content, '', context)
+    if (context.markstream && !context.final && content.plain) {
+      if (text === '`')
+        return []
+      if (text === '``')
+        return [textNode(text, false)]
+      if (endsInSingleBacktick(text))
+        return [textNode(text.slice(0, -1), false), { type: 'inline_code', code: '', raw: '' }]
+    }
+    const nodes = []
+    const center = needsLegacyCenter(text, context)
+    if (text && !(context.markstream && content.plain
+      && appendMarkdownFilenameText(nodes, text, center, context.final)))
+      nodes.push(textNode(text, center))
+    return nodes
+  }
+  return projectInlineNodes(content.parsed, context)
+}
+
+function projectUnclosedImageLink(inlines, nodes, context) {
+  if (inlines.length !== 4 || nodes.length !== 4)
+    return
+  const [open, image, suffix, destination] = inlines
+  const child = nodes[1]
+  const link = nodes[3]
+  if (open.kind !== 'text' || image.kind !== 'image' || image.data.loading || child.type !== 'image'
+    || suffix.kind !== 'text' || destination.kind !== 'link' || link.type !== 'link' || link.markup !== 'linkify'
+    || open.span[1] !== image.span[0] || image.span[1] !== suffix.span[0]
+    || suffix.span[1] !== destination.span[0]
+    || context.read(open.span) !== '[' || context.read(suffix.span) !== ']('
+    || !/^https?:\/\//i.test(context.read(destination.span)))
+    return
+  return {
+    type: 'link', href: link.href, title: null, text: child.alt, children: [child],
+    raw: `[${child.alt}](${link.href})`, loading: true, markup: '',
+  }
+}
+
+function projectUnclosedDestination(inlines, index, nodes, context) {
+  const link = inlines[index]
+  const previous = inlines[index - 1]
+  const text = nodes.at(-1)
+  if (previous?.kind !== 'text' || previous.span[1] !== link.span[0] || text?.type !== 'text'
+    || link.data.loading || !/^https?:\/\//iu.test(context.read(link.span)))
+    return false
+  const label = /(?<!\\)\[([^\[\]\\*&`\r\n]+)\]\($/u.exec(context.read(previous.span))
+  const tail = context.read([link.span[1], inlines.at(-1).span[1]])
+  if (!label || !text.content.endsWith(label[0]) || !/^[ \t]+\S/u.test(tail) || /[\r\n)]/u.test(tail))
+    return false
+  const href = (context.read(link.span) + tail).trimEnd()
+  if (!allowsLink(href, context))
+    return false
+  text.content = text.content.slice(0, -label[0].length)
+  text.raw = text.raw.slice(0, -label[0].length)
+  if (!text.content)
+    nodes.pop()
+  const node = linkNode(href, '', [textNode(label[1], false)], '')
+  delete node.attrs
+  node.loading = true
+  nodes.push(node)
+  return true
+}
+
+function projectStrongBeforeMath(inlines, index, nodes, context) {
+  const strong = inlines[index]
+  const [link] = strong.data
+  const after = inlines[index + 1]
+  const math = after?.kind === 'text' ? inlines[index + 2] : after
+  if (strong.data.length !== 1 || link.kind !== 'link' || math?.kind !== 'math_inline'
+    || math.data.loading || lineAt(context.lineStarts, strong.span[0]) !== lineAt(context.lineStarts, math.span[0]))
+    return false
+  const code = link.data.children.at(-1)
+  const destination = link.data.destination
+  if (code?.kind !== 'code' || link.data.loading || link.data.title !== null || !Array.isArray(destination)
+    || context.read([code.span[1], destination[0]]) !== ']('
+    || !/^\)\*\*$/u.test(context.read([destination[1], strong.span[1]])))
+    return false
+  const url = readText(destination, context)
+  const href = markdownHref(url)
+  if (!/^https?:\/\//iu.test(url) || !allowsLink(href, context))
+    return false
+  // A completed formula makes the legacy math rule capture the preceding source.
+  mergeText(nodes, textNode(readText([strong.span[0], code.span[0]], context), false))
+  delete nodes.at(-1).center
+  const value = readText(code.data, context)
+  nodes.push(
+    { type: 'inline_code', code: value, raw: value },
+    textNode(']('),
+    linkNode(href, null, [textNode(url)], 'linkify'),
+    textNode(')**', false),
+  )
+  return true
+}
+
+function projectStrongCodeLabel(inlines, children, context) {
+  const [link] = inlines
+  const [view] = children
+  if (inlines.length !== 1 || link.kind !== 'link' || link.data.loading
+    || children.length !== 1 || view.type !== 'link' || view.markup !== '')
+    return
+  const code = link.data.children.at(-1)
+  const [label, renderedCode] = view.children
+  if (code?.kind !== 'code' || view.children.length !== 2
+    || label.type !== 'text' || renderedCode.type !== 'inline_code')
+    return
+  const source = readText([link.data.children[0].span[0], code.span[0]], context)
+  const emphasis = /^([^\\*\r\n]*)\\\*([^\\*\r\n]+)\\\*([^\\*\r\n]*)$/u.exec(source)
+  if (!emphasis)
+    return
+  const [, left, body, right] = emphasis
+  const raw = `*${body}*`
+  if (left + raw + right !== label.content)
+    return
+  view.children = [
+    ...(left ? [textNode(left, false)] : []),
+    { type: 'emphasis', children: [textNode(body)], raw },
+    ...(right ? [textNode(right)] : []),
+    renderedCode,
+  ]
+  return view.text
+}
+
+function projectOpenStrongMathLabel(inlines, index, nodes, children, context) {
+  const link = inlines[index]
+  const previous = inlines[index - 1]
+  const text = nodes.at(-1)
+  if (context.final || !context.parseOptions.requireClosingStrong || previous?.kind !== 'text'
+    || text?.type !== 'text' || previous.span[1] !== link.span[0])
+    return false
+  const strong = /(?<![\\*])\*\*(?![\s*])([^*\r\n]*)$/u.exec(text.content)
+  const label = link.data.children
+  if (!strong || !context.read(previous.span).endsWith(strong[0])
+    || context.read([link.span[0], label[0].span[0]]) !== '[')
+    return false
+  const afterMath = readText([label.at(-1).span[1], link.span[1]], context)
+  if (!afterMath.startsWith('](') || /[\r\n]/u.test(afterMath))
+    return false
+  text.content = text.raw = text.content.slice(0, strong.index)
+  if (text.content)
+    text.center = false
+  else
+    nodes.pop()
+  const body = [textNode(strong[1] + '[', false)]
+  for (const child of children.slice(0, -1))
+    mergeText(body, child)
+  const first = label.at(-1).span[0]
+  const math = children.at(-1)
+  nodes.push(
+    { type: 'strong', children: body, raw: '**' + strong[1] + readText([link.span[0], first], context) + '**' },
+    { type: 'strong', children: [math], raw: '**' + math.content + '**' },
+  )
+  const url = /(?:https?|ftp):\/\//iu.test(afterMath) ? legacyLinkify.match(afterMath)?.[0] : undefined
+  if (!url || !allowsLink(url.url, context)) {
+    nodes.push(textNode(afterMath))
+    return true
+  }
+  nodes.push(textNode(afterMath.slice(0, url.index)))
+  const bare = linkNode(url.url, '', [textNode(url.raw, false)], 'linkify')
+  delete bare.attrs
+  nodes.push(bare)
+  if (url.lastIndex < afterMath.length)
+    nodes.push(textNode(afterMath.slice(url.lastIndex)))
+  return true
+}
+
+function legacyDelimitedText(children) {
+  return children.map((child) => {
+    if (child.type === 'link')
+      return ''
+    if (child.type === 'image')
+      return child.raw
+    if (child.type === 'inline_code')
+      return mathLabelCodeSource.get(child) ?? child.code
+    return child.content ?? child.code ?? (
+      child.children ? legacyDelimitedText(child.children) : child.raw
+    )
+  }).join('')
+}
+
+function customInlineNode(data, status, raw, context, insideLinkLabel = false) {
+  const open = status === 'open'
+  return {
+    type: data.name, tag: data.name, attrs: data.attrs,
+    content: readText(data.body, context),
+    children: projectInlineNodes(data.children, context, false, insideLinkLabel),
+    raw, loading: open && !context.final, autoClosed: open,
+  }
+}
+
+function sameLineInlineSuffix(inlines, index, context) {
+  const line = lineAt(context.lineStarts, inlines[index].span[1])
+  if (inlines.some(node => (node.kind === 'code' || node.kind === 'code_preview')
+    && lineAt(context.lineStarts, node.span[0]) === line))
+    return false
+  for (let i = index + 1; i < inlines.length; i++) {
+    const node = inlines[i]
+    if (node.kind === 'softbreak' || node.kind === 'hardbreak'
+      || lineAt(context.lineStarts, node.span[0]) !== line)
+      return false
+    if (node.kind !== 'text' || readText(node.data, context).trim())
+      return true
+  }
+  return false
+}
+
+function recoverAdjacentBracketLabel(inlines, index, nodes, label, context) {
+  const before = inlines[index - 1]
+  const previous = nodes.at(-1)
+  const current = inlines[index]
+  if (context.final || before?.kind !== 'text' || previous?.type !== 'text'
+    || before.span[1] !== current.span[0] || !context.read(current.span).startsWith('[' + label + ']('))
+    return label
+  const source = context.read(before.span)
+  if (source !== previous.content || /[\\\r\n]/u.test(source))
+    return label
+  const adjacent = /^(\[[^[\]]+\])\[([^[\]]+\][^[\]]*)$/u.exec(source)
+  if (!adjacent)
+    return label
+  // This legacy recovery starts after the second opening bracket in the plain-text run.
+  nodes[nodes.length - 1] = textNode(adjacent[1], false)
+  return adjacent[2] + '[' + label
+}
+
+function projectParenthesisBeforeLink(inlines, index, nodes, waitingForHref, context, filenameSplit = false) {
+  const before = inlines[index - 1]
+  const current = inlines[index]
+  const previous = nodes.at(-1)
+  if (context.final || before?.kind !== 'text' || previous?.type !== 'text'
+    || before.span[1] !== current.span[0] || previous.content.length === 1 || !previous.content.endsWith('(')
+    || previous.raw !== previous.content)
+    return
+  const text = readText(before.data, context)
+  if (filenameSplit ? !text.endsWith(previous.content) : previous.content !== text)
+    return
+  const labelEnd = current.data.children.at(-1).span[1]
+  if (context.read([labelEnd, labelEnd + 2]) !== '](')
+    return
+  const raw = context.read(before.span)
+  if (!raw.endsWith('(') || raw.endsWith('\\(') || /[\r\n]/u.test(raw))
+    return
+  if (!waitingForHref && !filenameSplit && !/(?<!\\)(?:\\\\)*\*/u.test(raw))
+    return
+  previous.content = previous.content.slice(0, -1)
+  if (waitingForHref)
+    previous.raw = previous.content
+  delete previous.center
+}
+
+function explicitDraftLabel({ span, data }, context) {
+  if (data.children.length !== 1 || data.title !== null
+    || !Array.isArray(data.destination) || data.destination[1] !== span[1])
+    return
+  const label = data.children[0]
+  if (label.span[0] === span[0] + 1 && context.read([span[0], label.span[0]]) === '['
+    && context.read([label.span[1], data.destination[0]]) === '](')
+    return label
+}
+
+function projectRelativeDraftLink(inlines, index, nodes, children, destination, context) {
+  if (children.length !== 1 || !/^(?:\.{1,2}\/|\/(?!\/)|#)[^\s()<>\[\]\\]+$/u.test(destination))
+    return false
+  const inline = inlines[index]
+  const label = explicitDraftLabel(inline, context)
+  const before = inlines[index - 1]
+  const preceding = nodes.at(-1)
+  if (!label || context.read(inline.data.destination) !== destination
+    || before?.kind !== 'text' || before.span[1] !== inline.span[0]
+    || preceding?.type !== 'text' || preceding.raw !== preceding.content
+    || context.read(before.span) !== preceding.content)
+    return false
+  const child = children[0]
+  const code = label.kind === 'code' && child.type === 'inline_code'
+    && context.read([label.span[0], label.span[0] + 1]) === '`'
+  if (!code) {
+    if (label.kind !== 'text' || child.type !== 'text' || context.read(label.span) !== child.content)
+      return false
+    const match = child.content.matchAll(MARKDOWN_FILENAME).next().value
+    if (!match || match[0] !== child.content || !/[A-Z].*[A-Z]/u.test(match[2]))
+      return false
+  }
+  mergeText(nodes, textNode('['))
+  if (code)
+    nodes.push(child)
+  nodes.push(textNode((code ? '' : child.content) + '](' + destination, code))
+  return true
+}
+
+function projectCodeAdjacentDraftLink(inlines, index, nodes, children, href, context) {
+  if (!/^https?:\/\//iu.test(href))
+    return false
+  const { span, data } = inlines[index]
+  const previous = inlines[index - 1]
+  const precedingText = nodes.at(-1)
+  const labelCode = data.children.at(-1)
+  const escapedLabel = children.length === 2 && children[0].type === 'text'
+    && children[1].type === 'inline_code' && labelCode?.kind === 'code'
+    && previous?.kind === 'text' && previous.span[1] === span[0]
+    && precedingText?.type === 'text' && precedingText.content.endsWith('**')
+    && context.read([span[0], labelCode.span[0]]).includes('\\*')
+    && Array.isArray(data.destination)
+    && context.read([labelCode.span[1], data.destination[0]]) === ']('
+  const label = children.length === 1 ? explicitDraftLabel(inlines[index], context) : undefined
+  const codeLabel = label?.kind === 'code' && context.read([label.span[0], label.span[0] + 1]) === '`'
+    && previous?.kind === 'text' && previous.span[1] === span[0]
+    && precedingText?.type === 'text' && precedingText.raw === precedingText.content
+  const line = lineAt(context.lineStarts, span[0])
+  const afterCode = label?.kind === 'text' && context.read(label.span) === children[0].content
+    && inlines.some((node, at) => at < index && node.kind === 'code'
+      && context.read([node.span[0], node.span[0] + 1]) === '`'
+      && lineAt(context.lineStarts, node.span[0]) === line)
+  if (!escapedLabel && !codeLabel && !afterCode)
+    return false
+  const [match] = legacyLinkify.match(href) ?? []
+  if (match?.index !== 0 || match.lastIndex !== href.length)
+    return false
+  if (escapedLabel) {
+    mergeText(nodes, textNode('[' + children[0].content, false))
+    nodes.push(children[1], textNode(']('))
+  }
+  else if (codeLabel) {
+    mergeText(nodes, textNode('['))
+    nodes.push(children[0], textNode(']('))
+  }
+  const urlAsLabel = escapedLabel || codeLabel
+  const link = linkNode(href, null, [textNode(urlAsLabel ? href : children[0].content, urlAsLabel)], 'linkify')
+  link.loading = true
+  nodes.push(link)
+  return true
+}
+
+function isEscapedBacktick(node, context) {
+  return node?.kind === 'text' && Array.isArray(node.data)
+    && node.data[0] === node.span[0] + 1 && node.data[1] === node.span[1]
+    && context.read([node.span[0], node.span[0] + 2]) === '\\`'
+}
+
+function escapedBacktickPair(inlines, index, context) {
+  const opening = inlines[index]
+  if (!isEscapedBacktick(opening, context))
+    return
+  const previous = inlines[index - 1]
+  if (previous?.span[1] === opening.span[0] && previous.span[1] - previous.span[0] === 2
+    && isEscapedBacktick(previous, context))
+    return
+  let code = readText(opening.data, context).slice(1)
+  if (code.includes('`'))
+    return
+  const line = lineAt(context.lineStarts, opening.span[0])
+  for (let at = index + 1; at < inlines.length; at++) {
+    const node = inlines[at]
+    if (node.kind !== 'text' || node.span[0] !== inlines[at - 1].span[1]
+      || lineAt(context.lineStarts, node.span[1] - 1) !== line)
+      return
+    const text = readText(node.data, context)
+    if (isEscapedBacktick(node, context)) {
+      const next = inlines[at + 1]
+      const tail = text.slice(1)
+      if (!code || tail.startsWith('`') || (!tail && next?.span[0] === node.span[1] && isEscapedBacktick(next, context)))
+        return
+      return { code, tail, end: at }
+    }
+    if (text.includes('`'))
+      return
+    code += text
+  }
+}
+
+function draftPreCode(inlines, index, context) {
+  const start = inlines[index]
+  const code = inlines[index + 1]
+  if (code?.kind !== 'html' || code.span[0] !== start.span[1]
+    || context.read(start.span).toLowerCase() !== '<pre>' || context.read(code.span).toLowerCase() !== '<code>'
+    || !inlines[index + 2])
+    return
+  let end = code.span[1]
+  for (const node of inlines.slice(index + 2)) {
+    if (node.span[0] !== end || /[\r\n]/u.test(context.read(node.span)))
+      return
+    if (node.kind === 'text') {
+      if (readText(node.data, context) !== context.read(node.span))
+        return
+    }
+    else if (node.kind !== 'link' || node.data.loading
+      || context.read([node.span[0] - 1, node.span[0]]) !== '('
+      || context.read([node.span[1], node.span[1] + 1]) !== ')') {
+      return
+    }
+    end = node.span[1]
+  }
+  return code.span[0]
+}
+
+function projectInlineNodes(inlines, context, insideLoadingLink = false, insideLinkLabel = false) {
+  const nodes = []
+  let filenameIndex = -1
+  for (let index = 0; index < inlines.length; index++) {
+    const { kind, span, data } = inlines[index]
+    const raw = normalize(context.read(span))
+    if (kind === 'text' || kind === 'softbreak') {
+      if (kind === 'text' && context.markstream && (context.final || context.settledInline)
+        && !insideLinkLabel && raw.startsWith('\\`')) {
+        const pair = escapedBacktickPair(inlines, index, context)
+        if (pair) {
+          const previous = nodes.at(-1)
+          if (previous?.type === 'text' && !previous.content.includes('\n'))
+            delete previous.center
+          nodes.push({ type: 'inline_code', code: pair.code, raw: pair.code })
+          if (pair.tail)
+            nodes.push(textNode(pair.tail))
+          index = pair.end
+          continue
+        }
+      }
+      if (kind === 'text' && context.markstream && Array.isArray(data)
+        && data[0] === span[0] && data[1] === span[1]
+        && raw.startsWith('<') && raw.endsWith('/>') && HTML_START.exec(raw)?.[0] === raw) {
+        // The complete demoted tag starts its own legacy text node.
+        nodes.push(textNode(raw, false))
+        continue
+      }
+      const literalCodeMarker = kind === 'text' && context.markstream && raw.includes('``')
+        && (/(?<!\\)(?:\\\\)*(`+)/u.exec(raw)?.[1].length ?? 0) > 1
+      if (literalCodeMarker && index + 1 < inlines.length) {
+        let content = readText(data, context)
+        let hasCode = false
+        let next = index + 1
+        for (; next < inlines.length; next++) {
+          const tail = inlines[next]
+          if (tail.kind === 'softbreak')
+            continue
+          if (tail.kind === 'text') {
+            content += readText(tail.data, context)
+          }
+          else if (tail.kind === 'code') {
+            const delimiter = /^`+/u.exec(context.read(tail.span))?.[0]
+            if (!delimiter)
+              break
+            // The legacy fallback keeps the code text and one copy of its delimiter.
+            hasCode = true
+            content += readText(tail.data, context) + delimiter
+          }
+          else {
+            break
+          }
+        }
+        if (hasCode && next === inlines.length) {
+          mergeText(nodes, textNode(content, false))
+          delete nodes.at(-1).center
+          break
+        }
+      }
+      const literalAsterisk = kind === 'text' && context.markstream && context.final
+        && raw.includes('*') && /[^*]/u.test(raw) && /(?<!\\)(?:\\\\)*\*/u.test(raw)
+      const center = kind !== 'softbreak' && !literalCodeMarker && !literalAsterisk
+      const text = kind === 'softbreak' ? '\n' : readText(data, context)
+      const sourceText = kind === 'text' && Array.isArray(data) && data[0] === span[0] && data[1] === span[1]
+      if (kind === 'text' && context.markstream && !context.final && index + 1 === inlines.length
+        && endsInSingleBacktick(raw) && endsInSingleBacktick(text)) {
+        mergeText(nodes, textNode(text.slice(0, -1), false))
+        nodes.push({ type: 'inline_code', code: '', raw: '' })
+        continue
+      }
+      if (kind === 'text' && context.markstream && !context.final && text.endsWith('(')
+        && !raw.endsWith('\\(') && inlines[index - 1]?.kind === 'softbreak'
+        && ['code', 'emphasis', 'strong', 'strikethrough'].includes(inlines[index + 1]?.kind)) {
+        // In the legacy preview this text merges across a soft break, holding
+        // the last parenthesis in the raw value until the document finishes.
+        const previous = nodes.at(-1)
+        previous.content += text.slice(0, -1)
+        previous.raw += text
+        continue
+      }
+      if (sourceText && context.markstream && !literalCodeMarker && !insideLinkLabel
+        && appendMarkdownFilenameText(nodes, text, center, context.final))
+        filenameIndex = index
+      else
+        mergeText(nodes, textNode(text, center))
+      if (literalCodeMarker && nodes.at(-1)?.type === 'text')
+        delete nodes.at(-1).center
+    }
+    else if (kind === 'hardbreak') {
+      nodes.push({ type: 'hardbreak', raw: '\\\n' })
+    }
+    else if (kind === 'code' || kind === 'code_preview') {
+      const previous = nodes.at(-1)
+      const escapedDraft = context.markstream && !context.final
+        && raw.startsWith('\\`') && !raw.endsWith('\\`')
+      if ((kind === 'code_preview' || escapedDraft) && previous?.type === 'text')
+        delete previous.center
+      let code = readText(data, context)
+      const draft = kind === 'code_preview' && context.markstream && !context.final
+      if (draft && /^[a-z0-9.-]+$/u.test(code)) {
+        const [match] = legacyLinkify.match(code) ?? []
+        if (match?.schema === '' && match.index === 0 && match.lastIndex === code.length) {
+          nodes.push({ type: 'inline_code', code: '', raw: '' })
+          nodes.push(allowsLink(match.url, context)
+            ? linkNode(match.url, null, [textNode(code)], 'linkify')
+            : textNode(code, false))
+          continue
+        }
+      }
+      if (draft) {
+        // In the legacy parser the unclosed span is still text when typography runs.
+        if (code.includes('..') && !code.includes('\\') && !code.includes('://'))
+          code = code.replace(/\.{2,}/gu, '…').replace(/([?!])…/gu, '$1..')
+        code = code.replace(/(?<![\w\\])'([\w-]+)'(?!\w)/gu, '‘$1’')
+      }
+      const node = { type: 'inline_code', code, raw: code }
+      if (draft)
+        draftCodeSource.set(node, raw)
+      nodes.push(node)
+    }
+    else if (kind === 'emphasis' || kind === 'strong' || kind === 'strikethrough') {
+      if (kind === 'strong' && context.markstream && !insideLinkLabel
+        && projectStrongBeforeMath(inlines, index, nodes, context))
+        continue
+      const children = projectInlineNodes(data, context, false, insideLinkLabel)
+      const marker = kind === 'emphasis' ? '*' : kind === 'strong' ? '**' : '~~'
+      const label = kind === 'strong' && context.markstream
+        ? projectStrongCodeLabel(data, children, context)
+        : undefined
+      if (kind === 'strong' && context.markstream && !context.final && !insideLinkLabel && raw.startsWith('**')
+        && data.length === 1 && data[0].kind === 'text'
+        && data[0].span[0] === span[0] + 2 && data[0].span[1] === span[1]) {
+        const before = inlines[index - 1]
+        const previous = nodes.at(-1)
+        if (before?.kind === 'text' && before.span[1] === span[0] && previous?.type === 'text'
+          && previous.raw === previous.content && previous.content === readText(before.data, context))
+          delete previous.center
+      }
+      nodes.push({ type: kind, children, raw: context.markstream ? marker + (label ?? legacyDelimitedText(children)) + marker : raw })
+    }
+    else if (kind === 'subscript' || kind === 'superscript') {
+      const marker = kind === 'subscript' ? '~' : '^'
+      const body = readText(data, context)
+      nodes.push({ type: kind, children: [textNode(body)], raw: marker + body + marker })
+    }
+    else if (kind === 'highlight' || kind === 'insert') {
+      const marker = kind === 'highlight' ? '==' : '++'
+      const children = projectInlineNodes(data, context, false, insideLinkLabel)
+      nodes.push({ type: kind, children, raw: marker + displayText(children) + marker })
+    }
+    else if (kind === 'math_inline') {
+      nodes.push(mathNode(kind, data.body, raw, data.loading, context))
+    }
+    else if (kind === 'footnote_reference') {
+      const id = context.read(data.label)
+      nodes.push({ type: kind, id, raw: `[^${id}]` })
+    }
+    else if (kind === 'reference') {
+      nodes.push({ type: kind, id: context.read(data.label), raw })
+    }
+    else if (kind === 'link' || kind === 'image') {
+      if (context.markstream && !context.final && kind === 'link' && data.loading
+        && projectFormattedDraftBadge(inlines[index], nodes, context))
+        continue
+      const destination = readText(data.destination, context)
+      const href = markdownHref(destination)
+      const title = data.title === null ? null : readText(data.title, context) || null
+      const children = projectInlineNodes(data.children, context, kind === 'link' && data.loading, true)
+      const allowed = allowsLink(href, context, kind)
+      if (context.markstream && kind === 'link' && allowed && title === null
+        && children.at(-1)?.type === 'math_inline' && !children.at(-1).loading
+        && projectOpenStrongMathLabel(inlines, index, nodes, children, context))
+        continue
+      if (context.markstream && kind === 'link' && allowed && projectUnclosedDestination(inlines, index, nodes, context))
+        break
+      if (context.markstream && kind === 'link' && allowed && !data.loading && title === null
+        && children.at(-1)?.type === 'math_inline' && !children.at(-1).loading
+        && Array.isArray(data.destination) && /^(?:https?|ftp):\/\//iu.test(destination)
+        && context.read([span[0], data.children[0].span[0]]) === '['
+        && context.read([data.children.at(-1).span[1], data.destination[0]]) === ']('
+        && context.read([data.destination[1], span[1]]) === ')') {
+        // The legacy math rule splits the Markdown label at the confirmed formula.
+        const codeSources = data.children.filter(child => child.kind === 'code')
+        let codeIndex = 0
+        mergeText(nodes, textNode('['))
+        for (const child of children) {
+          if (child.type === 'inline_code') {
+            const source = codeSources[codeIndex++]
+            if (source && readText(source.data, context) === child.code)
+              mathLabelCodeSource.set(child, normalize(context.read(source.span)))
+            if (nodes.at(-1)?.type === 'text')
+              delete nodes.at(-1).center
+          }
+          mergeText(nodes, child)
+        }
+        nodes.push(textNode(']('))
+        const link = linkNode(href, '', [textNode(destination, false)], 'linkify')
+        delete link.attrs
+        nodes.push(link, textNode(')'))
+        continue
+      }
+      const simpleMarkdownLink = context.markstream && kind === 'link' && raw.startsWith('[')
+        && children.length === 1 && children[0].type === 'text'
+      if (kind === 'link' && data.loading) {
+        let text = legacyLinkText(children, context.markstream)
+        const hasImage = children.some(child => child.type === 'image')
+        const ready = context.markstream && !hasImage ? pendingLinkDestination(destination) : destination
+        const waitingForHref = context.markstream && !hasImage && !ready
+        if (!context.final && waitingForHref && allowed
+          && projectRelativeDraftLink(inlines, index, nodes, children, destination, context))
+          continue
+        const preparedHref = ready === destination ? href : markdownHref(ready)
+        const visibleHref = allowed && (preparedHref === href || !preparedHref || allowsLink(preparedHref, context, kind))
+          ? preparedHref
+          : ''
+        if (context.markstream && !context.final && visibleHref && visibleHref === destination
+          && projectCodeAdjacentDraftLink(inlines, index, nodes, children, visibleHref, context))
+          continue
+        const linkified = Boolean(visibleHref && context.markstream && ready !== destination)
+        let visibleChildren = children.map(child => child.type === 'text' ? textNode(child.content, false) : child)
+        if (waitingForHref && allowed && simpleMarkdownLink && title === null) {
+          const recovered = recoverAdjacentBracketLabel(inlines, index, nodes, text, context)
+          if (recovered !== text) {
+            text = recovered
+            visibleChildren = [textNode(text, false)]
+          }
+        }
+        if (allowed && simpleMarkdownLink && (waitingForHref || visibleHref))
+          projectParenthesisBeforeLink(
+            inlines, index, nodes, waitingForHref, context, !waitingForHref && filenameIndex === index - 1,
+          )
+        const previous = nodes.at(-1)
+        if (waitingForHref && previous?.type === 'text' && !previous.content.includes('\n'))
+          delete previous.center
+        nodes.push({
+          type: kind,
+          href: visibleHref,
+          title: title ?? (waitingForHref || linkified || hasImage ? null : ''),
+          text,
+          children: visibleChildren,
+          ...(linkified ? { attrs: [['href', visibleHref]] } : {}),
+          ...(waitingForHref ? {} : { raw: `[${text}](${visibleHref})` }),
+          loading: true,
+          markup: linkified ? 'linkify' : '',
+        })
+      }
+      else if (!allowed) {
+        const text = displayText(children)
+        if (simpleMarkdownLink && !context.factoryValidateLink && /^(?:javascript|vbscript):/i.test(href.trimStart())) {
+          const afterLabel = normalize(context.read([data.children.at(-1).span[1], span[1]]))
+          const closing = afterLabel.indexOf(')', 2)
+          if (afterLabel.startsWith('](') && closing !== -1) {
+            // Legacy plain-text recovery starts after the first literal close
+            // when the Markdown URL is denied before it becomes a link.
+            const label = recoverAdjacentBracketLabel(inlines, index, nodes, text, context)
+            mergeText(nodes, textNode(label + afterLabel.slice(closing + 1), false))
+            if (nodes.at(-1)?.type === 'text')
+              delete nodes.at(-1).center
+            continue
+          }
+        }
+        mergeText(nodes, textNode(text, false))
+      }
+      else if (kind === 'image') {
+        const first = data.children.at(0)
+        const last = data.children.at(-1)
+        const labelRaw = first && last ? normalize(context.read([first.span[0], last.span[1]])) : ''
+        const nestedPreview = context.markstream && insideLoadingLink && data.loading
+        const ready = nestedPreview ? pendingLinkDestination(destination) : destination
+        const preparedSrc = ready === destination ? href : markdownHref(ready)
+        const src = preparedSrc === href || !preparedSrc || allowsLink(preparedSrc, context, kind)
+          ? preparedSrc
+          : ''
+        const imageRaw = nestedPreview ? raw + (src ? ')' : '') : labelRaw
+        nodes.push({ type: 'image', src, alt: displayText(children), title, raw: imageRaw, loading: data.loading })
+      }
+      else {
+        if (simpleMarkdownLink)
+          projectParenthesisBeforeLink(inlines, index, nodes, false, context, filenameIndex === index - 1)
+        const markup = raw.startsWith('<') ? 'autolink' : raw.startsWith('[') ? '' : 'linkify'
+        const compact =
+          ((markup && /^<?https?:\/\//i.test(raw)) || simpleMarkdownLink)
+          && sameLineInlineSuffix(inlines, index, context)
+        if (compact) {
+          const text = legacyLinkText(children)
+          nodes.push({
+            type: 'link', href, title: title ?? '', text, children: [textNode(text, false)],
+            raw: `[${text}](${href})`, loading: false, markup,
+          })
+        }
+        else {
+          nodes.push(linkNode(href, title, children, markup))
+        }
+      }
+    }
+    else if (kind === 'custom_inline') {
+      nodes.push(customInlineNode(data, data.status, raw, context, insideLinkLabel))
+    }
+    else if (kind === 'html') {
+      const header = htmlHeader(raw)
+      if (header?.tag === 'br') {
+        nodes.push({ type: 'hardbreak', raw })
+        continue
+      }
+      if (context.markstream && header?.tag === 'img' && !context.customTags.includes('img')) {
+        nodes.push({ type: 'html_inline', tag: 'img', content: raw, children: [], raw, loading: false })
+        continue
+      }
+      let end = index
+      if (header && !header.closed) {
+        let depth = 1
+        for (let lookahead = index + 1; lookahead < inlines.length; lookahead++) {
+          if (inlines[lookahead].kind !== 'html')
+            continue
+          const candidate = context.read(inlines[lookahead].span)
+          const close = /^<\/([\w:.-]+)\s*>/.exec(candidate)
+          const opening = htmlHeader(candidate)
+          if (close?.[1].toLowerCase() === header.tag && !--depth) {
+            end = lookahead
+            break
+          }
+          if (opening?.tag === header.tag && !opening.closed)
+            depth++
+        }
+      }
+      const tag = header?.tag
+      const pairedCode = context.markstream && !context.final && tag === 'pre' && end === index
+        ? draftPreCode(inlines, index, context)
+        : undefined
+      const autoClosed = context.markstream && end === index && !header?.closed
+        && (tag === 'pre' || tag === 'code')
+        && (context.final || pairedCode !== undefined || context.pairedCodeStart === span[0])
+      const href = header && attrValue(header.attrs, 'href')
+      const previous = inlines[index - 1]
+      const image = inlines[index + 1]
+      const loadingAnchor = context.markstream && !context.final && tag === 'a' && href
+        && end === index && !header.closed && previous?.kind === 'text'
+        && lineAt(context.lineStarts, previous.span[0]) === lineAt(context.lineStarts, span[0])
+        && readText(previous.data, context).trim()
+        && image?.kind === 'html' && image.span[0] === span[1] && index + 2 === inlines.length
+        && htmlHeader(context.read(image.span))?.tag === 'img' && allowsLink(href, context)
+      const includeTail = autoClosed || loadingAnchor
+      const last = includeTail ? inlines.length - 1 : end
+      let children = projectInlineNodes(
+        inlines.slice(index + 1, includeTail ? inlines.length : end),
+        pairedCode === undefined ? context : { ...context, pairedCodeStart: pairedCode },
+        false,
+        insideLinkLabel || tag === 'a',
+      )
+      const source = last === index ? raw : normalize(context.read([span[0], inlines[last].span[1]]))
+      const combined = autoClosed ? source + `</${tag}>` : source
+      if (tag === 'a' && href && (end > index || loadingAnchor)) {
+        if (loadingAnchor || allowsLink(href, context)) {
+          const title = attrValue(header.attrs, 'title')
+          const attrs = title === '' ? [...header.attrs, ['title', title]] : header.attrs
+          const link = linkNode(href, title, children, 'html', combined, attrs)
+          link.loading = Boolean(loadingAnchor)
+          nodes.push(link)
+        }
+        else {
+          mergeText(nodes, textNode(displayText(children), false))
+        }
+      }
+      else {
+        const custom = tag && context.customTags.includes(tag)
+        if (context.markstream && !custom) {
+          children = children.map(child => (
+            (child.type === 'text' || child.type === 'reference') && /^\[\d+\]$/.test(child.raw)
+              ? textNode(child.raw, false)
+              : child
+          ))
+        }
+        nodes.push({
+          type: custom ? tag : 'html_inline',
+          ...(tag && { tag, attrs: header.attrs }),
+          content: custom ? combined.slice(raw.length, combined.lastIndexOf('</')) : combined,
+          children,
+          raw: combined,
+          loading: autoClosed,
+          autoClosed,
+        })
+      }
+      index = last
+    }
+    else {
+      nodes.push({ type: kind, raw, ...data })
+    }
+  }
+  for (const node of nodes) {
+    if (node.type === 'text' && !needsLegacyCenter(node.content, context))
+      delete node.center
+  }
+  return nodes
+}
+
+function codeBlock(info, raw, loading) {
+  if (!info.startsWith('diff'))
+    return { type: 'code_block', language: info, code: raw, raw, diff: false, loading }
+
+  const language = info.includes(' ') ? info.slice(info.indexOf(' ') + 1) : ''
+  const lines = raw.split('\n')
+  const endsWithNewline = lines.at(-1) === ''
+  if (endsWithNewline)
+    lines.pop()
+  const unified = lines.some(line => /^(?:diff |--- |\+\+\+ |@@ )/.test(line))
+  const original = []
+  const updated = []
+  const headers = ['diff ', 'index ', '--- ', '+++ ', '@@ ']
+  const changedLine = body => !unified && body.startsWith(' ') && !body.startsWith('  ') ? ` ${body}` : body
+  for (const [index, line] of lines.entries()) {
+    if (loading && !endsWithNewline && index === lines.length - 1 && headers.some(prefix => prefix.startsWith(line)))
+      continue
+    if (/^(?:diff |index |--- |\+\+\+ |@@ )/.test(line))
+      continue
+    if (line.startsWith('-'))
+      original.push(changedLine(line.slice(1)))
+    else if (line.startsWith('+'))
+      updated.push(changedLine(line.slice(1)))
+    else {
+      const context = unified && line.startsWith(' ') ? line.slice(1) : line
+      original.push(context)
+      updated.push(context)
+    }
+  }
+  const originalCode = original.join('\n') + (!loading && endsWithNewline && original.length ? '\n' : '')
+  const updatedCode = updated.join('\n') + (!loading && endsWithNewline && updated.length ? '\n' : '')
+  return { type: 'code_block', language, code: updatedCode, raw, diff: true, loading, originalCode, updatedCode }
+}
+
+function displayFence(block, context, followsPhysicalLines) {
+  const { span, data } = block
+  const info = data.info === null ? '' : context.read(data.info)
+  let content = data.lines ? rawLines(data.lines, context) : readText(data.body, context)
+  let loading = block.status === 'open' && !context.final
+  let sourceSpan = span
+  if (context.markstream && loading && followsPhysicalLines && span[1] < context.length) {
+    const lineEnd = context.lineStarts[lineAt(context.lineStarts, span[0]) + 1] ?? span[1]
+    const opening = /^( {0,3})(`{3,}|~{3,})/.exec(context.read([span[0], lineEnd]))
+    const tail = context.read([span[1], context.length])
+    const pending = /^ {0,3}(`+|~+)[ \t]*$/.exec(tail)
+    if (opening && pending && opening[2][0] === pending[1][0]) {
+      loading = pending[1].length < opening[2].length
+      if (loading)
+        content = content.replace(/\n$/, '')
+      sourceSpan = [span[0], context.length]
+    }
+    else if (opening && span[1] === context.lineStarts.at(-1)) {
+      const indent = opening[1].length
+      let columns = 0
+      let offset = 0
+      while (columns < indent && (tail[offset] === ' ' || tail[offset] === '\t')) {
+        columns += tail[offset] === '\t' ? 4 - columns % 4 : 1
+        offset++
+      }
+      content += ' '.repeat(Math.max(0, columns - indent)) + normalize(tail.slice(offset))
+      sourceSpan = [span[0], context.length]
+    }
+  }
+  const map = sourceMap(sourceSpan, context)
+  return { ...codeBlock(info, content, loading), ...map, ...map.sourceMap }
+}
+
+function projectTableRow(values, alignments, header, context, provisional = false) {
+  const cells = values.map((cell, column) => {
+    const raw = inlineRaw(cell, '', context).replace(/(\\+)\|/g, (source, escapes) => (
+      escapes.length % 2 ? `${escapes.slice(1)}|` : source
+    ))
+    const children = projectInlines(cell, context)
+    if (provisional)
+      projectDraftHttpHost(children, raw, context)
+    const tail = children.at(-1)
+    if (context.markstream && tail?.type === 'text' && tail.content.endsWith('`')) {
+      const marker = /(?<!\\)(?:\\\\)*(`+)/u.exec(tail.content)
+      if (marker?.[1] === '`' && marker.index + marker[0].length === tail.content.length) {
+        // The legacy cell view styles a single opening backtick before any code arrives.
+        const prefix = tail.content.slice(0, -1)
+        children.pop()
+        if (prefix)
+          children.push(textNode(prefix, false))
+        if (prefix || context.final || raw.endsWith('\\`'))
+          children.push({ type: 'inline_code', code: '', raw: '' })
+      }
+    }
+    return { type: 'table_cell', header, children, raw, align: alignments[column] }
+  })
+  return { type: 'table_row', cells, raw: cells.map(cell => cell.raw).join('|') }
+}
+
+function projectTable(data, loading, map, context, provisionalRow) {
+  const header = projectTableRow(data.header, data.alignments, true, context)
+  const rows = data.rows.map(row => projectTableRow(row, data.alignments, false, context))
+  if (provisionalRow)
+    rows.push(projectTableRow(provisionalRow, data.alignments, false, context, true))
+  return { type: 'table', header, rows, raw: [header, ...rows].map(row => row.raw).join('\n'), loading, ...map }
+}
+
+function looseVmrFields(text) {
+  const inner = text.slice(1, -1).trim()
+  const pair = /\s*([_$A-Z][\w$-]*|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')\s*:\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^,{}[\]]*)\s*(,|$)/giy
+  const fields = []
+  let offset = 0
+  while (offset < inner.length) {
+    pair.lastIndex = offset
+    const match = pair.exec(inner)
+    if (!match)
+      return
+    const [, rawKey, rawValue] = match
+    const key = vmrValue(rawKey)
+    fields.push([String(key), vmrValue(rawValue.trim())])
+    offset = pair.lastIndex
+  }
+  return Object.fromEntries(fields)
+}
+
+function vmrValue(text) {
+  try {
+    return JSON.parse(text)
+  }
+  catch {
+    return text.startsWith("'") && text.endsWith("'") ? text.slice(1, -1) : text
+  }
+}
+
+function vmrNode(block, nodes, context) {
+  const { data, span, status } = block
+  const children = projectChildren(nodes, block.children, context)
+  const name = context.read(data.name)
+  const args = data.args ? context.read(data.args) : undefined
+  const payload = data.attributes ? context.read(data.attributes) : undefined
+  let fields
+  if (payload) {
+    try {
+      fields = JSON.parse(payload)
+    }
+    catch {
+      fields = looseVmrFields(payload) ?? { attrs: payload }
+    }
+  }
+  const attrs = args || fields && Object.keys(fields).length
+    ? { ...(args && { args }), ...fields }
+    : undefined
+  let raw = '::: ' + name + (attrs ? ' ' + JSON.stringify(attrs) : '') + '\n'
+  let bodyEnd = data.header[1]
+
+  if (children.length) {
+    const bodyStart = context.lineStarts[lineAt(context.lineStarts, data.header[0]) + 1] ?? data.header[1]
+    for (let node = nodes.get(block.children.at(-1)); node; node = nodes.get(node.children.at(-1)))
+      bodyEnd = Math.max(bodyEnd, node.span[1])
+    let body = normalize(context.read([bodyStart, bodyEnd]))
+    if (!body.endsWith('\n'))
+      body += '\n'
+    if (!body.endsWith('\n\n'))
+      body += '\n'
+    raw += body + '\n'
+  }
+
+  return {
+    type: 'vmr_container', name, attrs, children, raw: raw + ':::',
+    loading: status === 'open' && !context.final,
+    ...sourceMap([span[0], Math.max(span[1], bodyEnd)], context),
+  }
+}
+
+function escapeHtml(value, apostrophes = true) {
+  return value.replace(apostrophes ? /[&<>"']/g : /[&<>"]/g, char => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[char])
+}
+
+function renderDetailChild(node, inlineParagraph = false) {
+  const children = () => (node.children ?? []).map(child => renderDetailChild(child)).join('')
+  switch (node.type) {
+    case 'text':
+      return escapeHtml(node.content, false)
+    case 'inline_code': {
+      const source = draftCodeSource.get(node)
+      return source === undefined ? '<code>' + escapeHtml(node.code, false) + '</code>' : escapeHtml(source, false)
+    }
+    case 'strong':
+      return '<strong>' + children() + '</strong>'
+    case 'emphasis':
+      return '<em>' + children() + '</em>'
+    case 'strikethrough':
+      return '<s>' + children() + '</s>'
+    case 'hardbreak':
+      return '<br>\n'
+    case 'link':
+      return '<a href="' + escapeHtml(node.href) + '">' + children() + '</a>'
+    case 'paragraph':
+      return inlineParagraph ? children() : '<p>' + children() + '</p>\n'
+    case 'heading':
+      return '<h' + node.level + '>' + children() + '</h' + node.level + '>\n'
+    case 'blockquote':
+      return '<blockquote>\n' + children() + '</blockquote>\n'
+    case 'list': {
+      const tag = node.ordered ? 'ol' : 'ul'
+      const start = node.ordered && node.start !== undefined && node.start !== 1 ? ' start="' + node.start + '"' : ''
+      const items = node.items.map(item => '<li>' + item.children.map(child => (
+        renderDetailChild(child, item.children.length === 1)
+      )).join('') + '</li>\n').join('')
+      return '<' + tag + start + '>\n' + items + '</' + tag + '>\n'
+    }
+    case 'code_block':
+      return '<div class="code-block" data-lang="' + escapeHtml(node.language) + '"><pre>'
+        + escapeHtml(node.code) + '</pre></div>'
+    case 'html_block':
+      return node.tag === 'summary' && node.loading ? node.raw ?? node.content : node.content
+    case 'html_inline':
+      return node.content
+    default:
+      return escapeHtml(node.raw)
+  }
+}
+
+function detailTokenWidth(node) {
+  if (node.type === 'paragraph' || node.type === 'heading')
+    return 3
+  if (node.type === 'code_block' || (node.type === 'html_block' && node.tag === 'summary' && !node.raw?.includes('\n')))
+    return 1
+  if (node.type === 'blockquote' || node.type === 'list' || node.type === 'list_item') {
+    let width = 2
+    for (const child of node.items ?? node.children) {
+      const childWidth = detailTokenWidth(child)
+      if (childWidth === undefined)
+        return
+      width += childWidth
+    }
+    return width
+  }
+}
+
+function detailTokenWidths(block, children, nodes, raw, context) {
+  if (context.detailMessageId === undefined || !context.markstream
+    || block.status === 'incomplete' || children.length !== block.children.length || raw.includes(']:'))
+    return
+  let end = block.data.opening[1]
+  const widths = []
+  for (const [index, child] of children.entries()) {
+    const [start, stop] = nodes.get(block.children[index]).span
+    if (start < end || !/^[ \t\r\n]*$/u.test(context.read([end, start])))
+      return
+    const width = detailTokenWidth(child)
+    if (width === undefined)
+      return
+    widths.push(width)
+    end = stop
+  }
+  if (block.status === 'closed'
+    && !/^[ \t\r\n]*<\/details[ \t]*>[ \t\r\n]*$/iu.test(context.read([end, block.span[1]])))
+    return
+  return widths
+}
+
+function renderDetailFence(raw, info, messageId, index) {
+  const first = info.trim().split(/\s+/, 1)[0] || 'text'
+  const lang = first.replace(/[^\w+.#:-]/gu, '-').replace(/-+/gu, '-')
+  const id = `editor-${messageId}-${index}-${lang}`.replace(/[^\w:.+-]/gu, '-').replace(/-+/gu, '-')
+  const code = Buffer.from(raw).toString('base64')
+  return `<div class="code-block" data-code="${code}" data-lang="${lang}" id="${id}">
+      <div class="code-header">
+        <span class="code-lang">${lang.toUpperCase()}</span>
+        <button class="copy-button" data-code="${code}">Copy</button>
+      </div>
+      <div class="code-editor"></div>
+    </div>`
+}
+
+function detailNode(block, nodes, raw, map, context) {
+  const { status, data } = block
+  const open = status === 'open'
+  const summary = block.kind === 'summary'
+  const attrs = data.attrs
+  if (summary) {
+    if (context.markstream && open && !context.final) {
+      const visible = normalize(context.read([block.span[0], context.length]))
+      if (/<\/[^>]*$/.test(visible))
+        return { type: 'html_block', content: visible, tag: 'summary', loading: true }
+      return {
+        type: 'html_block', content: visible + '\n</summary>', raw: visible, tag: 'summary',
+        attrs: attrs.length ? attrs : undefined, loading: true,
+      }
+    }
+    const content = raw.trimEnd()
+    return {
+      type: 'html_block', tag: 'summary', content, raw: content,
+      attrs: attrs.length ? attrs : undefined,
+      loading: open && !context.final, children: projectInlines(data.content, context), ...map,
+    }
+  }
+
+  const children = projectChildren(nodes, block.children, context)
+  const opening = normalize(context.read(data.opening))
+  const openerLine = lineAt(context.lineStarts, data.opening[0])
+  const openerLineEnd = context.lineStarts[openerLine + 1]
+  const last = nodes.get(block.children.at(-1))
+  if (context.markstream && open && last) {
+    const followsPhysicalLines = block.parent === null && last.kind === 'code_block'
+    const tailIsOpen = last.status === 'open' && (last.kind === 'summary' || followsPhysicalLines)
+    const end = tailIsOpen ? context.length : last.span[1]
+    if (end > block.span[1]) {
+      const surfaceSpan = [block.span[0], end]
+      raw = normalize(context.read(surfaceSpan))
+      map = sourceMap(surfaceSpan, context)
+    }
+  }
+  if (open && !children.length && openerLineEnd > block.span[1]
+    && !context.read([data.opening[1], openerLineEnd]).trim()) {
+    const surfaceSpan = [block.span[0], openerLineEnd]
+    raw = normalize(context.read(surfaceSpan))
+    map = sourceMap(surfaceSpan, context)
+  }
+  const widths = detailTokenWidths(block, children, nodes, raw, context)
+  let token = 0
+  const body = children.map((child, index) => {
+    const blockChild = nodes.get(block.children[index])
+    const ordinal = token
+    if (widths)
+      token += widths[index]
+    if (widths && blockChild.kind === 'code_block') {
+      const info = blockChild.data.info === null ? '' : context.read(blockChild.data.info)
+      return renderDetailFence(child.raw, info, context.detailMessageId, ordinal)
+    }
+    return renderDetailChild(child, openerLine === lineAt(context.lineStarts, blockChild.span[0]))
+  }).join('')
+  const closing = status === 'closed' ? raw.match(/<\/details[ \t]*>[ \t]*\n?$/i)?.[0] : null
+  return {
+    type: 'html_block', tag: 'details', attrs, children, raw,
+    content: opening + body + (closing ?? '</details>'),
+    loading: open && !context.final, ...map,
+  }
+}
+
+function heldWrapperRaw(block, nodes, children, tail, context) {
+  if (children.length !== block.children.length)
+    return
+  const last = nodes.get(block.children.at(-1))
+  const starts = context.lineStarts
+  for (let line = lineAt(starts, block.data.opening[1] - 1) + 1; starts[line + 1] <= last.span[0]; line++) {
+    const start = starts[line]
+    const end = starts[line + 1]
+    if (!/^[ \t]*(?:\r\n?|\n)$/u.test(context.read([start, end])))
+      continue
+
+    // While the closer is held, the legacy wrapper keeps its first HTML block
+    // and rejoins the parsed siblings from the next block onward.
+    const from = block.children.findIndex(id => nodes.get(id).span[0] >= end)
+    if (from === -1)
+      return
+    const parts = children.slice(from).map(child => child.raw)
+    if (parts.every(part => typeof part === 'string') && parts.at(-1).endsWith(tail))
+      return readText([block.span[0], start], context) + '\n' + parts.join('\n')
+    return
+  }
+}
+
+function projectBlock(block, nodes, context) {
+  const { kind, span, data, status } = block
+  const open = status === 'open'
+  const raw = normalize(context.read(span))
+  const map = sourceMap(span, context)
+
+  switch (kind) {
+    case 'paragraph': {
+      const preview = block.preview
+      if (preview?.kind === 'table') {
+        const previewMap = sourceMap([span[0], context.length], context)
+        return projectTable(preview.data, preview.loading, previewMap, context)
+      }
+      const rawContent = block.rawFragments ? { fragments: block.rawFragments } : data
+      let projectedRaw = inlineRaw(rawContent, raw.trim(), context, span[1])
+      let withheldHtml
+      const parsed = block.previewInlines?.parsed
+      const last = parsed?.at(-1)
+      const committedEnd = rawContent.fragments?.at(-1)?.[1] ?? rawContent.plain?.[1]
+      const parentKind = nodes.get(block.parent)?.kind
+      if (context.markstream && open && last && last.span[1] > span[1]
+        && committedEnd !== undefined && (parentKind === 'blockquote' || parentKind === 'list_item')) {
+        const breakIndex = parsed.findIndex(node => node.kind === 'softbreak' && node.span[0] === committedEnd)
+        const first = breakIndex < 0 ? undefined : parsed[breakIndex + 1]
+        if (first && first.span[0] >= parsed[breakIndex].span[1]
+          && lineAt(context.lineStarts, first.span[0]) === lineAt(context.lineStarts, last.span[1] - 1)) {
+          // Keep the typed continuation source outside its container prefix.
+          projectedRaw += readText(parsed[breakIndex].span, context)
+            + readText([first.span[0], last.span[1]], context)
+        }
+      }
+      if (context.markstream && open && last && last.span[1] < span[1]) {
+        const tail = context.read([last.span[1], span[1]])
+        if (tail.trimStart().startsWith('<')) {
+          withheldHtml = tail
+          projectedRaw = normalize(context.read([data.plain?.[0] ?? span[0], last.span[1]]))
+        }
+        if (!context.final && parsed.length === 1 && last.kind === 'html'
+          && /^<img(?:[\s/]|$)/i.test(tail)) {
+          const anchor = htmlHeader(projectedRaw)
+          if (anchor?.tag === 'a' && !anchor.closed)
+            return { type: kind, children: [], raw: projectedRaw, ...map }
+        }
+      }
+      const inlines = block.previewInlines ?? data
+      const children = projectInlines(inlines, open || block.previewInlines
+        ? context
+        : { ...context, settledInline: true })
+      if (open) {
+        projectDraftHttpHost(children, projectedRaw, context)
+        if (context.markstream && !context.final) {
+          projectDraftTextTail(children, projectedRaw)
+          const badgeTail = withheldHtml ?? (block.parent === null && span[1] < context.length
+            ? context.read([span[1], context.length])
+            : undefined)
+          projectedRaw += projectDraftBadge(
+            children, projectedRaw, context, badgeTail, block.parent === null && data.plain !== undefined && !parsed,
+          ) ?? ''
+        }
+      }
+      const imageLink = context.markstream && (context.final || !open) && inlines.parsed
+        ? projectUnclosedImageLink(inlines.parsed, children, context)
+        : undefined
+      return { type: kind, children: imageLink ? [imageLink] : children, raw: projectedRaw, ...map }
+    }
+    case 'heading': {
+      const raw = inlineRaw(data.content, '', context, span[1])
+      return { type: kind, level: data.level, text: raw, children: projectInlines(block.previewInlines ?? data.content, context), raw, ...map }
+    }
+    case 'code_block': {
+      const parent = nodes.get(block.parent)
+      return displayFence(block, context, block.parent === null || (parent?.kind === 'details' && parent.parent === null))
+    }
+    case 'indented_code': {
+      const content = rawLines(data.lines, context)
+      const text = content.trim()
+      const literal = /^(?:const|let|var)\b/.test(text) || /^<\/?[a-z][\w:.-]*(?:\s|>)/i.test(text)
+      if (!context.markstream || !context.fixIndentedCodeBlock || data.lines.length > 1 || literal) {
+        const code = content.endsWith('\n') ? content : content + '\n'
+        return { type: 'code_block', language: '', code, raw: code, loading: false, ...map, ...map.sourceMap }
+      }
+      return { type: 'paragraph', children: text ? [textNode(text)] : [], raw: text }
+    }
+    case 'vmr_container':
+      return vmrNode(block, nodes, context)
+    case 'admonition': {
+      const kind = data.kind
+      const title = data.title ? readText(data.title, context) : kind[0].toUpperCase() + kind.slice(1)
+      const children = projectChildren(nodes, block.children, context)
+      const raw = `:::${kind} ${title}\n${children.map(child => child.raw).join('\n')}\n:::`
+      return { type: 'admonition', kind, title, children, raw, ...map }
+    }
+    case 'thematic_break':
+      return { type: kind, raw: '---', ...map }
+    case 'math_block':
+      if (map.sourceMap && context.markstream && open && !context.final)
+        map.sourceMap.endLine++
+      return { ...mathNode(kind, data.body, raw.trimStart(), open && !context.final, context), ...map }
+    case 'footnote': {
+      const id = context.read(data.label)
+      const text = inlineRaw(data.content, '', context)
+      const children = text ? [{
+        type: 'paragraph', raw: text, children: [
+          ...projectInlines(data.content, context),
+          { type: 'footnote_anchor', id, raw: '' },
+        ],
+      }] : []
+      return { type: kind, id, children, raw: `[^${id}]: ${text}` }
+    }
+    case 'list': {
+      const items = projectChildren(nodes, block.children, context)
+      const start = data.ordered && (!context.markstream || data.start !== 1) ? data.start : undefined
+      return { type: kind, ordered: data.ordered, start, items, raw: items.map(item => item.raw).join('\n'), ...map }
+    }
+    case 'list_item':
+    case 'blockquote': {
+      const children = projectChildren(nodes, block.children, context)
+      if (data?.task !== undefined && data.task !== null && children[0]?.type === 'paragraph') {
+        const marker = data.task ? '[x]' : '[ ]'
+        children[0].children.unshift({ type: 'checkbox_input', checked: data.task, raw: marker })
+        children[0].raw = `${marker} ${children[0].raw}`
+      }
+      return { type: kind, children, raw: children.map(child => child.raw).join(kind === 'blockquote' ? '\n' : ''), ...map }
+    }
+    case 'table': {
+      const row = block.preview?.kind === 'table_row' ? block.preview.cells : null
+      const tableMap = row ? sourceMap([span[0], context.length], context) : map
+      return projectTable(data, false, tableMap, context, row)
+    }
+    case 'custom': {
+      const body = readText(data.body, context)
+      if (data.promoted) {
+        return {
+          type: data.name, tag: data.name, attrs: data.attrs, content: body, raw,
+          children: projectInlineNodes(data.children, context), loading: open && !context.final, ...map,
+        }
+      }
+      const inlineRaw = raw.trimEnd()
+      if (context.markstream && status === 'closed' && !inlineRaw.includes('\n')
+        && context.read([data.body[1], span[1]]).startsWith('</')) {
+        const inline = customInlineNode(data, status, inlineRaw, context)
+        return { type: 'paragraph', children: [inline], raw: inlineRaw, ...map }
+      }
+      let content = context.markstream ? body.replace(/^\n/, '') : body
+      let projectedRaw = raw
+      let projectedMap = map
+      if (context.markstream && status === 'closed')
+        content = content.replace(/\n$/, '')
+      const partialBlock = context.markstream && block.parent === null && status !== 'closed'
+      if (partialBlock) {
+        // The native node can hold a potential same-tag closer. Legacy raw displays those bytes.
+        const suffix = open ? normalize(context.read([data.body[1], context.length])) : ''
+        const sourceBody = body + suffix
+        const onSameLine = /^[ \t]*\S/.test(sourceBody)
+        const visibleBody = onSameLine ? sourceBody.replace(/^[ \t]+/, '') : sourceBody.replace(/^\n/, '')
+        const pendingClose = '</' + data.name
+        content = open && visibleBody.endsWith(pendingClose)
+          ? visibleBody.slice(0, -pendingClose.length)
+          : visibleBody
+        const opening = normalize(context.read([span[0], data.body[0]]))
+        projectedRaw = opening + (onSameLine ? '\n' + visibleBody : sourceBody)
+        if (open)
+          projectedMap = sourceMap([span[0], context.length], context)
+      }
+      const children = data.children?.length && !partialBlock && (!open || !context.markstream)
+        ? projectInlineNodes(data.children, context)
+        : undefined
+      return {
+        type: data.name, tag: data.name, attrs: data.attrs.length ? data.attrs : undefined,
+        content, raw: projectedRaw, ...(children && { children }), loading: open && !context.final, ...projectedMap,
+      }
+    }
+    case 'details':
+    case 'summary':
+      return detailNode(block, nodes, raw, map, context)
+    case 'html_wrapper': {
+      const tag = data.tag.toLowerCase()
+      const children = projectChildren(nodes, block.children, context)
+      let visibleEnd = span[1]
+      let rawEnd = visibleEnd
+      let held = ''
+      if (context.markstream && open && !context.final) {
+        const last = nodes.get(block.children.at(-1))
+        if (last?.kind === 'paragraph' && last.status === 'open') {
+          // The child can already have text beyond the wrapper's last complete line.
+          visibleEnd = Math.max(visibleEnd, last.span[1])
+          rawEnd = visibleEnd
+        }
+        if (last?.kind === 'details' && last.status === 'open') {
+          const summary = nodes.get(last.children.at(-1))
+          if (summary?.kind === 'summary' && summary.span[1] > visibleEnd) {
+            visibleEnd = summary.span[1]
+            rawEnd = visibleEnd
+          }
+          const close = '</summary'
+          const remaining = context.length - rawEnd
+          if (summary?.kind === 'summary' && summary.status === 'open' && summary.span[1] === rawEnd
+            && remaining >= 2 && remaining <= close.length) {
+            const tail = context.read([rawEnd, context.length])
+            if (tail.startsWith('</') && close.startsWith(tail.toLowerCase())) {
+              rawEnd = context.length
+              held = tail
+            }
+          }
+        }
+      }
+      const merged = held ? heldWrapperRaw(block, nodes, children, held, context) : undefined
+      const visible = merged ? merged.slice(0, -held.length)
+        : visibleEnd === span[1] ? raw : readText([span[0], visibleEnd], context)
+      const wrapperRaw = merged ?? (rawEnd === visibleEnd ? visible : readText([span[0], rawEnd], context))
+      return {
+        type: 'html_block', tag, raw: wrapperRaw,
+        content: status === 'closed' ? visible : visible + `\n</${tag}>`,
+        ...(data.attrs.length && { attrs: data.attrs }),
+        loading: open && !context.final,
+        children,
+        ...(rawEnd === span[1] ? map : sourceMap([span[0], rawEnd], context)),
+      }
+    }
+    case 'html_block': {
+      const content = data.lines ? rawLines(data.lines, context) : raw
+      const header = htmlHeader(content.trimStart())
+      // A complete anchor can end before the CommonMark HTML source block does.
+      const preview = open && !context.final
+      let anchor
+      if (context.markstream && block.parent === null && header?.tag === 'a' && !header.closed) {
+        const suffix = preview && span[1] < context.length ? readText([span[1], context.length], context) : ''
+        anchor = anchorExtent(content + suffix, preview, /^[ \t\n]+$/u.test(suffix))
+      }
+      const loading = !anchor?.closed && preview && Boolean(header) && !header.closed
+      const visible = anchor?.raw ?? (block.preview?.kind === 'html_content'
+        ? readText(block.preview.span, context)
+        : content)
+      const display = context.markstream && loading
+        ? visible + `\n</${header.tag}>`
+        : visible
+      return {
+        type: kind, content: display, raw: anchor?.raw ?? content, tag: header?.tag ?? '',
+        ...(header?.attrs.length && { attrs: header.attrs }),
+        loading,
+        ...map,
+      }
+    }
+    default:
+      return { type: kind, raw, ...data, ...map }
+  }
+}

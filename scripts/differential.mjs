@@ -205,6 +205,22 @@ const checkingCandidate = Boolean(process.env.PARSER_CANDIDATE)
 const { createSession } = checkingCandidate ? await loadCandidate() : reference
 const requested = process.argv[2]
 
+function firstDifference(expected, actual, path) {
+  const settings = { depth: 2, maxArrayLength: 4, maxStringLength: 160 }
+  if (expected && actual && typeof expected === 'object' && typeof actual === 'object') {
+    for (const key of new Set([...Object.keys(expected), ...Object.keys(actual)])) {
+      const next = Array.isArray(expected) ? `${path}[${key}]` : `${path}.${key}`
+      const inExpected = Object.hasOwn(expected, key)
+      const inActual = Object.hasOwn(actual, key)
+      if (inExpected !== inActual)
+        return `${next}: expected ${inExpected ? inspect(expected[key], settings) : '(absent)'}, actual ${inActual ? inspect(actual[key], settings) : '(absent)'}`
+      if (!isDeepStrictEqual(expected[key], actual[key]))
+        return firstDifference(expected[key], actual[key], next)
+    }
+  }
+  return `${path}: expected ${inspect(expected, settings)}, actual ${inspect(actual, settings)}`
+}
+
 function verify(id, options, actions, corpus = false) {
   const config = {
     id,
@@ -215,6 +231,11 @@ function verify(id, options, actions, corpus = false) {
   let source = ''
   let wasFinal = false
   let warmColdDifferences = 0
+  let finalCount = 0
+  let previewMismatches = 0
+  let finalMismatches = 0
+  let firstPreviewMismatch
+  let firstFinalMismatch
   // The upstream corpus validator reused its sync parser instance. Keep that
   // baseline visible and use a fresh instance for every candidate comparison.
   const legacyCorpusReader = corpus && !checkingCandidate ? reference.createColdReader(config) : null
@@ -231,8 +252,10 @@ function verify(id, options, actions, corpus = false) {
       else if (action.kind === 'append') {
         session.append(action.text)
       }
-      if (action.final)
+      if (action.final) {
         session.finish()
+        finalCount++
+      }
       wasFinal = action.final
 
       const fresh = reference.parseCold(source, config, action.final)
@@ -241,16 +264,27 @@ function verify(id, options, actions, corpus = false) {
         warmColdDifferences++
       const actual = session.snapshot()
       if (!isDeepStrictEqual(actual, expected)) {
+        if (action.final)
+          finalMismatches++
+        else
+          previewMismatches++
+        if (action.final ? firstFinalMismatch : firstPreviewMismatch)
+          continue
         let node = 0
         while (node < Math.max(expected.length, actual.length) && isDeepStrictEqual(actual[node], expected[node]))
           node++
         const settings = { depth: 4, maxArrayLength: 8, maxStringLength: 320 }
-        throw new Error([
+        const detail = [
           `${id}, commit ${index}, ${action.kind}, final=${action.final}`,
           `input length: ${source.length}, last 200 chars: ${JSON.stringify(source.slice(-200))}`,
+          `first difference ${firstDifference(expected[node], actual[node], `node[${node}]`)}`,
           `expected node[${node}]: ${inspect(expected[node], settings)}`,
           `actual node[${node}]: ${inspect(actual[node], settings)}`,
-        ].join('\n'))
+        ].join('\n')
+        if (action.final)
+          firstFinalMismatch = detail
+        else
+          firstPreviewMismatch = detail
       }
     }
   }
@@ -258,17 +292,40 @@ function verify(id, options, actions, corpus = false) {
     session?.dispose?.()
   }
 
+  const previewCount = actions.length - finalCount
+  const result = `${previewCount - previewMismatches}/${previewCount} preview, ${finalCount - finalMismatches}/${finalCount} final commits`
   const diagnostics = warmColdDifferences ? `; legacy reused sync differs from fresh on ${warmColdDifferences} commit(s)` : ''
-  console.log(`PASS ${id} (${actions.length} commits${diagnostics})`)
+  if (previewMismatches || finalMismatches) {
+    console.error(`FAIL ${id} (${result}${diagnostics})`)
+    for (const detail of [firstPreviewMismatch, firstFinalMismatch]) {
+      if (detail)
+        console.error(detail)
+    }
+    return false
+  }
+  console.log(`PASS ${id} (${result}${diagnostics})`)
+  return true
 }
 
 const corpora = new URL('../fixtures/corpus/', import.meta.url)
 let checked = 0
+let failed = 0
+function check(...args) {
+  checked++
+  try {
+    if (!verify(...args))
+      failed++
+  }
+  catch (error) {
+    failed++
+    console.error(error)
+  }
+}
+
 for (const fixture of fixtures) {
   if (requested && requested !== fixture.id)
     continue
-  verify(fixture.id, fixture.options, createActionPlan(fixture, fixture.seed))
-  checked++
+  check(fixture.id, fixture.options, createActionPlan(fixture, fixture.seed))
 }
 
 for (const name of readdirSync(corpora).sort()) {
@@ -283,8 +340,11 @@ for (const name of readdirSync(corpora).sort()) {
     offset = end
   }
   actions.push({ kind: 'final-transition', final: true })
-  verify(name, {}, actions, true)
-  checked++
+  check(name, {}, actions, true)
 }
 if (!checked)
   throw new Error(`Unknown differential fixture: ${requested}`)
+if (failed) {
+  console.error(`Strict differential: ${checked - failed}/${checked} fixtures passed`)
+  process.exitCode = 1
+}

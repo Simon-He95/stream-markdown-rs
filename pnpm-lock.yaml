@@ -13,6 +13,9 @@ importers:
 
   .:
     devDependencies:
+      linkify-it:
+        specifier: 6.1.0
+        version: 6.1.0
       markdown-it-cjk-friendly:
         specifier: 3.0.0
         version: 3.0.0(markdown-it@15.0.3)

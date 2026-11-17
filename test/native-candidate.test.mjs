@@ -1,0 +1,2432 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { createSession } from '../scripts/native-candidate.mjs'
+
+test('native candidate keeps source and block IDs independent across sessions', () => {
+  const first = createSession({ parseOptions: { includeSourceMap: true } })
+  const second = createSession()
+  try {
+    first.append('first \uD83D')
+    second.append('other session')
+    first.append('\uDE00\n\n')
+    first.finish()
+    second.finish()
+    assert.deepEqual(first.snapshot(), [{
+      type: 'paragraph',
+      children: [{ type: 'text', content: 'first 😀', raw: 'first 😀', center: false }],
+      raw: 'first 😀',
+      sourceMap: { startLine: 0, endLine: 1 },
+    }])
+    assert.equal(second.snapshot()[0].raw, 'other session')
+    assert.equal(first.metrics().scannedBytes, Buffer.byteLength('first 😀\n\n'))
+  }
+  finally {
+    first.dispose()
+    second.dispose()
+  }
+})
+
+test('native candidate applies reference backpatch and nested fence deltas', () => {
+  const session = createSession()
+  try {
+    session.append('[jump][dest]\n\n')
+    const before = session.snapshot()
+    assert.equal(before[0].children[0].type, 'text')
+    session.append('[dest]: /docs\n\n> ```rs\n> first\n')
+    assert.equal(session.snapshot()[0].children[0].href, '/docs')
+    assert.equal(session.snapshot()[1].children[0].loading, true)
+    session.append('> next\n> ```\n')
+    session.finish()
+    assert.equal(session.snapshot()[1].children[0].code, 'first\nnext\n')
+    assert.equal(session.snapshot()[1].children[0].loading, false)
+    assert.equal(before[0].children[0].type, 'text')
+    assert.equal(session.metrics().invalidatedBlocks, 1)
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('nested paragraph raw keeps line fragments after close and reference backpatch', () => {
+  const session = createSession({ parseOptions: { includeSourceMap: true } })
+  try {
+    session.append('> 中文 [jump][id]\r\n> second line\r\n\r\n')
+    const raw = '中文 [jump][id]\nsecond line'
+    assert.equal(session.snapshot()[0].children[0].raw, raw)
+    session.append('[id]: /docs\n\n')
+    session.finish()
+    const quote = session.snapshot()[0]
+    assert.equal(quote.raw, raw)
+    assert.equal(quote.children[0].raw, raw)
+    assert.deepEqual(quote.children[0].sourceMap, { startLine: 0, endLine: 2 })
+    assert.equal(quote.children[0].children.find(node => node.type === 'link').href, '/docs')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('blockquote raw includes the last line already carried by its inline preview', () => {
+  const session = createSession()
+  const prefix = '中文 `code`\nsecond paragraph line'
+  try {
+    session.append('> 中文 `code`\r\n> second paragraph line\r\n')
+    session.append('> third `draft')
+    const [quote] = session.snapshot()
+    assert.equal(quote.raw, prefix + '\nthird `draft')
+    assert.equal(quote.children[0].raw, quote.raw)
+    assert.equal(quote.children[0].children.at(-1).code, 'draft')
+
+    session.append('`\r\n')
+    session.finish()
+    const [closed] = session.snapshot()
+    assert.equal(closed.raw, prefix + '\nthird `draft`')
+    assert.equal(closed.children[0].raw, closed.raw)
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('list paragraph raw includes a typed continuation outside the item indentation', () => {
+  const session = createSession()
+  const raw = 'Pick `option`\nKeep `content` and `children`'
+  try {
+    session.append('- Pick `option`\r\n')
+    session.append('  Keep `content` and `children`')
+    const child = session.snapshot()[0].items[0].children[0]
+    assert.equal(child.raw, raw)
+    assert.equal(child.children.at(-1).code, 'children')
+    session.append('\r\n')
+    session.finish()
+    assert.equal(session.snapshot()[0].items[0].children[0].raw, raw)
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('native candidate delivers Rust custom tag metadata only after a complete opener', () => {
+  const session = createSession({ factoryOptions: { customHtmlTags: ['tool-call'], markstream: false } })
+  try {
+    session.append('<tool-call title="a >')
+    assert.equal(session.snapshot().some(node => node.type === 'tool-call'), false)
+    session.append(' b">lookup</tool-call>\n')
+    session.finish()
+    assert.equal(session.snapshot()[0].type, 'tool-call')
+    assert.deepEqual(session.snapshot()[0].attrs, [['title', 'a > b']])
+    assert.equal(session.snapshot()[0].content, 'lookup')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('native candidate keeps a long raw HTML line live while its closer is arriving', () => {
+  const opening = '<DIV class="outer">'
+  const body = '长文本'.repeat(500)
+  for (const chunks of [[opening, body + '</di'], [opening + body + '</di']]) {
+    const session = createSession()
+    try {
+      for (const chunk of chunks)
+        session.append(chunk)
+      const pending = session.snapshot()[0]
+      assert.equal(pending.raw, opening + body + '</di')
+      assert.equal(pending.content, opening + body + '\n</div>')
+      assert.equal(pending.loading, true)
+      session.append('v>')
+      const closed = session.snapshot()[0]
+      assert.equal(closed.raw, opening + body + '</div>')
+      assert.equal(closed.loading, false)
+      session.finish()
+      assert.deepEqual(session.snapshot(), [closed])
+    }
+    finally {
+      session.dispose()
+    }
+  }
+})
+
+test('native candidate ignores apparent HTML closers inside a split comment', () => {
+  const session = createSession()
+  try {
+    const source = '<div>before<!-- </div> -->after</div>'
+    for (const chunk of ['<div>before<!', '-- </div> -', '-', '>after</di']) {
+      session.append(chunk)
+      assert.equal(session.snapshot()[0].loading, true)
+    }
+    session.append('v>')
+    assert.equal(session.snapshot()[0].loading, false)
+    assert.equal(session.snapshot()[0].raw, source)
+    session.finish()
+    assert.equal(session.snapshot()[0].raw, source)
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('native candidate keeps HTML open across literal closers in raw text elements', () => {
+  for (const tag of ['script', 'style', 'textarea']) {
+    const session = createSession()
+    try {
+      const opening = `<DIV><${tag}>`
+      const rawBody = 'x = "</div>"'
+      const rawCloser = `</${tag.toUpperCase()}>`
+      for (const chunk of [opening, rawBody, rawCloser.slice(0, -2), rawCloser.slice(-2), 'after</di']) {
+        session.append(chunk)
+        assert.equal(session.snapshot()[0].loading, true, tag)
+      }
+      session.append('v>')
+      assert.equal(session.snapshot()[0].loading, false, tag)
+      session.finish()
+      assert.equal(session.snapshot()[0].raw, `${opening}${rawBody}${rawCloser}after</div>`)
+    }
+    finally {
+      session.dispose()
+    }
+  }
+})
+
+test('native candidate exposes complete attributes from a multiline registered opening', () => {
+  const session = createSession({ factoryOptions: { customHtmlTags: ['tool-call'] } })
+  try {
+    session.append('<tool-call\n  name="search"\n  title="甲 >\n')
+    assert.equal(session.snapshot().length, 0)
+    session.append('乙"')
+    assert.equal(session.snapshot().length, 0)
+    session.append('>payload')
+    assert.deepEqual(session.snapshot()[0].attrs, [['name', 'search'], ['title', '甲 >\n乙']])
+    assert.equal(session.snapshot()[0].loading, true)
+    session.append('</tool-call>')
+    session.finish()
+    const [paragraph] = session.snapshot()
+    assert.equal(paragraph.type, 'paragraph')
+    const [tag] = paragraph.children
+    assert.deepEqual(tag.attrs, [['name', 'search'], ['title', '甲 >\n乙']])
+    assert.equal(tag.content, 'payload')
+    assert.equal(tag.loading, false)
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('legacy ordered lists leave the default start implicit in nodes and details HTML', () => {
+  const legacy = createSession()
+  const standard = createSession({ parseOptions: { markstream: false } })
+  try {
+    const source = '01. first\n\n---\n\n3. third\n\n'
+    for (const session of [legacy, standard])
+      session.append(source)
+    assert.equal(legacy.snapshot()[0].start, undefined)
+    assert.equal(standard.snapshot()[0].start, 1)
+    legacy.append('<details>\n<summary>List</summary>\n\n1. inside\n\n</details>')
+    legacy.finish()
+    const [first, , third, details] = legacy.snapshot()
+    assert.ok(Object.hasOwn(first, 'start'))
+    assert.equal(first.start, undefined)
+    assert.equal(third.start, 3)
+    assert.equal(details.children[1].start, undefined)
+    assert.match(details.content, /<ol>\n<li>inside<\/li>/)
+  }
+  finally {
+    legacy.dispose()
+    standard.dispose()
+  }
+})
+
+test('native candidate addresses a backpatched table cell by its flat wire index', () => {
+  const session = createSession()
+  try {
+    session.append('| title | value |\n|---|---|\n| [jump][dest] | here |\n\n')
+    assert.equal(session.snapshot()[0].rows[0].cells[0].children[0].type, 'text')
+    session.append('[dest]: /next\n\n')
+    session.finish()
+    const table = session.snapshot()[0]
+    assert.equal(table.header.cells[0].raw, 'title')
+    assert.equal(table.rows[0].cells[0].children[0].href, '/next')
+    assert.equal(table.rows[0].cells[1].raw, 'here')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('native candidate projects pending and confirmed table code at the same row', () => {
+  const session = createSession()
+  try {
+    session.append('| Key | Value |\n| --- | --- |\n| ')
+    assert.equal(session.snapshot()[0].rows[0].raw, '|')
+    session.append('x | Use `')
+    assert.deepEqual(session.snapshot()[0].rows[0].cells[1], {
+      type: 'table_cell', header: false, align: 'left', raw: 'Use `', children: [
+        { type: 'text', content: 'Use ', raw: 'Use ' },
+        { type: 'inline_code', code: '', raw: '' },
+      ],
+    })
+    session.append('cmd')
+    const pending = session.snapshot()[0].rows[0].cells[1].children
+    assert.deepEqual(pending, [
+      { type: 'text', content: 'Use ', raw: 'Use ' },
+      { type: 'inline_code', code: 'cmd', raw: 'cmd' },
+    ])
+    session.append('` |\n')
+    session.finish()
+    const rows = session.snapshot()[0].rows
+    assert.equal(rows.length, 1)
+    assert.deepEqual(rows[0].cells[1].children, [
+      { type: 'text', content: 'Use ', raw: 'Use ', center: false },
+      pending[1],
+    ])
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('legacy table projection keeps a trailing single backtick distinct from a longer run', () => {
+  const session = createSession()
+  try {
+    session.append('| A | B |\n| - | - |\n| ` | text `` |\n')
+    const [single, multiple] = session.snapshot()[0].rows[0].cells
+    assert.equal(single.raw, '`')
+    assert.deepEqual(single.children, [])
+    assert.deepEqual(multiple.children, [{ type: 'text', content: 'text ``', raw: 'text ``' }])
+    session.finish()
+    assert.deepEqual(session.snapshot()[0].rows[0].cells[0].children, [
+      { type: 'inline_code', code: '', raw: '' },
+    ])
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('native candidate projects resolved link and image metadata from typed spans', () => {
+  const session = createSession()
+  try {
+    const source = '[**label**](<https://a.test/中文> \'title\') ![*caption*](/图.png "")'
+    session.append(source + '\n\nprefix <a CLASS="label" HREF="https://example.com" TITLE="tip">link</a>')
+    session.finish()
+    const [link, , image] = session.snapshot()[0].children
+    assert.equal(link.markup, '')
+    assert.equal(link.text, '**label**')
+    assert.equal(link.raw, '[**label**](https://a.test/%E4%B8%AD%E6%96%87 "title")')
+    assert.deepEqual(link.attrs, [['href', 'https://a.test/%E4%B8%AD%E6%96%87'], ['title', 'title']])
+    assert.deepEqual(image, {
+      type: 'image',
+      src: '/%E5%9B%BE.png',
+      title: null,
+      alt: 'caption',
+      raw: '*caption*',
+      loading: false,
+    })
+    const htmlLink = session.snapshot()[1].children[1]
+    assert.equal(htmlLink.markup, 'html')
+    assert.equal(htmlLink.title, 'tip')
+    assert.equal(htmlLink.raw, '<a CLASS="label" HREF="https://example.com" TITLE="tip">link</a>')
+    assert.deepEqual(htmlLink.attrs, [['CLASS', 'label'], ['HREF', 'https://example.com'], ['TITLE', 'tip']])
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('native candidate keeps full link metadata on a line containing inline code', () => {
+  const session = createSession()
+  try {
+    session.append('- Update `code` ([#811](https://example.com/811))\n')
+    const link = session.snapshot()[0].items[0].children[0].children.find(node => node.type === 'link')
+    assert.equal(link.title, null)
+    assert.deepEqual(link.attrs, [['href', 'https://example.com/811']])
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('native candidate exposes inline and block math and accepts both feature settings', () => {
+  const enabled = createSession()
+  const disabled = createSession({ factoryOptions: { enableMath: false } })
+  try {
+    const source = 'Equation $x + 1$.\n\n\\[\ny + 2\n\\]\n'
+    for (const session of [enabled, disabled]) {
+      session.append(source)
+      session.finish()
+    }
+
+    assert.deepEqual(enabled.snapshot()[0].children[1], {
+      type: 'math_inline', content: 'x + 1', raw: '$x + 1$', markup: '$', loading: false,
+    })
+    assert.deepEqual(enabled.snapshot()[1], {
+      type: 'math_block', content: 'y + 2', raw: '\\[y + 2\\]', markup: '\\[\\]', loading: false,
+    })
+    assert.equal(disabled.snapshot()[0].children[0].content, 'Equation $x + 1$.')
+    assert.equal(disabled.snapshot().some(node => node.type === 'math_block'), false)
+  }
+  finally {
+    enabled.dispose()
+    disabled.dispose()
+  }
+})
+
+test('native candidate projects resolved footnotes after body blocks', () => {
+  const session = createSession()
+  const disabled = createSession({ parseOptions: { enableFootnotes: false } })
+  try {
+    const prefix = 'Use [^first] twice [^first].\n\n'
+    session.append(prefix)
+    assert.equal(session.snapshot()[0].children[0].type, 'text')
+    const suffix = '[^unused]: skip\n\n[^first]: A **note**.\n\nAfter definitions.'
+    session.append(suffix)
+    session.finish()
+    const [body, after, note] = session.snapshot()
+    assert.deepEqual(body.children.filter(node => node.type === 'footnote_reference'), [
+      { type: 'footnote_reference', id: 'first', raw: '[^first]' },
+      { type: 'footnote_reference', id: 'first', raw: '[^first]' },
+    ])
+    assert.equal(after.raw, 'After definitions.')
+    assert.equal(note.raw, '[^first]: A **note**.')
+    assert.deepEqual(note.children[0].children.at(-1), { type: 'footnote_anchor', id: 'first', raw: '' })
+    assert.equal(session.snapshot().length, 3)
+
+    disabled.append(prefix + suffix)
+    disabled.finish()
+    assert.equal(disabled.snapshot()[0].children[0].type, 'text')
+    assert.equal(disabled.snapshot().some(node => node.type === 'footnote'), false)
+  }
+  finally {
+    session.dispose()
+    disabled.dispose()
+  }
+})
+
+test('native candidate removes provisional math when the same source finishes as plain text', () => {
+  const session = createSession()
+  try {
+    session.append('Equation $x +')
+    const preview = session.snapshot()[0]
+    assert.equal(preview.raw, 'Equation $x +')
+    assert.equal(preview.children[1].type, 'math_inline')
+    assert.equal(preview.children[1].loading, true)
+    session.finish()
+    assert.deepEqual(session.snapshot()[0].children, [
+      { type: 'text', content: 'Equation $x +', raw: 'Equation $x +', center: false },
+    ])
+    assert.equal(preview.children[1].loading, true)
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('native candidate tracks image preview loading while its destination arrives', () => {
+  const session = createSession()
+  try {
+    session.append('![caption $X[v,d]$](')
+    assert.deepEqual(session.snapshot()[0].children[0], {
+      type: 'image', src: '', alt: 'caption $X[v,d]$', title: null,
+      raw: 'caption $X[v,d]$', loading: true,
+    })
+    session.append('https://example.com/image.png')
+    assert.equal(session.snapshot()[0].children[0].src, 'https://example.com/image.png')
+    assert.equal(session.snapshot()[0].children[0].loading, true)
+    session.append(')')
+    session.finish()
+    assert.equal(session.snapshot()[0].children[0].loading, false)
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('native candidate exposes Markstream containers and supports explicit opt-out', () => {
+  const enabled = createSession()
+  const disabled = createSession({ parseOptions: { markstream: false } })
+  try {
+    const head = '::: viewcode:live args {value:hello}\n'
+    enabled.append(head + 'body')
+    const vmr = enabled.snapshot()[0]
+    assert.equal(vmr.type, 'vmr_container')
+    assert.equal(vmr.name, 'viewcode:live')
+    assert.deepEqual(vmr.attrs, { args: 'args', value: 'hello' })
+    assert.equal(vmr.loading, true)
+    assert.equal(vmr.children[0].raw, 'body')
+    enabled.append('\n:::')
+    assert.equal(enabled.snapshot()[0].loading, false)
+
+    disabled.append(head + 'body\n:::')
+    disabled.finish()
+    assert.equal(disabled.snapshot()[0].type, 'paragraph')
+  }
+  finally {
+    enabled.dispose()
+    disabled.dispose()
+  }
+})
+
+test('native candidate shows held fence delimiters through legacy loading and source metadata', () => {
+  const session = createSession({ parseOptions: { includeSourceMap: true } })
+  try {
+    session.append('~~~js\r\ncode\r\n~~')
+    const pending = session.snapshot()[0]
+    assert.equal(pending.code, 'code')
+    assert.equal(pending.loading, true)
+    assert.deepEqual(pending.sourceMap, { startLine: 0, endLine: 3 })
+    session.append('~')
+    const closed = session.snapshot()[0]
+    assert.equal(closed.code, 'code\n')
+    assert.equal(closed.loading, false)
+    assert.deepEqual(closed.sourceMap, { startLine: 0, endLine: 3 })
+    session.finish()
+    assert.equal(session.snapshot()[0].code, 'code\n')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('native candidate materializes legacy table preview from typed native fields', () => {
+  const session = createSession({ parseOptions: { includeSourceMap: true } })
+  try {
+    session.append('| A | B |\n| --- | ')
+    assert.equal(session.snapshot()[0].type, 'table')
+    assert.equal(session.snapshot()[0].loading, true)
+    assert.deepEqual(session.snapshot()[0].sourceMap, { startLine: 0, endLine: 2 })
+    session.append('-')
+    assert.equal(session.snapshot()[0].loading, false)
+    session.append(' not a separator')
+    assert.equal(session.snapshot()[0].type, 'paragraph')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('legacy link projection keeps local file hrefs and demotes hosted file hrefs', () => {
+  const session = createSession()
+  try {
+    session.append('[local](file:///tmp/example) [hosted](file://host/tmp/example)')
+    session.finish()
+    const children = session.snapshot()[0].children
+    const links = children.filter(child => child.type === 'link')
+    assert.deepEqual(links.map(link => link.href), ['file:///tmp/example'])
+    assert.ok(children.some(child => child.content?.includes('hosted')))
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('native candidate projects Markstream inline extension payloads into legacy nodes', () => {
+  const session = createSession()
+  try {
+    session.append(String.raw`H~foo\~bar~O x^3^ ==mark *em*== ++insert *em*++`)
+    session.finish()
+    const children = session.snapshot()[0].children
+    const subscript = children.find(node => node.type === 'subscript')
+    assert.equal(subscript.children[0].content, 'foo~bar')
+    assert.equal(subscript.raw, '~foo~bar~')
+    assert.equal(children.find(node => node.type === 'superscript').raw, '^3^')
+    assert.equal(children.find(node => node.type === 'highlight').raw, '==mark em==')
+    assert.equal(children.find(node => node.type === 'insert').raw, '++insert em++')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('legacy delimiter raw uses typed content while the paragraph keeps the source spelling', () => {
+  const session = createSession()
+  try {
+    const input = '[**用 `pnpm` 安装**](https://a.test) [***x***](https://b.test)'
+    session.append(input)
+    session.finish()
+    const paragraph = session.snapshot()[0]
+    const links = paragraph.children.filter(node => node.type === 'link')
+    assert.equal(paragraph.raw, input)
+    assert.equal(links[0].text, '**用 pnpm 安装**')
+    assert.equal(links[1].text, '*x*')
+    assert.equal(links[1].children[0].children[0].type, 'strong')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('native candidate keeps a provisional table row out of the committed row list', () => {
+  const session = createSession()
+  try {
+    session.append('| A | B |\n| --- | --- |\n| one | ')
+    const preview = session.snapshot()[0]
+    assert.equal(preview.rows.length, 1)
+    assert.equal(preview.rows[0].raw, 'one|')
+    session.append('two |\n')
+    assert.equal(session.snapshot()[0].rows.length, 1)
+    assert.equal(session.snapshot()[0].rows[0].raw, 'one|two')
+    assert.equal(preview.rows[0].raw, 'one|')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('native candidate projects typed details and summary hierarchy separately from raw source', () => {
+  const session = createSession()
+  try {
+    const first = '<details open>\n<summary title="a > b">**sum**</summary>\n\n'
+    session.append(first)
+    session.append('- one\n- two\n\n```js\nconst value = 1\n```\n</details>')
+    session.append('\n')
+    session.finish()
+    const details = session.snapshot()[0]
+    assert.equal(details.tag, 'details')
+    assert.deepEqual(details.attrs, [['open', '']])
+    assert.ok(details.raw.startsWith(first))
+    assert.equal(details.children[0].tag, 'summary')
+    assert.deepEqual(details.children[0].attrs, [['title', 'a > b']])
+    assert.equal(details.children[0].children[0].type, 'strong')
+    assert.ok(details.content.includes('<ul>'))
+    assert.ok(details.content.includes('data-lang="js"'))
+    assert.ok(details.content.endsWith('</details>\n'))
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('finished details render legacy fence controls from the structured child order', () => {
+  const session = createSession({ id: 'sample / doc' })
+  try {
+    session.append('<details>\n<summary>Example</summary>\n\nA `\'quoted\'` value.\n\n')
+    session.append('> quoted\n\n- one\n- two\n\n```ts extra\nconst value = "中文"\n```\n\n')
+    session.append('```\nsecond\n```\n\n</details>\n')
+    const preview = session.snapshot()[0].content
+    assert.match(preview, /data-lang="ts" id="editor-sample-doc-21-ts"/u)
+    session.finish()
+    const [details] = session.snapshot()
+    assert.equal(details.content, preview)
+    assert.match(details.content, /<code>'quoted'<\/code>/u)
+    assert.match(details.content, /data-lang="ts" id="editor-sample-doc-21-ts"/u)
+    assert.match(details.content, /data-lang="text" id="editor-sample-doc-22-text"/u)
+    const data = details.content.match(/data-code="([^"]+)"/u)[1]
+    assert.equal(Buffer.from(data, 'base64').toString(), 'const value = "中文"\n')
+    assert.match(details.content, /class="copy-button"/u)
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('open root details keep the current fenced line in legacy raw and editor output', () => {
+  const session = createSession({ id: 'draft' })
+  try {
+    const prefix = '<details>\n<summary>Example</summary>\n\n```ts\n'
+    session.append(prefix)
+    session.append('let 名称 = 1')
+    const [draft] = session.snapshot()
+    assert.equal(draft.raw, prefix + 'let 名称 = 1')
+    assert.equal(draft.children.at(-1).code, 'let 名称 = 1')
+    assert.match(draft.content, /id="editor-draft-1-ts"/u)
+    const data = draft.content.match(/data-code="([^"]+)"/u)[1]
+    assert.equal(Buffer.from(data, 'base64').toString(), 'let 名称 = 1')
+    session.append('\n```\n\n</details>\n')
+    assert.equal(session.snapshot()[0].loading, false)
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('open details expose the quoted draft while rendering an unclosed code marker literally', () => {
+  const session = createSession({ id: 'details-quote' })
+  try {
+    const prefix = '<details>\n<summary>Example</summary>\n\n'
+    session.append(prefix)
+    session.append('> Warning: `code')
+    const [draft] = session.snapshot()
+    assert.equal(draft.raw, prefix + '> Warning: `code')
+    const [quote] = draft.children.slice(-1)
+    assert.equal(quote.type, 'blockquote')
+    assert.equal(quote.children[0].children.at(-1).type, 'inline_code')
+    assert.match(draft.content, /<blockquote>\n<p>Warning: `code<\/p>/u)
+    session.append('`')
+    assert.match(session.snapshot()[0].content, /<blockquote>\n<p>Warning: <code>code<\/code><\/p>/u)
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('open HTML wrapper includes the current child source and keeps a held summary closer in raw', () => {
+  const session = createSession()
+  const opening = '<div class="same">\nBETA\n\n<details>\n<summary>S'
+  try {
+    session.append(opening)
+    session.append('</summ')
+    const [held] = session.snapshot()
+    assert.equal(held.raw, opening + '</summ')
+    assert.equal(held.content, opening + '\n</div>')
+    assert.equal(held.children.at(-1).children[0].content, '<summary>S</summ')
+
+    const rest = 'ary>\n\nbody\n\n</details>\n\ntrailing copy:\nx1\n'
+    session.append(rest)
+    session.append('未结束')
+    const [wrapper] = session.snapshot()
+    assert.equal(wrapper.raw, opening + '</summ' + rest + '未结束')
+    assert.equal(wrapper.content, wrapper.raw + '\n</div>')
+    assert.equal(wrapper.children.at(-1).raw, 'trailing copy:\nx1\n未结束')
+    assert.equal(wrapper.loading, true)
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('legacy HTML wrapper joins held child source after its first blank line', () => {
+  const session = createSession()
+  try {
+    const prefix = '<div>\nx\n\n\ny\n\n\n<details>\n<summary>S'
+    session.append(prefix)
+    session.append('</summ')
+    const merged = '<div>\nx\n\ny\n<details>\n<summary>S'
+    const [pending] = session.snapshot()
+    assert.equal(pending.raw, merged + '</summ')
+    assert.equal(pending.content, merged + '\n</div>')
+    assert.equal(pending.children.at(-1).children[0].content, '<summary>S</summ')
+
+    session.append('ary>')
+    const [confirmed] = session.snapshot()
+    assert.equal(confirmed.raw, prefix + '</summary>')
+    assert.equal(confirmed.content, confirmed.raw + '\n</div>')
+    assert.equal(confirmed.children.at(-1).raw, '<details>\n<summary>S</summary>')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('legacy projection keeps a bare root HTML delimiter as an empty draft', () => {
+  const session = createSession({ parseOptions: { includeSourceMap: true } })
+  const code = createSession()
+  try {
+    session.append('# title\n\n  <')
+    const draft = { type: 'paragraph', raw: '', children: [], sourceMap: { startLine: 2, endLine: 3 } }
+    assert.deepEqual(session.snapshot().at(-1), draft)
+    session.append('/')
+    assert.deepEqual(session.snapshot().at(-1), draft)
+    session.append('div')
+    assert.equal(session.snapshot().length, 1)
+
+    code.append('```txt\n<')
+    assert.equal(code.snapshot().length, 1)
+    assert.equal(code.snapshot()[0].code, '<')
+  }
+  finally {
+    session.dispose()
+    code.dispose()
+  }
+})
+
+test('legacy projection keeps bare table, heading and code markers at the root', () => {
+  const cases = [
+    ['| ', { type: 'paragraph', children: [], raw: '|' }, 'Column', 'paragraph', '| Column'],
+    ['## ', { type: 'heading', level: 2, text: '', children: [], raw: '' }, 'Title', 'heading', 'Title'],
+    ['``', { type: 'paragraph', children: [{ type: 'text', content: '``', raw: '``' }], raw: '``' }, '`ts', 'code_block', ''],
+  ]
+  for (const [marker, expected, tail, type, raw] of cases) {
+    const session = createSession({ parseOptions: { includeSourceMap: true } })
+    try {
+      session.append('# Start\n\n' + marker)
+      assert.deepEqual(session.snapshot()[1], { ...expected, sourceMap: { startLine: 2, endLine: 3 } })
+      session.append(tail)
+      assert.equal(session.snapshot().length, 2)
+      assert.equal(session.snapshot()[1].type, type)
+      assert.equal(session.snapshot()[1].raw, raw)
+    }
+    finally {
+      session.dispose()
+    }
+  }
+})
+
+test('legacy list preview projects two actual markers until a thematic break is confirmed', () => {
+  const session = createSession()
+  try {
+    session.append('* One\n* Two\n')
+    session.append('* *')
+    const [list] = session.snapshot()
+    assert.equal(list.raw, 'One\nTwo\n')
+    assert.deepEqual(list.items.at(-1), {
+      type: 'list_item', raw: '', children: [{
+        type: 'list', ordered: false, start: undefined, raw: '',
+        items: [{ type: 'list_item', children: [], raw: '' }],
+      }],
+    })
+    session.append(' *\n')
+    const [closed, thematic] = session.snapshot()
+    assert.equal(closed.items.length, 2)
+    assert.equal(thematic.type, 'thematic_break')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('native candidate retains typed custom tag children alongside the source payload', () => {
+  const session = createSession({ parseOptions: { customHtmlTags: ['widget'] } })
+  try {
+    session.append('prefix <widget title="a > b">**value**</widget> tail\n\n<widget>\n**second**\n</widget>\n')
+    session.finish()
+
+    const [paragraph, block] = session.snapshot()
+    const inline = paragraph.children.find(child => child.type === 'widget')
+    assert.deepEqual(inline.attrs, [['title', 'a > b']])
+    assert.equal(inline.content, '**value**')
+    assert.equal(inline.children[0].type, 'strong')
+    assert.equal(block.content, '**second**')
+    assert.equal(block.raw, '<widget>\n**second**\n</widget>')
+    assert.equal(block.children[0].type, 'strong')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('legacy custom block projection renders a same-line open payload on its own line', () => {
+  const session = createSession({ parseOptions: { customHtmlTags: ['thinking'] } })
+  try {
+    session.append('<thinking>  text')
+    assert.equal(session.snapshot()[0].content, 'text')
+    assert.equal(session.snapshot()[0].raw, '<thinking>\ntext')
+    assert.equal(session.snapshot()[0].loading, true)
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('a split colon closer keeps the next HTML block outside its nested admonition', () => {
+  const session = createSession()
+  try {
+    for (const character of '<details>\n::: note\n:::\n<!-- outside note -->\n</details>\n')
+      session.append(character)
+    session.finish()
+    const [details] = session.snapshot()
+    assert.deepEqual(details.children.map(node => node.type), ['admonition', 'html_block'])
+    assert.deepEqual(details.children[0].children, [])
+    assert.match(details.children[1].raw, /<!-- outside note -->/)
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('native candidate projects the admonition title and actual child blocks', () => {
+  const session = createSession()
+  try {
+    session.append('::: note Headline\n')
+    session.append('**bold**\n:::\n')
+    session.finish()
+    const [note] = session.snapshot()
+    assert.equal(note.type, 'admonition')
+    assert.equal(note.kind, 'note')
+    assert.equal(note.title, 'Headline')
+    assert.equal(note.raw, ':::note Headline\n**bold**\n:::')
+    assert.equal(note.children[0].children[0].type, 'strong')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('legacy paragraph raw follows a typed preview that holds an unfinished HTML tag', () => {
+  const session = createSession()
+  try {
+    session.append('see <fo')
+    const paragraph = session.snapshot()[0]
+    assert.equal(paragraph.raw, 'see')
+    assert.equal(paragraph.children[0].content, 'see')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('legacy closed same-line custom content keeps its inline view after streaming', () => {
+  const session = createSession({ parseOptions: { customHtmlTags: ['widget'] } })
+  try {
+    session.append('<widget title="quote > works">')
+    session.append('**value**</widget>')
+    session.finish()
+    const paragraph = session.snapshot()[0]
+    assert.equal(paragraph.type, 'paragraph')
+    assert.equal(paragraph.raw, '<widget title="quote > works">**value**</widget>')
+    assert.deepEqual(paragraph.children[0].attrs, [['title', 'quote > works']])
+    assert.equal(paragraph.children[0].children[0].type, 'strong')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('legacy custom closure keeps the preserved same-line suffix next to the typed inline node', () => {
+  const session = createSession({ parseOptions: { customHtmlTags: ['widget'] } })
+  try {
+    const source = '<widget>{"text":"literal </widget> in json"}</widget>'
+    session.append(source)
+    session.finish()
+    const [paragraph] = session.snapshot()
+    assert.equal(paragraph.raw, source)
+    assert.equal(paragraph.children[0].content, '{"text":"literal ')
+    assert.ok(paragraph.children[1].content.startsWith(' in json'))
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('legacy strict strong projection omits center on a typed literal fallback', () => {
+  const session = createSession({ parseOptions: { requireClosingStrong: true } })
+  try {
+    session.append('prefix **soft')
+    assert.deepEqual(session.snapshot()[0].children, [{
+      type: 'text', content: 'prefix **soft', raw: 'prefix **soft',
+    }])
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('native HTML content preview retains the held closing prefix only in raw', () => {
+  const session = createSession()
+  try {
+    session.append('<div data-kind="box">HTML 内容</d')
+    const [block] = session.snapshot()
+    assert.equal(block.raw, '<div data-kind="box">HTML 内容</d')
+    assert.equal(block.content, '<div data-kind="box">HTML 内容\n</div>')
+    assert.equal(block.loading, true)
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('native external closer updates the inline raw without extending its paragraph source', () => {
+  const session = createSession({ parseOptions: { customHtmlTags: ['widget'] } })
+  try {
+    session.append('- prefix <widget>{"a":"b"}\n\n')
+    session.append('</widget>')
+    session.finish()
+    const [list] = session.snapshot()
+    const [paragraph] = list.items[0].children
+    const widget = paragraph.children.find(node => node.type === 'widget')
+    assert.equal(widget.content, '{"a":"b"}')
+    assert.ok(widget.raw.endsWith('</widget>'))
+    assert.equal(paragraph.raw, 'prefix <widget>{"a":"b"}')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('locally closed paragraph keeps explicit math preview until the session ends', () => {
+  const session = createSession()
+  try {
+    session.append('Equation $x +')
+    session.append('\n\nNext')
+    const [paragraph, following] = session.snapshot()
+    assert.equal(paragraph.raw, 'Equation $x +')
+    assert.equal(paragraph.children[1].type, 'math_inline')
+    assert.equal(paragraph.children[1].loading, true)
+    assert.equal(following.raw, 'Next')
+    session.finish()
+    assert.equal(session.snapshot()[0].raw, 'Equation $x +')
+    assert.deepEqual(session.snapshot()[0].children, [
+      { type: 'text', content: 'Equation $x +', raw: 'Equation $x +', center: false },
+    ])
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('legacy inline math previews retain the actual opening whitespace', () => {
+  for (const [source, content, raw, markup] of [
+    ['Equation $$ x_1 + 2', ' x_1 + 2', '$$ x_1 + 2$$', '$$'],
+    ['Equation $\tx_1 + 2', '\\tx_1 + 2', '$\tx_1 + 2$', '$'],
+    ['Equation \\( x_1 + 2', ' x_1 + 2', '\\( x_1 + 2\\)', '\\(\\)'],
+  ]) {
+    const session = createSession()
+    try {
+      session.append(source + '  ')
+      session.append('\n\nNext')
+      const [paragraph] = session.snapshot()
+      assert.equal(paragraph.raw, source)
+      assert.deepEqual(paragraph.children[1], {
+        type: 'math_inline', content, raw, markup, loading: true,
+      })
+      session.finish()
+      assert.equal(session.snapshot()[0].raw, source)
+      assert.equal(session.snapshot()[0].children.some(node => node.type === 'math_inline'), false)
+    }
+    finally {
+      session.dispose()
+    }
+  }
+})
+
+test('native provisional fence uses the existing code block output', () => {
+  const session = createSession()
+  try {
+    session.append('~~~dif')
+    assert.deepEqual(session.snapshot(), [{
+      type: 'code_block', language: 'dif', code: '', raw: '', diff: false, loading: true,
+    }])
+    session.append('f\n+line')
+    const [block] = session.snapshot()
+    assert.equal(block.diff, true)
+    assert.equal(block.updatedCode, 'line')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('open fenced code displays held indentation from the current line', () => {
+  const session = createSession({ parseOptions: { includeSourceMap: true } })
+  const indented = createSession()
+  try {
+    session.append('```ts\nfirst\n')
+    session.append('   ')
+    const [draft] = session.snapshot()
+    assert.equal(draft.code, 'first\n   ')
+    assert.equal(draft.raw, 'first\n   ')
+    assert.equal(draft.loading, true)
+    assert.deepEqual(draft.sourceMap, { startLine: 0, endLine: 3 })
+
+    session.append('`')
+    assert.equal(session.snapshot()[0].loading, true)
+    session.append('``')
+    assert.equal(session.snapshot()[0].loading, false)
+    assert.equal(session.snapshot()[0].code, 'first\n')
+
+    indented.append('  ```ts\r\n    first\r\n')
+    indented.append('\t')
+    assert.equal(indented.snapshot()[0].code, '  first\n  ')
+    indented.append('body')
+    assert.equal(indented.snapshot()[0].code, '  first\n  body')
+  }
+  finally {
+    session.dispose()
+    indented.dispose()
+  }
+})
+
+test('literal unmatched multi-backticks keep their text and legacy metadata', () => {
+  const body = ' pauses at unclosed ``` fences and each fence stays atomic.'
+  const legacy = createSession()
+  const standard = createSession({ parseOptions: { markstream: false } })
+  try {
+    for (const session of [legacy, standard]) {
+      session.append('The **streaming code-fence atomicity**' + body)
+      session.finish()
+    }
+    assert.deepEqual(legacy.snapshot()[0].children[2], { type: 'text', content: body, raw: body })
+    assert.deepEqual(standard.snapshot()[0].children[2], {
+      type: 'text', content: body, raw: body, center: false,
+    })
+  }
+  finally {
+    legacy.dispose()
+    standard.dispose()
+  }
+
+  const matched = createSession()
+  try {
+    matched.append('Show ``` the marker ``` here')
+    matched.finish()
+    assert.deepEqual(matched.snapshot()[0].children, [
+      { type: 'text', content: 'Show ', raw: 'Show ', center: false },
+      { type: 'inline_code', code: 'the marker', raw: 'the marker' },
+      { type: 'text', content: ' here', raw: ' here', center: false },
+    ])
+  }
+  finally {
+    matched.dispose()
+  }
+})
+
+test('legacy final view uses only contiguous matched escaped backticks as displayed code', () => {
+  const source = '转义：\\*literal\\* \\[not link\\] \\$not math\\$ \\`not code\\`。'
+  const legacy = createSession()
+  const standard = createSession({ parseOptions: { markstream: false } })
+  const controls = createSession()
+  try {
+    for (const session of [legacy, standard]) {
+      session.append(source.slice(0, -2))
+      session.append(source.slice(-2))
+      session.finish()
+    }
+    assert.deepEqual(legacy.snapshot(), [{
+      type: 'paragraph', raw: source,
+      children: [
+        { type: 'text', content: '转义：*literal* [not link] $not math$ ', raw: '转义：*literal* [not link] $not math$ ' },
+        { type: 'inline_code', code: 'not code', raw: 'not code' },
+        { type: 'text', content: '。', raw: '。', center: false },
+      ],
+    }])
+    assert.equal(standard.snapshot()[0].children[0].content, '转义：*literal* [not link] $not math$ `not code`。')
+
+    controls.append([
+      'say \\` x \\` and \\`a \\*b\\* &amp;\\`',
+      'say \\`unclosed',
+      'say \\`\\`adjacent\\`\\`',
+      'say \\`a [b](https://example.org)\\`',
+      'say `confirmed`',
+    ].join('\n\n'))
+    controls.finish()
+    const code = node => node.children.filter(child => child.type === 'inline_code').map(child => child.code)
+    assert.deepEqual(controls.snapshot().map(code), [[' x ', 'a *b* &'], [], [], [], ['confirmed']])
+    assert.equal(controls.snapshot()[3].children.find(child => child.type === 'link').markup, '')
+  }
+  finally {
+    legacy.dispose()
+    standard.dispose()
+    controls.dispose()
+  }
+})
+
+test('legacy formula labels separate confirmed code and math from the URL', () => {
+  const text = 'Prefix **strong [label `code` and $x_1$](https://example.com/a_(b)) suffix**'
+  const legacy = createSession()
+  const native = createSession({ parseOptions: { markstream: false } })
+  try {
+    legacy.append(text)
+    const open = legacy.snapshot()[0].children[1]
+    assert.equal(open.type, 'strong')
+    assert.equal(open.raw, '**strong [label `code` and x_1]() suffix**')
+    assert.deepEqual(open.children.map(child => child.type), [
+      'text', 'inline_code', 'text', 'math_inline', 'text', 'link', 'text',
+    ])
+    assert.equal(open.children[3].content, 'x_1')
+    assert.equal(open.children[5].href, 'https://example.com/a_(b)')
+    assert.equal(open.children[5].markup, 'linkify')
+    legacy.finish()
+    assert.deepEqual(legacy.snapshot()[0].children[1], open)
+
+    native.append(text)
+    native.finish()
+    const link = native.snapshot()[0].children[1].children[1]
+    assert.equal(link.type, 'link')
+    assert.equal(link.markup, '')
+    assert.equal(link.children.at(-1).type, 'math_inline')
+  }
+  finally {
+    legacy.dispose()
+    native.dispose()
+  }
+})
+
+test('legacy escaped code stays typed after its paragraph closes', () => {
+  const session = createSession()
+  try {
+    session.append('Text \\`sample\\`.\n\n# Next')
+    const code = session.snapshot()[0].children[1]
+    assert.deepEqual(code, { type: 'inline_code', code: 'sample', raw: 'sample' })
+    session.finish()
+    assert.deepEqual(session.snapshot()[0].children[1], code)
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('legacy pending text keeps the escape and shows evidenced strikethrough', () => {
+  const session = createSession()
+  try {
+    session.append('prefix \\')
+    assert.deepEqual(session.snapshot()[0].children, [
+      { type: 'text', content: 'prefix ', raw: 'prefix \\', center: false },
+    ])
+    session.append('* text ~~removed')
+    const [prefix, strike] = session.snapshot()[0].children
+    assert.equal(prefix.content, 'prefix * text ')
+    assert.equal(strike.type, 'strikethrough')
+    assert.equal(strike.children[0].content, 'removed')
+    session.finish()
+    assert.equal(session.snapshot()[0].children[0].content, 'prefix * text ~~removed')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('legacy open strong math labels separate the formula from an incomplete destination', () => {
+  const session = createSession({ parseOptions: { requireClosingStrong: true } })
+  try {
+    session.append('Prefix **strong [label `code` and $x$](htt')
+    const [prefix, before, math, tail] = session.snapshot()[0].children
+    assert.equal(prefix.content, 'Prefix ')
+    assert.equal(before.raw, '**strong [label `code` and **')
+    assert.equal(math.children[0].type, 'math_inline')
+    assert.equal(tail.content, '](htt')
+    session.append('ps://example.com/path) suffix**')
+    const strong = session.snapshot()[0].children[1]
+    assert.equal(strong.type, 'strong')
+    assert.equal(strong.children.filter(child => child.type === 'math_inline').length, 1)
+    assert.equal(strong.children.find(child => child.type === 'link').href, 'https://example.com/path')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('legacy draft links retain the code and escape evidence ahead of the URL', () => {
+  const session = createSession({ parseOptions: { requireClosingStrong: true } })
+  try {
+    session.append('Prefix **[label \\*literal\\* and `code`](https://example.com/path')
+    const [prefix, code, suffix, link] = session.snapshot()[0].children
+    assert.equal(prefix.content, 'Prefix **[label *literal* and ')
+    assert.deepEqual(code, { type: 'inline_code', code: 'code', raw: 'code' })
+    assert.equal(suffix.content, '](')
+    assert.equal(link.href, 'https://example.com/path')
+    assert.equal(link.text, link.href)
+    assert.equal(link.markup, 'linkify')
+    assert.equal(link.loading, true)
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('legacy unmatched multi-backticks fold later code while retaining the paragraph source', () => {
+  const legacy = createSession()
+  const standard = createSession({ parseOptions: { markstream: false } })
+  const source = '``prefix &amp; ` one `\nnext ```two``` tail'
+  const expected = [{
+    type: 'text', content: '``prefix & one`next two``` tail', raw: '``prefix & one`next two``` tail',
+  }]
+  try {
+    for (const session of [legacy, standard]) {
+      session.append('``prefix &amp; ` one `\n')
+      session.append('next ```two``` tail')
+    }
+    assert.deepEqual(legacy.snapshot()[0].children, expected)
+    legacy.finish()
+    standard.finish()
+    assert.deepEqual(legacy.snapshot()[0], { type: 'paragraph', raw: source, children: expected })
+    assert.deepEqual(
+      standard.snapshot()[0].children.filter(node => node.type === 'inline_code').map(node => node.code),
+      ['one', 'two'],
+    )
+  }
+  finally {
+    legacy.dispose()
+    standard.dispose()
+  }
+})
+
+test('legacy multiline preview holds the trailing parenthesis before a typed inline', () => {
+  const session = createSession()
+  const sameLine = createSession()
+  const escaped = createSession()
+  try {
+    session.append('Intro\n')
+    session.append('word (`one`) tail\n\n')
+    const [prefix] = session.snapshot()[0].children
+    assert.deepEqual(prefix, {
+      type: 'text', content: 'Intro\nword ', raw: 'Intro\nword (', center: false,
+    })
+    session.finish()
+    assert.equal(session.snapshot()[0].children[0].content, 'Intro\nword (')
+
+    sameLine.append('Intro (`one`) tail')
+    assert.equal(sameLine.snapshot()[0].children[0].content, 'Intro (')
+    escaped.append('Intro\n\\(`one`) tail')
+    assert.equal(escaped.snapshot()[0].children[0].content, 'Intro\n(')
+  }
+  finally {
+    session.dispose()
+    sameLine.dispose()
+    escaped.dispose()
+  }
+})
+
+test('legacy inline draft styles a single trailing backtick after actual text', () => {
+  const session = createSession()
+  const afterCode = createSession()
+  const literal = createSession()
+  const escaped = createSession()
+  try {
+    session.append('Core from `')
+    assert.deepEqual(session.snapshot()[0], {
+      type: 'paragraph', raw: 'Core from `', children: [
+        { type: 'text', content: 'Core from ', raw: 'Core from ' },
+        { type: 'inline_code', code: '', raw: '' },
+      ],
+    })
+    session.append('rust`')
+    assert.equal(session.snapshot()[0].children[1].code, 'rust')
+
+    literal.append('Core from `')
+    literal.finish()
+    assert.equal(literal.snapshot()[0].children[0].content, 'Core from `')
+    assert.equal(literal.snapshot()[0].children.length, 1)
+
+    escaped.append('Core from \\`')
+    assert.equal(escaped.snapshot()[0].children[0].content, 'Core from `')
+    assert.equal(escaped.snapshot()[0].children.length, 1)
+
+    afterCode.append("Try `old` and npm's `")
+    assert.deepEqual(afterCode.snapshot()[0].children.slice(-2), [
+      { type: 'text', content: ' and npm’s ', raw: ' and npm’s ' },
+      { type: 'inline_code', code: '', raw: '' },
+    ])
+  }
+  finally {
+    session.dispose()
+    afterCode.dispose()
+    literal.dispose()
+    escaped.dispose()
+  }
+})
+
+test('an open legacy table code span styles completed quote pairs until code is confirmed', () => {
+  const session = createSession()
+  try {
+    session.append("| Name | Type |\n| --- | --- |\n| Example | `Partial<'node' \\| 'x")
+    const draft = session.snapshot()[0].rows[0].cells[1].children[0]
+    assert.deepEqual(draft, { type: 'inline_code', code: "Partial<‘node’ | 'x", raw: "Partial<‘node’ | 'x" })
+    session.append("'>` |\n")
+    const confirmed = session.snapshot()[0].rows[0].cells[1].children[0]
+    assert.deepEqual(confirmed, { type: 'inline_code', code: "Partial<'node' | 'x'>", raw: "Partial<'node' | 'x'>" })
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('legacy draft inline code applies text typography until its actual closer', () => {
+  for (const [body, display] of [
+    ['$...', '$…'],
+    ['What?... Do!...', 'What?.. Do!..'],
+    ["setCustomComponents('chat', mapping)", 'setCustomComponents(‘chat’, mapping)'],
+    ["\\'literal\\' and \\...", "\\'literal\\' and \\..."],
+  ]) {
+    const session = createSession()
+    const prefix = 'Use `' + body
+    try {
+      session.append(prefix)
+      assert.equal(session.snapshot()[0].raw, prefix)
+      assert.deepEqual(session.snapshot()[0].children[1], {
+        type: 'inline_code', code: display, raw: display,
+      })
+      session.append('`')
+      session.finish()
+      const [paragraph] = session.snapshot()
+      assert.equal(paragraph.raw, prefix + '`')
+      assert.deepEqual(paragraph.children[1], { type: 'inline_code', code: body, raw: body })
+    }
+    finally {
+      session.dispose()
+    }
+  }
+})
+
+test('a source-backed pending strong span preserves the legacy preceding text shape', () => {
+  const session = createSession()
+  try {
+    session.append('- 每个稳定版都是一次 **Markstream Family Re')
+    let paragraph = session.snapshot()[0].items[0].children[0]
+    assert.equal(paragraph.raw, '每个稳定版都是一次 **Markstream Family Re')
+    assert.deepEqual(paragraph.children[0], {
+      type: 'text', content: '每个稳定版都是一次 ', raw: '每个稳定版都是一次 ',
+    })
+    assert.equal(paragraph.children[1].type, 'strong')
+    session.append('**')
+    paragraph = session.snapshot()[0].items[0].children[0]
+    assert.equal(paragraph.children[0].center, false)
+    assert.equal(paragraph.children[1].type, 'strong')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('legacy draft code keeps a recognized bare domain outside the provisional code span', () => {
+  const session = createSession()
+  const denied = createSession({ parseOptions: { validateLink: () => false } })
+  const unknown = createSession()
+  try {
+    session.append('Try `metrics')
+    session.append('.to')
+    assert.deepEqual(session.snapshot()[0].children.slice(1), [
+      { type: 'inline_code', code: '', raw: '' },
+      {
+        type: 'link', href: 'http://metrics.to', title: null, text: 'metrics.to', markup: 'linkify',
+        children: [{ type: 'text', content: 'metrics.to', raw: 'metrics.to', center: false }],
+        loading: false, raw: '[metrics.to](http://metrics.to)', attrs: [['href', 'http://metrics.to']],
+      },
+    ])
+    session.append('`')
+    assert.deepEqual(session.snapshot()[0].children.slice(1), [{ type: 'inline_code', code: 'metrics.to', raw: 'metrics.to' }])
+
+    denied.append('Try `metrics.to')
+    assert.deepEqual(denied.snapshot()[0].children.at(-1), { type: 'text', content: 'metrics.to', raw: 'metrics.to' })
+    unknown.append('Try `metrics.test')
+    assert.equal(unknown.snapshot()[0].children.at(-1).code, 'metrics.test')
+  }
+  finally {
+    session.dispose()
+    denied.dispose()
+    unknown.dispose()
+  }
+})
+
+test('legacy preview waits for a multiline component attribute before showing the literal tag', () => {
+  const session = createSession()
+  const comparison = createSession()
+  try {
+    const prefix = '<Widget :items="[\n  { text: \'typed\''
+    session.append(prefix)
+    assert.deepEqual(session.snapshot(), [])
+    session.append(' }\n]" />\n')
+    const raw = prefix + ' }\n]" />'
+    assert.deepEqual(session.snapshot(), [
+      { type: 'paragraph', raw, children: [{ type: 'text', content: raw, raw }] },
+    ])
+
+    comparison.append('<Widget :items="[\n  { text: \'a > b\'')
+    assert.equal(comparison.snapshot().length, 1)
+  }
+  finally {
+    session.dispose()
+    comparison.dispose()
+  }
+})
+
+test('complete unregistered self-closing components keep their literal text boundary', () => {
+  const tag = '<PrereqChips :items="[\n  { text: \'Vue Quick Start\', link: \'/guide/quick-start\' },\n]" />'
+  const legacy = createSession()
+  const standard = createSession({ parseOptions: { markstream: false } })
+  const escaped = createSession()
+  try {
+    for (const session of [legacy, standard]) {
+      session.append('See ' + tag.slice(0, -2))
+      session.append('/> here')
+      session.finish()
+    }
+    assert.deepEqual(legacy.snapshot(), [{
+      type: 'paragraph',
+      raw: 'See ' + tag + ' here',
+      children: [
+        { type: 'text', content: 'See ', raw: 'See ', center: false },
+        { type: 'text', content: tag + ' here', raw: tag + ' here' },
+      ],
+    }])
+    assert.equal(standard.snapshot()[0].children[1].type, 'html_inline')
+
+    escaped.append('\\<PrereqChips />\n\nvalue < tag / >')
+    escaped.finish()
+    assert.deepEqual(escaped.snapshot().map(node => node.children[0]), [
+      { type: 'text', content: '<PrereqChips />', raw: '<PrereqChips />', center: false },
+      { type: 'text', content: 'value < tag / >', raw: 'value < tag / >', center: false },
+    ])
+  }
+  finally {
+    legacy.dispose()
+    standard.dispose()
+    escaped.dispose()
+  }
+})
+
+test('final literal asterisks in prose retain their spelling and legacy metadata', () => {
+  const source = '- use rounded-* ([change](https://example.org/c))\n\n'
+    + '**bold***\n\nplain \\* and &#42;'
+  const legacy = createSession()
+  const standard = createSession({ parseOptions: { markstream: false } })
+  try {
+    for (const session of [legacy, standard]) {
+      session.append(source)
+      session.finish()
+    }
+    const [list, bold, escaped] = legacy.snapshot()
+    assert.equal(list.items[0].raw, 'use rounded-* ([change](https://example.org/c))')
+    assert.deepEqual(list.items[0].children[0].children[0], {
+      type: 'text', content: 'use rounded-* (', raw: 'use rounded-* (',
+    })
+    assert.equal(bold.children[0].type, 'strong')
+    assert.deepEqual(bold.children[1], { type: 'text', content: '*', raw: '*', center: false })
+    assert.deepEqual(escaped.children[0], {
+      type: 'text', content: 'plain * and *', raw: 'plain * and *', center: false,
+    })
+    assert.equal(standard.snapshot()[0].items[0].children[0].children[0].center, false)
+  }
+  finally {
+    legacy.dispose()
+    standard.dispose()
+  }
+})
+
+test('only source-validated uppercase Markdown filenames begin legacy literal text nodes', () => {
+  const session = createSession()
+  const negative = createSession()
+  const standard = createSession({ parseOptions: { markstream: false } })
+  const row = 'Read (DESIGN.md), README.md first ([change](https://example.org/c))'
+  try {
+    for (const candidate of [session, standard]) {
+      candidate.append('- ' + row + '\n\nFOO-42.MD')
+      candidate.finish()
+    }
+    const [list, standalone] = session.snapshot()
+    const paragraph = list.items[0].children[0]
+    assert.equal(paragraph.raw, row)
+    assert.deepEqual(paragraph.children.slice(0, 3), [
+      { type: 'text', content: 'Read (', raw: 'Read (', center: false },
+      { type: 'text', content: 'DESIGN.md), ', raw: 'DESIGN.md), ' },
+      { type: 'text', content: 'README.md first (', raw: 'README.md first (' },
+    ])
+    assert.equal(paragraph.children[3].href, 'https://example.org/c')
+    assert.deepEqual(standalone.children, [{ type: 'text', content: 'FOO-42.MD', raw: 'FOO-42.MD' }])
+    assert.equal(standard.snapshot()[0].items[0].children[0].children[0].content,
+      'Read (DESIGN.md), README.md first (')
+
+    negative.append('Use src/DESIGN.md and README\\.md, then `DESIGN.md` or [README.md](/docs)')
+    negative.finish()
+    assert.deepEqual(negative.snapshot()[0].children.map(node => node.type), ['text', 'inline_code', 'text', 'link'])
+    assert.equal(negative.snapshot()[0].children[0].content, 'Use src/DESIGN.md and README.md, then ')
+    assert.equal(negative.snapshot()[0].children[3].href, '/docs')
+    assert.equal(negative.snapshot()[0].children[3].children[0].center, false)
+  }
+  finally {
+    session.dispose()
+    negative.dispose()
+    standard.dispose()
+  }
+})
+
+test('legacy preview waits for prose after an uppercase Markdown filename', () => {
+  const plain = createSession()
+  const parsed = createSession()
+  try {
+    plain.append('Read DESIGN.md')
+    assert.deepEqual(plain.snapshot()[0].children, [
+      { type: 'text', content: 'Read DESIGN.md', raw: 'Read DESIGN.md', center: false },
+    ])
+    plain.append(' — ')
+    assert.equal(plain.snapshot()[0].children.length, 1)
+    plain.append('rebuild')
+    assert.deepEqual(plain.snapshot()[0].children, [
+      { type: 'text', content: 'Read ', raw: 'Read ', center: false },
+      { type: 'text', content: 'DESIGN.md — rebuild', raw: 'DESIGN.md — rebuild' },
+    ])
+
+    const source = 'Read README.md first ([change](https://example.org/c))'
+    parsed.append(source.slice(0, -2))
+    assert.deepEqual(parsed.snapshot()[0].children[1], {
+      type: 'text', content: 'README.md first ', raw: 'README.md first (',
+    })
+    assert.equal(parsed.snapshot()[0].children[2].loading, true)
+    parsed.append('))')
+    assert.equal(parsed.snapshot()[0].raw, source)
+    assert.deepEqual(parsed.snapshot()[0].children.slice(0, 2), [
+      { type: 'text', content: 'Read ', raw: 'Read ', center: false },
+      { type: 'text', content: 'README.md first ', raw: 'README.md first (' },
+    ])
+  }
+  finally {
+    plain.dispose()
+    parsed.dispose()
+  }
+
+  for (const source of [
+    'Read src/DESIGN.md to rebuild',
+    'Read DESIGN\\.md to rebuild',
+    'Read DESIGN.md?key=1 to rebuild',
+    'Read DESIGN.md:8080 to rebuild',
+    'Read DESIGN.md.',
+  ]) {
+    const session = createSession()
+    try {
+      session.append(source)
+      assert.equal(session.snapshot()[0].children.length, 1, source)
+    }
+    finally {
+      session.dispose()
+    }
+  }
+})
+
+test('final legacy inline pre and code use typed tail children and preserve paragraph source', () => {
+  const body = ' elements; ref ([change](https://example.org/c))'
+  const source = 'plain <pre><code>' + body
+  const legacy = createSession()
+  const standard = createSession({ parseOptions: { markstream: false } })
+  try {
+    for (const session of [legacy, standard]) {
+      session.append('plain <pre><co')
+      session.append('de>' + body + '\n\nkeep <pre><code>x</code></pre> tail')
+      session.finish()
+    }
+    const [unclosed, closed] = legacy.snapshot()
+    assert.equal(unclosed.raw, source)
+    assert.equal(unclosed.children.length, 2)
+    const pre = unclosed.children[1]
+    assert.equal(pre.raw, '<pre><code>' + body + '</pre>')
+    assert.equal(pre.loading, true)
+    assert.equal(pre.autoClosed, true)
+    const [code] = pre.children
+    assert.equal(code.raw, '<code>' + body + '</code>')
+    assert.equal(code.loading, true)
+    assert.equal(code.autoClosed, true)
+    assert.equal(code.children[1].href, 'https://example.org/c')
+    assert.equal(closed.children[1].loading, false)
+    assert.equal(closed.children[2].content, ' tail')
+    assert.equal(standard.snapshot()[0].children[1].raw, '<pre>')
+  }
+  finally {
+    legacy.dispose()
+    standard.dispose()
+  }
+})
+
+test('legacy simple link metadata remains compact only with same-line inline content after it', () => {
+  const session = createSession()
+  try {
+    session.append('## [label](https://a.test "title") tail\n\n[label](https://b.test)\nnext')
+    session.finish()
+    const [heading, paragraph] = session.snapshot()
+    assert.deepEqual(heading.children[0], {
+      type: 'link', href: 'https://a.test', title: 'title', text: 'label',
+      children: [{ type: 'text', content: 'label', raw: 'label' }],
+      raw: '[label](https://a.test)', loading: false, markup: '',
+    })
+    assert.deepEqual(paragraph.children[0].attrs, [['href', 'https://b.test']])
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('resolved references use the same compact metadata as direct links on the same line', () => {
+  const session = createSession()
+  try {
+    session.append('[label][id] tail\n\n[id]: https://a.test "title"')
+    session.finish()
+    assert.deepEqual(session.snapshot()[0].children, [
+      {
+        type: 'link', href: 'https://a.test', title: 'title', text: 'label',
+        children: [{ type: 'text', content: 'label', raw: 'label' }],
+        raw: '[label](https://a.test)', loading: false, markup: '',
+      },
+      { type: 'text', content: ' tail', raw: ' tail', center: false },
+    ])
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('the rejected unsafe link fallback keeps the source suffix after the first close', () => {
+  const session = createSession({ parseOptions: { validateLink: href => !/^javascript:/i.test(href) } })
+  const custom = createSession({
+    factoryOptions: { markdownItOptions: { validateLink: () => true } },
+    parseOptions: { validateLink: () => false },
+  })
+  try {
+    session.append('[安全链接][safe] 与 [拒绝链接](javascript:alert((1))) tail (z)\n\n[safe]: https://a.test')
+    session.finish()
+    assert.deepEqual(session.snapshot()[0].children, [
+      {
+        type: 'link', href: 'https://a.test', title: '', text: '安全链接',
+        children: [{ type: 'text', content: '安全链接', raw: '安全链接' }],
+        raw: '[安全链接](https://a.test)', loading: false, markup: '',
+      },
+      { type: 'text', content: ' 与 拒绝链接)) tail (z)', raw: ' 与 拒绝链接)) tail (z)' },
+    ])
+    custom.append('[label](javascript:alert(1)) tail')
+    custom.finish()
+    assert.equal(custom.snapshot()[0].children[0].content, 'label tail')
+  }
+  finally {
+    session.dispose()
+    custom.dispose()
+  }
+})
+
+test('legacy math map extends only for typed open Markstream blocks', () => {
+  const session = createSession({ parseOptions: { includeSourceMap: true } })
+  try {
+    session.append('$$\nx +\n')
+    let [block] = session.snapshot()
+    assert.equal(block.loading, true)
+    assert.deepEqual(block.sourceMap, { startLine: 0, endLine: 3 })
+    session.append('$$\n')
+    session.finish()
+    ;[block] = session.snapshot()
+    assert.equal(block.loading, false)
+    assert.deepEqual(block.sourceMap, { startLine: 0, endLine: 3 })
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('standalone link preview waits for a known destination while image links retain the typed prefix', () => {
+  const standalone = createSession()
+  const image = createSession()
+  try {
+    standalone.append('[链接](http')
+    assert.deepEqual(standalone.snapshot()[0].children[0], {
+      type: 'link', href: '', title: null, text: '链接',
+      children: [{ type: 'text', content: '链接', raw: '链接' }],
+      loading: true, markup: '',
+    })
+    standalone.append('s://example.com)')
+    assert.equal(standalone.snapshot()[0].children[0].href, 'https://example.com')
+    assert.equal(standalone.snapshot()[0].children[0].loading, false)
+
+    image.append('[![alt](https://images.example/icon.png)](https:')
+    assert.equal(image.snapshot()[0].children[0].href, 'https:')
+    assert.equal(image.snapshot()[0].children[0].loading, true)
+  }
+  finally {
+    standalone.dispose()
+    image.dispose()
+  }
+})
+
+test('link projection normalizes Unicode hostnames without changing userinfo, port or path', () => {
+  const checked = new Set()
+  const session = createSession({ parseOptions: { validateLink: href => {
+    checked.add(href)
+    return true
+  } } })
+  try {
+    session.append('[链接](https://user:pass@例子.测试:8443/路径?x=1)')
+    session.finish()
+    const href = 'https://user:pass@xn--fsqu00a.xn--0zwm56d:8443/%E8%B7%AF%E5%BE%84?x=1'
+    assert.equal(session.snapshot()[0].children[0].href, href)
+    assert.ok(checked.has(href))
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('an explicit draft link keeps the title that has arrived', () => {
+  const session = createSession()
+  try {
+    const prefix = '[label](https://example.org/p "'
+    session.append(prefix)
+    assert.equal(session.snapshot()[0].children[0].title, '')
+    session.append('标题')
+    const draft = session.snapshot()[0]
+    assert.equal(draft.raw, prefix + '标题')
+    assert.deepEqual(draft.children[0], {
+      type: 'link', href: 'https://example.org/p', title: '标题', text: 'label',
+      children: [{ type: 'text', content: 'label', raw: 'label' }],
+      loading: true, raw: '[label](https://example.org/p)', markup: '',
+    })
+    session.append('")')
+    const closed = session.snapshot()[0].children[0]
+    assert.equal(closed.loading, false)
+    assert.equal(closed.title, '标题')
+    assert.equal(closed.markup, '')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('a draft Markdown link waiting for its href preserves the legacy preceding text shape', () => {
+  const session = createSession()
+  const multiline = createSession()
+  try {
+    session.append('See [Guide](/gu')
+    assert.deepEqual(session.snapshot()[0].children, [
+      { type: 'text', content: 'See ', raw: 'See ' },
+      {
+        type: 'link', href: '', title: null, text: 'Guide',
+        children: [{ type: 'text', content: 'Guide', raw: 'Guide' }],
+        loading: true, markup: '',
+      },
+    ])
+    session.append('ide)')
+    assert.deepEqual(session.snapshot()[0].children[0], {
+      type: 'text', content: 'See ', raw: 'See ', center: false,
+    })
+    assert.equal(session.snapshot()[0].children[1].href, '/guide')
+
+    multiline.append('Overview\nSee [Guide](/gu')
+    assert.deepEqual(multiline.snapshot()[0].children[0], {
+      type: 'text', content: 'Overview\nSee ', raw: 'Overview\nSee ', center: false,
+    })
+  }
+  finally {
+    session.dispose()
+    multiline.dispose()
+  }
+})
+
+test('legacy preview holds only the evidenced parenthesis before an explicit link', () => {
+  for (const [source, content, raw] of [
+    ['Use rounded ([A](https:', 'Use rounded ', 'Use rounded '],
+    ['Use rounded-* ([A](https://example.org/d', 'Use rounded-* ', 'Use rounded-* ('],
+    ['Use rounded-* ([A](https://example.org/d))', 'Use rounded-* ', 'Use rounded-* ('],
+  ]) {
+    const session = createSession()
+    try {
+      session.append(source)
+      const [paragraph] = session.snapshot()
+      assert.equal(paragraph.raw, source)
+      assert.deepEqual(paragraph.children[0], { type: 'text', content, raw })
+      assert.equal(paragraph.children[1].href, source.endsWith('https:') ? '' : 'https://example.org/d')
+      session.finish()
+      assert.equal(session.snapshot()[0].raw, source)
+      assert.equal(session.snapshot()[0].children[0].content.startsWith(content + '('), true)
+    }
+    finally {
+      session.dispose()
+    }
+  }
+  for (const source of [
+    'Use rounded ([A](https://example.org/d))',
+    'Use rounded-\\* ([A](https://example.org/d))',
+    'Use rounded-* \\([A](https://example.org/d))',
+  ]) {
+    const session = createSession({ factoryOptions: { enableMath: false } })
+    try {
+      session.append(source)
+      assert.equal(session.snapshot()[0].children[0].content.endsWith('('), true, source)
+    }
+    finally {
+      session.dispose()
+    }
+  }
+  const rejected = createSession({ parseOptions: { validateLink: () => false } })
+  try {
+    rejected.append('Use rounded-* ([A](https://example.org/d))')
+    assert.equal(rejected.snapshot()[0].children.some(node => node.type === 'link'), false)
+    assert.equal(rejected.snapshot()[0].children[0].content, 'Use rounded-* (A)')
+  }
+  finally {
+    rejected.dispose()
+  }
+})
+
+test('legacy draft URLs preserve the evidenced code label and same-line code contexts', () => {
+  const href = 'https://example.org/docs'
+  const source = 'See [`code`](' + href
+  const codeLabel = createSession()
+  const earlierCode = createSession()
+  const denied = createSession({ parseOptions: { validateLink: () => false } })
+  const anotherLine = createSession()
+  try {
+    codeLabel.append(source)
+    assert.equal(codeLabel.snapshot()[0].raw, source)
+    assert.deepEqual(codeLabel.snapshot()[0].children, [
+      { type: 'text', content: 'See [', raw: 'See [', center: false },
+      { type: 'inline_code', code: 'code', raw: 'code' },
+      { type: 'text', content: '](', raw: '](', center: false },
+      {
+        type: 'link', href, title: null, text: href, loading: true,
+        children: [{ type: 'text', content: href, raw: href, center: false }],
+        raw: `[${href}](${href})`, attrs: [['href', href]], markup: 'linkify',
+      },
+    ])
+    earlierCode.append('See `earlier` and [docs](' + href)
+    assert.deepEqual(earlierCode.snapshot()[0].children.at(-1), {
+      type: 'link', href, title: null, text: 'docs', loading: true,
+      children: [{ type: 'text', content: 'docs', raw: 'docs' }],
+      raw: `[docs](${href})`, attrs: [['href', href]], markup: 'linkify',
+    })
+
+    for (const session of [codeLabel, earlierCode]) {
+      session.append(')')
+      const link = session.snapshot()[0].children.at(-1)
+      assert.equal(link.loading, false)
+      assert.equal(link.markup, '')
+    }
+    assert.equal(codeLabel.snapshot()[0].children.at(-1).children[0].code, 'code')
+
+    denied.append(source)
+    assert.equal(denied.snapshot()[0].children.at(-1).href, '')
+    assert.equal(denied.snapshot()[0].children.at(-1).markup, '')
+    anotherLine.append('See `earlier`\nand [docs](' + href)
+    assert.equal(anotherLine.snapshot()[0].children.at(-1).markup, '')
+  }
+  finally {
+    codeLabel.dispose()
+    earlierCode.dispose()
+    denied.dispose()
+    anotherLine.dispose()
+  }
+})
+
+test('legacy relative drafts with evidenced code or filename labels retain literal display', () => {
+  const code = createSession()
+  const filename = createSession()
+  const plain = createSession()
+  const denied = createSession({ parseOptions: { validateLink: () => false } })
+  try {
+    const codeSource = '- 🧰 Parser toolkit: [`stream-markdown-parser`](./packages/markdown-'
+    const filenameSource = '- 支持与求助入口：[SUPPORT.md](./SUPPORT.md'
+    for (const [session, source] of [[code, codeSource], [filename, filenameSource]]) {
+      session.append(source.slice(0, -5))
+      session.append(source.slice(-5))
+      assert.equal(session.snapshot()[0].items[0].children[0].raw, source.slice(2))
+    }
+    assert.deepEqual(code.snapshot()[0].items[0].children[0].children, [
+      { type: 'text', content: '🧰 Parser toolkit: [', raw: '🧰 Parser toolkit: [', center: false },
+      { type: 'inline_code', code: 'stream-markdown-parser', raw: 'stream-markdown-parser' },
+      { type: 'text', content: '](./packages/markdown-', raw: '](./packages/markdown-', center: false },
+    ])
+    assert.deepEqual(filename.snapshot()[0].items[0].children[0].children, [
+      { type: 'text', content: '支持与求助入口：[', raw: '支持与求助入口：[', center: false },
+      { type: 'text', content: 'SUPPORT.md](./SUPPORT.md', raw: 'SUPPORT.md](./SUPPORT.md' },
+    ])
+    for (const [session, href] of [[code, './packages/markdown-'], [filename, './SUPPORT.md']]) {
+      session.append(')')
+      const link = session.snapshot()[0].items[0].children[0].children.at(-1)
+      assert.equal(link.href, href)
+      assert.equal(link.markup, '')
+      assert.equal(link.loading, false)
+    }
+    plain.append('See [ordinary label](./relative')
+    denied.append('See [`code`](./relative')
+    for (const session of [plain, denied]) {
+      const link = session.snapshot()[0].children[1]
+      assert.equal(link.type, 'link')
+      assert.equal(link.href, '')
+      assert.equal(link.loading, true)
+    }
+  }
+  finally {
+    code.dispose()
+    filename.dispose()
+    plain.dispose()
+    denied.dispose()
+  }
+})
+
+test('legacy preview keeps adjacent-bracket recovery within unresolved link text', () => {
+  const options = { parseOptions: { validateLink: href => !/^\s*javascript:/i.test(href) } }
+  const session = createSession(options)
+  const ordinary = createSession(options)
+  const confirmed = createSession(options)
+  try {
+    const prefix = '[A][ref] 与 [B](javas'
+    session.append(prefix)
+    assert.deepEqual(session.snapshot()[0], {
+      type: 'paragraph', raw: prefix,
+      children: [
+        { type: 'text', content: '[A]', raw: '[A]' },
+        {
+          type: 'link', href: '', title: null, text: 'ref] 与 [B',
+          children: [{ type: 'text', content: 'ref] 与 [B', raw: 'ref] 与 [B' }],
+          loading: true, markup: '',
+        },
+      ],
+    })
+    session.append('cript:alert(1))')
+    assert.deepEqual(session.snapshot()[0].children, [
+      { type: 'text', content: '[A]ref] 与 [B)', raw: '[A]ref] 与 [B)' },
+    ])
+    session.finish()
+    assert.deepEqual(session.snapshot()[0].children, [
+      { type: 'text', content: '[A][ref] 与 B)', raw: '[A][ref] 与 B)' },
+    ])
+
+    ordinary.append('[A] 与 [B](javas')
+    assert.equal(ordinary.snapshot()[0].children[0].content, '[A] 与 ')
+    assert.equal(ordinary.snapshot()[0].children[1].text, 'B')
+    confirmed.append('[A][ref] 与 [B](https://example.org)')
+    assert.equal(confirmed.snapshot()[0].children[0].content, '[A][ref] 与 ')
+    assert.equal(confirmed.snapshot()[0].children[1].text, 'B')
+    assert.equal(confirmed.snapshot()[0].children[1].loading, false)
+  }
+  finally {
+    session.dispose()
+    ordinary.dispose()
+    confirmed.dispose()
+  }
+})
+
+test('legacy open paragraphs show a validated HTTP host before a domain suffix arrives', () => {
+  const session = createSession()
+  const denied = createSession({ parseOptions: { validateLink: () => false } })
+  const standard = createSession({ parseOptions: { markstream: false } })
+  const table = createSession()
+  try {
+    const prefix = 'See https://'
+    session.append(prefix)
+    assert.deepEqual(session.snapshot()[0].children.map(child => child.type), ['text'])
+    session.append('marks')
+    const [before, link] = session.snapshot()[0].children
+    assert.equal(before.content, 'See ')
+    assert.equal(link.href, 'https://marks')
+    assert.equal(link.markup, 'linkify')
+    assert.equal(session.snapshot()[0].raw, prefix + 'marks')
+    session.append('.example.com')
+    assert.equal(session.snapshot()[0].children[1].href, 'https://marks.example.com')
+
+    for (const other of [denied, standard]) {
+      other.append(prefix + 'marks')
+      assert.deepEqual(other.snapshot()[0].children.map(child => child.type), ['text'])
+    }
+
+    table.append('| Name | URL |\n| --- | --- |\n| Marks | https://marks')
+    const [cell] = table.snapshot()[0].rows[0].cells[1].children
+    assert.equal(cell.href, 'https://marks')
+  }
+  finally {
+    session.dispose()
+    denied.dispose()
+    standard.dispose()
+    table.dispose()
+  }
+})
+
+test('a loading image link after a completed link uses the image alt as its label', () => {
+  const session = createSession()
+  try {
+    session.append('[first](https://example.com)\n[![Second](http')
+    const early = session.snapshot()[0].children[2]
+    assert.equal(early.text, 'Second')
+    assert.deepEqual(early.children, [{
+      type: 'image', src: '', alt: 'Second', title: null,
+      raw: '![Second](http', loading: true,
+    }])
+
+    session.append('s://images.example/part')
+    const [previous, newline, preview] = session.snapshot()[0].children
+    assert.equal(previous.href, 'https://example.com')
+    assert.equal(previous.loading, false)
+    assert.equal(newline.content, '\n')
+    assert.equal(preview.text, 'Second')
+    assert.equal(preview.raw, '[Second]()')
+    assert.equal(preview.loading, true)
+    assert.deepEqual(preview.children, [{
+      type: 'image', src: 'https://images.example/part', alt: 'Second', title: null,
+      raw: '![Second](https://images.example/part)', loading: true,
+    }])
+    session.append(')](https://example.com/second)')
+    const confirmed = session.snapshot()[0].children[2]
+    assert.equal(confirmed.href, 'https://example.com/second')
+    assert.equal(confirmed.loading, false)
+    assert.equal(confirmed.children[0].loading, false)
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('legacy final view can display a complete image under its unclosed outer URL', () => {
+  const source = '[![流式图片](https://images.example/loading.png)](https://example.com/loading'
+  const legacy = createSession()
+  const standard = createSession({ parseOptions: { markstream: false } })
+  const rejected = createSession({ parseOptions: { validateLink: href => !href.startsWith('https://example.com/') } })
+  const closed = createSession()
+  const streaming = createSession()
+  try {
+    for (const session of [legacy, standard, rejected, closed]) {
+      session.append(source.slice(0, -7))
+      session.append(source.slice(-7) + (session === closed ? ')' : ''))
+      session.finish()
+    }
+    const [paragraph] = legacy.snapshot()
+    assert.equal(paragraph.raw, source)
+    assert.deepEqual(paragraph.children, [{
+      type: 'link', href: 'https://example.com/loading', title: null, text: '流式图片',
+      children: [{
+        type: 'image', src: 'https://images.example/loading.png', alt: '流式图片',
+        title: null, raw: '流式图片', loading: false,
+      }],
+      raw: '[流式图片](https://example.com/loading)', loading: true, markup: '',
+    }])
+    assert.equal(standard.snapshot()[0].children[0].content, '[')
+    assert.equal(rejected.snapshot()[0].children.some(node => node.type === 'link'), false)
+    assert.equal(closed.snapshot()[0].children[0].loading, false)
+    streaming.append(source + '\n\nA later paragraph')
+    assert.deepEqual(streaming.snapshot()[0], paragraph)
+  }
+  finally {
+    legacy.dispose()
+    standard.dispose()
+    rejected.dispose()
+    closed.dispose()
+    streaming.dispose()
+  }
+})
+
+test('legacy incomplete destinations preserve the original draft and honor URL validation', () => {
+  const source = 'Prefix **draft [label](https://example.com/path with `code'
+  const legacy = createSession()
+  const standard = createSession({ parseOptions: { markstream: false } })
+  const rejected = createSession({ parseOptions: { validateLink: href => !href.includes(' ') } })
+  try {
+    for (const session of [legacy, standard, rejected]) {
+      session.append(source)
+      session.finish()
+    }
+    const link = legacy.snapshot()[0].children.find(node => node.type === 'link')
+    assert.equal(link.href, 'https://example.com/path with `code')
+    assert.equal(link.loading, true)
+    for (const session of [standard, rejected]) {
+      const links = session.snapshot()[0].children.filter(node => node.type === 'link')
+      assert.deepEqual(links.map(node => node.href), ['https://example.com/path'])
+    }
+  }
+  finally {
+    legacy.dispose()
+    standard.dispose()
+    rejected.dispose()
+  }
+})
+
+test('legacy strong links preserve literal source before a completed formula', () => {
+  const source = 'Prefix **[label `code`](https://example.com/path)** $x$'
+  const session = createSession()
+  try {
+    session.append(source)
+    session.finish()
+    const children = session.snapshot()[0].children
+    assert.deepEqual(children.map(node => [node.type, node.content ?? node.code ?? node.href]), [
+      ['text', 'Prefix **[label '],
+      ['inline_code', 'code'],
+      ['text', ']('],
+      ['link', 'https://example.com/path'],
+      ['text', ')** '],
+      ['math_inline', 'x'],
+    ])
+    assert.equal(children[3].markup, 'linkify')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('an image-link preview recognizes only the unescaped bracket after typed text', () => {
+  for (const [prefix, visible] of [
+    ['say "hello" ', 'say “hello” '],
+    ['preceding \\* ', 'preceding * '],
+  ]) {
+    const session = createSession()
+    try {
+      session.append(prefix + '[![Second](https://images.example/part')
+      const [before, link] = session.snapshot()[0].children
+      assert.equal(before.content, visible)
+      assert.equal(link.type, 'link')
+      assert.equal(link.loading, true)
+      assert.equal(link.text, 'Second')
+    }
+    finally {
+      session.dispose()
+    }
+  }
+
+  const escaped = createSession()
+  try {
+    escaped.append('literal \\[![Second](https://images.example/part')
+    const [before, image] = escaped.snapshot()[0].children
+    assert.equal(before.content, 'literal [')
+    assert.equal(image.type, 'image')
+    assert.equal(image.loading, true)
+  }
+  finally {
+    escaped.dispose()
+  }
+})
+
+test('legacy badge runs hold an unfinished image label and an unset outer href', () => {
+  const session = createSession()
+  const standalone = createSession()
+  try {
+    const previous = '[![Docs](/badge.svg)](/docs)\n'
+    session.append(previous + '[![N')
+    const draft = session.snapshot()[0]
+    assert.equal(draft.raw, previous + '[![N')
+    assert.deepEqual(draft.children.at(-1), {
+      type: 'link', href: '', title: null, text: 'N', raw: '[N]()', loading: true, markup: '',
+      children: [{ type: 'image', src: '', alt: 'N', title: null, raw: '![N', loading: true }],
+    })
+    session.append('ext](/next.svg)]')
+    const waiting = session.snapshot()[0].children
+    assert.equal(waiting.at(-2).children[0].src, '/next.svg')
+    assert.equal(waiting.at(-2).href, '')
+    assert.equal(waiting.at(-1).content, ']')
+    session.append('(/next)')
+    assert.equal(session.snapshot()[0].children.at(-1).href, '/next')
+
+    standalone.append('Unrelated [![N')
+    assert.equal(standalone.snapshot()[0].children.at(-1).type, 'text')
+  }
+  finally {
+    session.dispose()
+    standalone.dispose()
+  }
+})
+
+test('confirmed HTML image under an anchor preserves raw markup and the parent link attributes', () => {
+  const image = '<img src="/badge.svg" alt="badge" width="250" />'
+  const anchor = `<a href="/docs" target="_blank">${image}</a>`
+  const legacy = createSession()
+  const ordinary = createSession({ factoryOptions: { markstream: false } })
+  try {
+    for (const session of [legacy, ordinary]) {
+      session.append('badge ' + anchor)
+      session.finish()
+    }
+    const link = legacy.snapshot()[0].children[1]
+    assert.equal(link.type, 'link')
+    assert.equal(link.text, image)
+    assert.equal(link.raw, anchor)
+    assert.deepEqual(link.attrs, [['href', '/docs'], ['target', '_blank']])
+    assert.deepEqual(link.children, [{
+      type: 'html_inline', tag: 'img', content: image, children: [], raw: image, loading: false,
+    }])
+    assert.deepEqual(ordinary.snapshot()[0].children[1].children[0].attrs, [
+      ['src', '/badge.svg'], ['alt', 'badge'], ['width', '250'],
+    ])
+  }
+  finally {
+    legacy.dispose()
+    ordinary.dispose()
+  }
+})
+
+test('multiline HTML anchor previews close at the matching tag and exclude following blank lines', () => {
+  const session = createSession()
+  const commented = createSession()
+  try {
+    const markup = '<a href="/gallery">\n  <picture>\n'
+      + '    <source media="a > b" srcset="/dark.svg">\n'
+      + '    <img src="/light.svg" alt="Example 图">\n  </picture>\n</a>'
+    session.append(markup.slice(0, -1))
+    assert.equal(session.snapshot()[0].loading, true)
+    session.append('>')
+    const expected = {
+      type: 'html_block', tag: 'a', attrs: [['href', '/gallery']],
+      content: markup, raw: markup, loading: false,
+    }
+    assert.deepEqual(session.snapshot()[0], expected)
+    session.append('\n\n# Next\n')
+    session.finish()
+    assert.deepEqual(session.snapshot()[0], expected)
+    assert.equal(session.snapshot()[1].type, 'heading')
+
+    commented.append('<a href="/gallery">\n  <!-- not a closer\n</a>')
+    assert.equal(commented.snapshot()[0].loading, true)
+  }
+  finally {
+    session.dispose()
+    commented.dispose()
+  }
+})
+
+test('a multiline legacy anchor holds an unfinished nested tag without altering its confirmed prefix', () => {
+  const session = createSession()
+  const commented = createSession()
+  try {
+    const prefix = '<a href="/gallery">\n  <picture>\n    '
+    session.append(prefix)
+    session.append('<source srcset="/draft')
+    const pending = session.snapshot()[0]
+    assert.equal(pending.raw, prefix)
+    assert.equal(pending.content, prefix + '\n</a>')
+    assert.equal(pending.loading, true)
+
+    session.append('\">\n  ')
+    assert.equal(session.snapshot()[0].raw, prefix + '<source srcset="/draft">\n  ')
+    session.append('</picture>\n</a>')
+    const confirmed = session.snapshot()[0]
+    assert.equal(confirmed.raw, prefix + '<source srcset="/draft">\n  </picture>\n</a>')
+    assert.equal(confirmed.loading, false)
+
+    commented.append('<a href="/gallery">\n  <!-- visible literal <img alt="unfinished')
+    assert.match(commented.snapshot()[0].raw, /<!-- visible literal <img/u)
+  }
+  finally {
+    session.dispose()
+    commented.dispose()
+  }
+})
+
+test('legacy preview preserves a directly observed pre and code opening pair together', () => {
+  const session = createSession()
+  const closing = createSession()
+  try {
+    const source = 'Render <pre><code> text and ([link](/docs))'
+    session.append('* ' + source + '\n* Next')
+    const paragraph = session.snapshot()[0].items[0].children[0]
+    const pre = paragraph.children[1]
+    assert.equal(paragraph.raw, source)
+    assert.equal(pre.content, '<pre><code> text and ([link](/docs))</pre>')
+    assert.equal(pre.loading, true)
+    assert.equal(pre.children[0].content, '<code> text and ([link](/docs))</code>')
+    assert.equal(pre.children[0].children[1].href, '/docs')
+
+    closing.append('Render <pre><code> text')
+    assert.equal(closing.snapshot()[0].children[1].autoClosed, true)
+    closing.append('</code></pre>')
+    assert.equal(closing.snapshot()[0].children[1].autoClosed, false)
+  }
+  finally {
+    session.dispose()
+    closing.dispose()
+  }
+})
+
+test('a later legacy HTML badge uses its real anchor while its image tag is unfinished', () => {
+  const session = createSession()
+  const denied = createSession({ parseOptions: { validateLink: href => href !== '/next' } })
+  try {
+    const previous = '<a href="/demo"><img src="/one"></a>\n'
+    const anchor = '<a href="/next" target="_blank">'
+    const source = previous + anchor + '<img src="/unclosed'
+    session.append(source)
+    const [draft] = session.snapshot()
+    assert.equal(draft.raw, previous + anchor)
+    assert.deepEqual(draft.children.slice(1), [
+      { type: 'text', content: '\n', raw: '\n' },
+      {
+        type: 'link', href: '/next', title: null, text: '/next', raw: anchor, loading: true, markup: 'html',
+        attrs: [['href', '/next'], ['target', '_blank']], children: [{ type: 'text', content: '/next', raw: '/next' }],
+      },
+    ])
+    session.append('\"></a>')
+    assert.equal(session.snapshot()[0].children.at(-1).children[0].tag, 'img')
+    assert.equal(session.snapshot()[0].children.at(-1).loading, false)
+
+    denied.append(source)
+    assert.ok(!denied.snapshot()[0].children.some(child => child.href === '/next'))
+  }
+  finally {
+    session.dispose()
+    denied.dispose()
+  }
+})
+
+test('a line-leading HTML anchor waits for its withheld image child in the legacy view', () => {
+  const opening = '<a href="/docs" target="_blank">'
+  const session = createSession()
+  const inline = createSession()
+  try {
+    session.append(opening + '<img src="/badge')
+    assert.deepEqual(session.snapshot(), [{ type: 'paragraph', children: [], raw: opening }])
+    const suffix = '.svg" /></a>'
+    session.append(suffix)
+    session.finish()
+    const [paragraph] = session.snapshot()
+    assert.equal(paragraph.raw, opening + '<img src="/badge' + suffix)
+    assert.equal(paragraph.children[0].href, '/docs')
+    assert.equal(paragraph.children[0].loading, false)
+    assert.equal(paragraph.children[0].children[0].raw, '<img src="/badge.svg" />')
+
+    inline.append('Badge ' + opening + '<img src="/badge')
+    assert.equal(inline.snapshot()[0].children[0].content, 'Badge ')
+    assert.equal(inline.snapshot()[0].children[1].tag, 'a')
+  }
+  finally {
+    session.dispose()
+    inline.dispose()
+  }
+})
+
+test('legacy standalone image links expose a loading placeholder with no URL', () => {
+  const session = createSession()
+  try {
+    session.append('[![')
+    const [paragraph] = session.snapshot()
+    assert.deepEqual(paragraph.children, [{
+      type: 'link', href: '', title: null, text: '', raw: '[]()', loading: true, markup: '',
+      children: [{ type: 'image', src: '', alt: '', title: null, raw: '![', loading: true }],
+    }])
+    session.append(' ')
+    assert.deepEqual(session.snapshot()[0], paragraph)
+  }
+  finally {
+    session.dispose()
+  }
+  const withAlt = createSession()
+  try {
+    withAlt.append('[![在')
+    assert.deepEqual(withAlt.snapshot(), [{
+      type: 'paragraph', raw: '[![在',
+      children: [{
+        type: 'link', href: '', title: null, text: '在', raw: '[在]()', loading: true, markup: '',
+        children: [{ type: 'image', src: '', alt: '在', title: null, raw: '![在', loading: true }],
+      }],
+    }])
+    withAlt.append('线](https://example.org/image.png)](/docs)')
+    const [link] = withAlt.snapshot()[0].children
+    assert.equal(link.loading, false)
+    assert.equal(link.href, '/docs')
+    assert.equal(link.children[0].src, 'https://example.org/image.png')
+  }
+  finally {
+    withAlt.dispose()
+  }
+})
+
+test('legacy nested image previews expose confirmed emphasis without supplying an image URL', () => {
+  const session = createSession()
+  try {
+    session.append('[![Alt *label*](')
+    const [badge, emphasis, tail] = session.snapshot()[0].children
+    assert.equal(badge.children[0].src, '')
+    assert.equal(badge.children[0].alt, 'Alt ')
+    assert.equal(emphasis.type, 'emphasis')
+    assert.equal(tail.content, ']')
+    assert.equal(tail.raw, '](')
+    session.append('https://example.com/image.png')
+    const link = session.snapshot()[0].children.at(-1)
+    assert.equal(link.href, 'https://example.com/image.png')
+    assert.equal(link.loading, true)
+    assert.equal(session.snapshot()[0].children[0].children[0].src, '')
+    session.append(')](/docs)')
+    const [confirmed] = session.snapshot()[0].children
+    assert.equal(confirmed.href, '/docs')
+    assert.equal(confirmed.children[0].src, 'https://example.com/image.png')
+  }
+  finally {
+    session.dispose()
+  }
+})
+
+test('an inline HTML anchor with a confirmed image stays loading until its real closer', () => {
+  const prefix = 'Badge '
+  const opening = '<a href="/guide" title="read" target="_blank">'
+  const image = '<img src="/logo.svg" alt="Example">'
+  const session = createSession()
+  const rejected = createSession({ parseOptions: { validateLink: () => false } })
+  try {
+    session.append(prefix + opening + image.slice(0, -1))
+    assert.equal(session.snapshot()[0].children.some(node => node.type === 'link'), false)
+    session.append('>')
+    const [paragraph] = session.snapshot()
+    assert.equal(paragraph.raw, prefix + opening + image)
+    const expected = {
+      type: 'link', href: '/guide', title: 'read', text: image, raw: opening + image,
+      attrs: [['href', '/guide'], ['title', 'read'], ['target', '_blank']],
+      children: [{ type: 'html_inline', tag: 'img', content: image, children: [], raw: image, loading: false }],
+      loading: true, markup: 'html',
+    }
+    assert.deepEqual(paragraph.children[1], expected)
+    session.append('</a>')
+    assert.deepEqual(session.snapshot()[0].children[1], {
+      ...expected, raw: opening + image + '</a>', loading: false,
+    })
+
+    rejected.append(prefix + opening + image)
+    assert.deepEqual(rejected.snapshot()[0].children.map(node => node.type), ['text', 'html_inline', 'html_inline'])
+  }
+  finally {
+    session.dispose()
+    rejected.dispose()
+  }
+})

@@ -2,6 +2,19 @@ import { describe, expect, it } from 'vitest'
 import { getMarkdown, parseMarkdownToStructure } from '../support/parser'
 
 describe('thinking custom tag after inline html prefix', () => {
+  it.each(['  ', '\n'])('preserves an unclosed thinking block on finish with body separator %j', (separator) => {
+    const customHtmlTags = ['thinking']
+    const md = getMarkdown('thinking-unclosed-final', { customHtmlTags })
+    const source = `<thinking id="draft">${separator}**未完成**`
+    const open = parseMarkdownToStructure(source, md, { customHtmlTags, final: false })
+    expect(open[0]).toMatchObject({ type: 'thinking', content: '**未完成**', loading: true })
+    const finalized = parseMarkdownToStructure(source, md, { customHtmlTags, final: true })
+    expect(finalized).toEqual([{
+      type: 'thinking', tag: 'thinking', attrs: [['id', 'draft']],
+      raw: '<thinking id="draft">\n**未完成**', content: '**未完成**', loading: false,
+    }])
+  })
+
   const thinkingContent = String.raw`勾股定理是数学中一个非常重要的定理，尤其在几何学中有着广泛的应用。它描述了直角三角形三边之间的关系。
 
 ### 勾股定理的定义：
