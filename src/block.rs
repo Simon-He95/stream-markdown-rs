@@ -2095,10 +2095,20 @@ impl Engine {
     ) -> Result<(), ParseError> {
         if self.html_progress.has_tail() {
             self.html_progress = details::HtmlProgress::Scanning(line.next);
-            self.line(source, line, output)
-        } else {
-            self.container_line(source, line, output)
+            return self.line(source, line, output);
         }
+        if self.containers.is_empty() && self.partial_container.is_none() {
+            let raw = &source[line.start..line.end];
+            let marker = if raw.starts_with(' ') {
+                unindent(raw).as_bytes().first()
+            } else {
+                raw.as_bytes().first()
+            };
+            if !matches!(marker, Some(b'>' | b'-' | b'+' | b'*' | b'0'..=b'9')) {
+                return self.line(source, line, output);
+            }
+        }
+        self.container_line(source, line, output)
     }
 
     fn container_line(
@@ -2112,17 +2122,6 @@ impl Engine {
             line.advance(prefix);
             self.extend_containers(line.next);
             return self.line(source, line, output);
-        }
-        if self.containers.is_empty() {
-            let raw = &source[line.start..line.end];
-            let marker = if raw.starts_with(' ') {
-                unindent(raw).as_bytes().first()
-            } else {
-                raw.as_bytes().first()
-            };
-            if !matches!(marker, Some(b'>' | b'-' | b'+' | b'*' | b'0'..=b'9')) {
-                return self.line(source, line, output);
-            }
         }
         let physical_blank = blank(&source[line.start..line.end]);
         let mut matched = 0;
