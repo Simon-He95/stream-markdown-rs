@@ -307,6 +307,152 @@ fn delayed_wasm_rejection_replays_native_block_boundaries() {
 }
 
 #[test]
+fn a_buffered_wasm_match_reparses_all_unconsumed_lines() {
+    let wasm = wat::parse_str(
+        r#"(module
+            (memory (export "memory") 1)
+            (func (export "ms_abi_version") (result i32) (i32.const 1))
+            (func (export "ms_reserve_input") (param i32) (result i32) (i32.const 0))
+            (func (export "ms_step") (param $phase i32) (param i32) (param i32) (result i64)
+                (if (result i64) (i32.eq (local.get $phase) (i32.const 2))
+                    (then (i64.const 8589934593))
+                    (else (i64.const 4294967296)))))"#,
+    )
+    .unwrap();
+    let module = WasmPlugin::load(
+        &wasm,
+        Rule {
+            trigger: b'@',
+            scope: Scope::Block,
+            kind: 7,
+        },
+        Limits::default(),
+    )
+    .unwrap();
+    let options = Options::default();
+    for chunks in [
+        ["@\r", "\n# Heading\r\n", "\r\n- item"],
+        ["@ ", "\r\n# Heading\r\n", "\r\n- item"],
+    ] {
+        let source = chunks.concat();
+        let batch = parse_with_plugins(
+            &source,
+            &options,
+            vec![Box::new(module.instantiate().unwrap())],
+        )
+        .unwrap();
+        assert!(matches!(
+            batch.nodes[0].data,
+            BlockData::Extension { kind: 7 }
+        ));
+        assert!(matches!(
+            batch.nodes[1].data,
+            BlockData::Heading { level: 1, .. }
+        ));
+        assert!(matches!(batch.nodes[2].data, BlockData::List { .. }));
+        assert_eq!(batch.nodes.len(), 5);
+
+        let mut parser = Parser::new(options.clone());
+        parser.add_plugin(module.instantiate().unwrap()).unwrap();
+        let mut changes = Vec::new();
+        for chunk in chunks {
+            parser.append(chunk, &mut changes).unwrap();
+        }
+        parser.finish(&mut changes).unwrap();
+        let nodes = changes.iter().filter_map(|change| match change {
+            Change::Insert { block, .. } | Change::Replace(block)
+                if block.status == BlockStatus::Closed =>
+            {
+                Some(block)
+            }
+            _ => None,
+        });
+        assert!(nodes.eq(batch.nodes.iter()));
+    }
+
+    let source = "> @\n> # Quoted\n# Outside\n";
+    let batch = parse_with_plugins(
+        source,
+        &options,
+        vec![Box::new(module.instantiate().unwrap())],
+    )
+    .unwrap();
+    let [quote, extension, quoted, outside] = batch.nodes.as_slice() else {
+        panic!("expected a quote, its children and an outer heading");
+    };
+    assert!(matches!(quote.data, BlockData::Quote));
+    assert!(matches!(extension.data, BlockData::Extension { kind: 7 }));
+    assert!(matches!(quoted.data, BlockData::Heading { level: 1, .. }));
+    assert!(matches!(outside.data, BlockData::Heading { level: 1, .. }));
+    assert_eq!(batch.parent(extension.id), Some(quote.id));
+    assert_eq!(batch.parent(quoted.id), Some(quote.id));
+    assert_eq!(batch.parent(outside.id), None);
+}
+
+#[test]
+fn repeated_wasm_matches_do_not_recurse_through_line_remainders() {
+    const MATCHES: usize = 2048;
+    let input = "@".repeat(MATCHES);
+    let source = format!("{input}\n# Tail\n");
+    let options = Options::default();
+    for probe in [8589934593u64, 4294967296] {
+        let wasm = wat::parse_str(format!(
+            r#"(module
+                (memory (export "memory") 1)
+                (func (export "ms_abi_version") (result i32) (i32.const 1))
+                (func (export "ms_reserve_input") (param i32) (result i32) (i32.const 0))
+                (func (export "ms_step") (param $phase i32) (param i32) (param i32) (result i64)
+                    (if (result i64) (i32.eqz (local.get $phase))
+                        (then (i64.const {probe}))
+                        (else (i64.const 8589934593)))))"#,
+        ))
+        .unwrap();
+        let module = WasmPlugin::load(
+            &wasm,
+            Rule {
+                trigger: b'@',
+                scope: Scope::Block,
+                kind: 7,
+            },
+            Limits::default(),
+        )
+        .unwrap();
+        let batch = parse_with_plugins(
+            &source,
+            &options,
+            vec![Box::new(module.instantiate().unwrap())],
+        )
+        .unwrap();
+        assert_eq!(batch.nodes.len(), MATCHES + 1);
+        for (index, block) in batch.nodes[..MATCHES].iter().enumerate() {
+            assert_eq!(block.span, stream_markdown_rs::Span::new(index, index + 1));
+            assert!(matches!(block.data, BlockData::Extension { kind: 7 }));
+        }
+        assert!(matches!(
+            batch.nodes[MATCHES].data,
+            BlockData::Heading { level: 1, .. }
+        ));
+
+        let mut parser = Parser::new(options.clone());
+        parser.add_plugin(module.instantiate().unwrap()).unwrap();
+        let mut changes = Vec::new();
+        for part in [&input[..], "\n# Tail\n"] {
+            parser.append(part, &mut changes).unwrap();
+        }
+        parser.finish(&mut changes).unwrap();
+        let nodes = changes.iter().filter_map(|change| match change {
+            Change::Insert { block, .. } | Change::Replace(block)
+                if block.status == BlockStatus::Closed =>
+            {
+                Some(block)
+            }
+            _ => None,
+        });
+        assert!(nodes.eq(batch.nodes.iter()));
+    }
+}
+
+#[test]
 fn finish_calls_the_wasm_eof_phase_and_commits_consumed_input() {
     let wasm = wat::parse_str(
         r#"(module

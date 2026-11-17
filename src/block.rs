@@ -534,6 +534,20 @@ struct PluginMatch {
     cursor: usize,
 }
 
+enum PluginReplay {
+    Lines {
+        span: Span,
+        fragment: bool,
+        rejected: bool,
+    },
+    Fragment(Line),
+    ContainerLine(Line),
+    FinishBeforeLine {
+        running: PluginMatch,
+        line: Line,
+    },
+}
+
 #[derive(Default)]
 struct PreviewState {
     pending_math: Vec<BlockId>,
@@ -570,6 +584,7 @@ pub(crate) struct Engine {
     plugins: Vec<Registered>,
     block_triggers: u128,
     running: Option<PluginMatch>,
+    plugin_replay: Option<Vec<PluginReplay>>,
     unresolved: Vec<String>,
     metrics: Metrics,
 }
@@ -606,6 +621,7 @@ impl Engine {
             plugins: Vec::new(),
             block_triggers: 0,
             running: None,
+            plugin_replay: None,
             unresolved: Vec::new(),
             metrics: Metrics::default(),
         }
@@ -790,7 +806,7 @@ impl Engine {
                 self.source_line(source, Line::new(self.line_start, end, end), &mut output)?;
                 self.line_start = end;
             }
-            if let Some(running) = self.running.take() {
+            while let Some(running) = self.running.take() {
                 self.resume_plugin(source, running, source.len(), Phase::Finish, &mut output)?;
             }
             if let Some(active) = self.active.take() {
@@ -2217,8 +2233,14 @@ impl Engine {
         if matched < self.containers.len()
             && let Some(running) = self.running.take()
         {
-            self.resume_plugin(source, running, physical.start, Phase::Finish, output)?;
-            return self.container_line(source, physical, output);
+            return self.replay_plugin_work(
+                source,
+                PluginReplay::FinishBeforeLine {
+                    running,
+                    line: physical,
+                },
+                output,
+            );
         }
 
         if let Some((index, close, end)) = details_close
@@ -3119,8 +3141,15 @@ impl Engine {
         if let Some(byte) = head.as_bytes().first().filter(|byte| byte.is_ascii())
             && self.has_block_plugin(*byte)
             && !line.skip_block_plugins
-            && self.start_plugin(source, start, line.next, *byte, output)?
+            && let Some(stop) = self.start_plugin(source, start, line.next, *byte, output)?
         {
+            if stop < line.end && !source[stop..line.end].trim().is_empty() {
+                return self.replay_plugin_work(
+                    source,
+                    PluginReplay::Fragment(Line::new(stop, line.end, line.next)),
+                    output,
+                );
+            }
             return Ok(());
         }
 
@@ -3927,7 +3956,7 @@ impl Engine {
         end: usize,
         byte: u8,
         output: &mut Output<'_>,
-    ) -> Result<bool, ParseError> {
+    ) -> Result<Option<usize>, ParseError> {
         for index in 0..self.plugins.len() {
             let rule = self.plugins[index].rule;
             if rule.scope != Scope::Block || rule.trigger != byte {
@@ -3938,12 +3967,11 @@ impl Engine {
                 start,
                 cursor: start,
             };
-            if !self.drive_plugin(source, running, end, Phase::Probe, output)? {
-                continue;
+            if let Some(stop) = self.drive_plugin(source, running, end, Phase::Probe, output)? {
+                return Ok(Some(stop));
             }
-            return Ok(true);
         }
-        Ok(false)
+        Ok(None)
     }
 
     fn resume_plugin(
@@ -3954,7 +3982,11 @@ impl Engine {
         phase: Phase,
         output: &mut Output<'_>,
     ) -> Result<(), ParseError> {
-        self.drive_plugin(source, running, end, phase, output)?;
+        if let Some(stop) = self.drive_plugin(source, running, end, phase, output)?
+            && stop < end
+        {
+            self.replay_plugin_lines(source, stop, end, false, output)?;
+        }
         Ok(())
     }
 
@@ -3965,7 +3997,7 @@ impl Engine {
         end: usize,
         initial: Phase,
         output: &mut Output<'_>,
-    ) -> Result<bool, ParseError> {
+    ) -> Result<Option<usize>, ParseError> {
         let plugin = &mut self.plugins[running.index];
         let kind = plugin.rule.kind;
         let mut probe = initial == Phase::Probe;
@@ -3998,60 +4030,115 @@ impl Engine {
                         _ => BlockData::Extension { kind },
                     };
                     self.emit_extension(data, span, output);
-                    if !source[stop..end].trim().is_empty() {
-                        let end_of_line = source[..end].trim_end_matches(['\r', '\n']).len();
-                        self.line(source, Line::new(stop, end_of_line, end), output)?;
-                    }
-                    return Ok(true);
+                    return Ok(Some(stop));
                 }
-                RuleResult::Reject if phase == Phase::Probe => return Ok(false),
+                RuleResult::Reject if phase == Phase::Probe => return Ok(None),
                 RuleResult::NeedMore { consumed } if phase != Phase::Finish => {
                     running.cursor += consumed;
                     if consumed == 0 || running.cursor == end {
                         self.running = Some(running);
-                        return Ok(true);
+                        return Ok(Some(end));
                     }
                 }
                 RuleResult::Reject | RuleResult::NeedMore { .. } => {
-                    self.replay_rejected_plugin(source, running.start, end, output)?;
-                    return Ok(true);
+                    self.replay_plugin_lines(source, running.start, end, true, output)?;
+                    return Ok(Some(end));
                 }
             }
         }
     }
 
-    fn replay_rejected_plugin(
+    fn replay_plugin_lines(
         &mut self,
         source: &str,
         start: usize,
         end: usize,
+        rejected: bool,
         output: &mut Output<'_>,
     ) -> Result<(), ParseError> {
         self.metrics.scanned_bytes += end - start;
         let bytes = source.as_bytes();
-        let mut at = start;
-        while at < end {
-            let stop = memchr::memchr2(b'\r', b'\n', &bytes[at..end])
-                .map_or(end, |relative| at + relative);
-            let next = if stop == end {
-                end
-            } else {
-                stop + 1
-                    + usize::from(
-                        bytes[stop] == b'\r' && stop + 1 < end && bytes[stop + 1] == b'\n',
-                    )
+        // A mid-line remainder has already passed through its container prefixes.
+        let fragment = rejected
+            || match bytes[start - 1] {
+                b'\n' => false,
+                b'\r' => bytes[start] == b'\n',
+                _ => true,
             };
-            let line = Line {
-                skip_block_plugins: true,
-                ..Line::new(at, stop, next)
-            };
-            if at == start {
-                // The first line begins after its already opened container prefixes.
-                self.line(source, line, output)?;
-            } else {
-                self.container_line(source, line, output)?;
+        self.replay_plugin_work(
+            source,
+            PluginReplay::Lines {
+                span: Span::new(start, end),
+                fragment,
+                rejected,
+            },
+            output,
+        )
+    }
+
+    fn replay_plugin_work(
+        &mut self,
+        source: &str,
+        replay: PluginReplay,
+        output: &mut Output<'_>,
+    ) -> Result<(), ParseError> {
+        if let Some(pending) = &mut self.plugin_replay {
+            // The new remainder precedes any source still waiting to be replayed.
+            pending.push(replay);
+            return Ok(());
+        }
+        self.plugin_replay = Some(vec![replay]);
+        let result = self.drain_plugin_replay(source, output);
+        self.plugin_replay = None;
+        result
+    }
+
+    fn drain_plugin_replay(
+        &mut self,
+        source: &str,
+        output: &mut Output<'_>,
+    ) -> Result<(), ParseError> {
+        let bytes = source.as_bytes();
+        while let Some(replay) = self.plugin_replay.as_mut().unwrap().pop() {
+            match replay {
+                PluginReplay::Lines {
+                    span,
+                    fragment,
+                    rejected,
+                } => {
+                    let stop = memchr::memchr2(b'\r', b'\n', &bytes[Range::from(span)])
+                        .map_or(span.end, |relative| span.start + relative);
+                    let next = line_break(bytes, stop, span.end).unwrap_or(span.end);
+                    if next < span.end {
+                        self.plugin_replay
+                            .as_mut()
+                            .unwrap()
+                            .push(PluginReplay::Lines {
+                                span: Span::new(next, span.end),
+                                fragment: false,
+                                rejected,
+                            });
+                    }
+                    let line = Line {
+                        skip_block_plugins: rejected,
+                        ..Line::new(span.start, stop, next)
+                    };
+                    if !fragment {
+                        self.source_line(source, line, output)?;
+                    } else if rejected || !source[span.start..stop].trim().is_empty() {
+                        self.line(source, line, output)?;
+                    }
+                }
+                PluginReplay::Fragment(line) => self.line(source, line, output)?,
+                PluginReplay::ContainerLine(line) => self.container_line(source, line, output)?,
+                PluginReplay::FinishBeforeLine { running, line } => {
+                    self.plugin_replay
+                        .as_mut()
+                        .unwrap()
+                        .push(PluginReplay::ContainerLine(line));
+                    self.resume_plugin(source, running, line.start, Phase::Finish, output)?;
+                }
             }
-            at = next;
         }
         Ok(())
     }
