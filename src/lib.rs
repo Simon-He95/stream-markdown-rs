@@ -8,7 +8,7 @@ mod math_block;
 mod plugin;
 mod tag;
 
-use std::{borrow::Cow, collections::HashMap, fmt, num::NonZeroUsize, ops::Range};
+use std::{borrow::Cow, collections::HashMap, fmt, num::NonZeroUsize, ops::Range, sync::Arc};
 
 pub use block::admonition::{Admonition, AdmonitionKind};
 pub use block::details::HtmlOpening;
@@ -330,6 +330,9 @@ impl Document<'_> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ParseError {
     Finished,
+    DifferentSource,
+    InvalidSourceEnd,
+    SourceShrunk,
     Plugin(PluginError),
 }
 
@@ -337,6 +340,13 @@ impl fmt::Display for ParseError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Finished => formatter.write_str("the parser session has ended"),
+            Self::DifferentSource => {
+                formatter.write_str("the parser is bound to a different source buffer")
+            }
+            Self::InvalidSourceEnd => {
+                formatter.write_str("the visible end must be a UTF-8 boundary within the source")
+            }
+            Self::SourceShrunk => formatter.write_str("the visible source prefix cannot shrink"),
             Self::Plugin(error) => error.fmt(formatter),
         }
     }
@@ -394,60 +404,31 @@ pub struct Metrics {
 
 pub struct Parser {
     source: String,
-    engine: Option<block::Engine>,
-    finished_metrics: Metrics,
+    stream: StreamState,
 }
 
 impl Parser {
     pub fn new(options: Options) -> Self {
         Self {
             source: String::new(),
-            engine: Some(block::Engine::new(options, false)),
-            finished_metrics: Metrics::default(),
+            stream: StreamState::new(options),
         }
     }
 
     pub fn add_plugin(&mut self, plugin: impl PluginRule + 'static) -> Result<(), ParseError> {
-        if self.source.is_empty()
-            && let Some(engine) = &mut self.engine
-        {
-            return Ok(engine.add_plugin(Box::new(plugin))?);
-        }
-        Err(PluginError::new("register plugins before appending source").into())
+        self.stream.add_plugin(plugin)
     }
 
     pub fn append(&mut self, chunk: &str, out: &mut Vec<Change>) -> Result<(), ParseError> {
-        let Some(engine) = &mut self.engine else {
-            return Err(ParseError::Finished);
-        };
-        if chunk.is_empty() {
-            return Ok(());
-        }
-        let start = out.len();
-        let previous_end = self.source.len();
-        self.source.push_str(chunk);
-        if let Err(error) = engine.consume(&self.source, false, block::Output::Stream(out, start)) {
-            out.truncate(start);
-            self.finished_metrics = engine.metrics();
-            self.engine = None;
-            return Err(error);
-        }
-        engine.publish_html_container_progress(previous_end, out);
-        Ok(())
+        let source = &mut self.source;
+        self.stream.append(out, || {
+            source.push_str(chunk);
+            source.as_str()
+        })
     }
 
     pub fn finish(&mut self, out: &mut Vec<Change>) -> Result<(), ParseError> {
-        let Some(engine) = &mut self.engine else {
-            return Ok(());
-        };
-        let start = out.len();
-        let result = engine.consume(&self.source, true, block::Output::Stream(out, start));
-        self.finished_metrics = engine.metrics();
-        self.engine = None;
-        if result.is_err() {
-            out.truncate(start);
-        }
-        result
+        self.stream.finish(&self.source, out)
     }
 
     pub fn source_text(&self) -> &str {
@@ -463,6 +444,160 @@ impl Parser {
     }
 
     pub fn metrics(&self) -> Metrics {
+        self.stream.metrics()
+    }
+}
+
+/// An append-only source buffer owned by the caller.
+pub struct SourceBuffer {
+    text: String,
+    identity: Arc<()>,
+}
+
+impl SourceBuffer {
+    /// Takes ownership of the source allocation.
+    pub fn new(text: String) -> Self {
+        Self {
+            text,
+            identity: Arc::new(()),
+        }
+    }
+
+    pub fn push_str(&mut self, chunk: &str) {
+        self.text.push_str(chunk);
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.text
+    }
+
+    pub fn into_string(self) -> String {
+        self.text
+    }
+}
+
+/// An incremental parser bound to a caller-owned source buffer.
+pub struct BorrowedParser {
+    identity: Arc<()>,
+    stream: StreamState,
+}
+
+impl BorrowedParser {
+    pub fn new(source: &SourceBuffer, options: Options) -> Self {
+        Self {
+            identity: source.identity.clone(),
+            stream: StreamState::new(options),
+        }
+    }
+
+    pub fn add_plugin(&mut self, plugin: impl PluginRule + 'static) -> Result<(), ParseError> {
+        self.stream.add_plugin(plugin)
+    }
+
+    /// Advances to the visible UTF-8 byte end and emits changes with absolute source spans.
+    pub fn append(
+        &mut self,
+        source: &SourceBuffer,
+        end: usize,
+        out: &mut Vec<Change>,
+    ) -> Result<(), ParseError> {
+        let prefix = self.prefix(source, end)?;
+        self.stream.append(out, || prefix)
+    }
+
+    /// Consumes the visible prefix and settles pending blocks.
+    pub fn finish(
+        &mut self,
+        source: &SourceBuffer,
+        end: usize,
+        out: &mut Vec<Change>,
+    ) -> Result<(), ParseError> {
+        self.stream.finish(self.prefix(source, end)?, out)
+    }
+
+    pub fn metrics(&self) -> Metrics {
+        self.stream.metrics()
+    }
+
+    fn prefix<'src>(
+        &self,
+        source: &'src SourceBuffer,
+        end: usize,
+    ) -> Result<&'src str, ParseError> {
+        if !Arc::ptr_eq(&self.identity, &source.identity) {
+            return Err(ParseError::DifferentSource);
+        }
+        source.text.get(..end).ok_or(ParseError::InvalidSourceEnd)
+    }
+}
+
+struct StreamState {
+    engine: Option<block::Engine>,
+    finished_metrics: Metrics,
+}
+
+impl StreamState {
+    fn new(options: Options) -> Self {
+        Self {
+            engine: Some(block::Engine::new(options, false)),
+            finished_metrics: Metrics::default(),
+        }
+    }
+
+    fn add_plugin(&mut self, plugin: impl PluginRule + 'static) -> Result<(), ParseError> {
+        if let Some(engine) = &mut self.engine
+            && engine.metrics().input_bytes == 0
+        {
+            return Ok(engine.add_plugin(Box::new(plugin))?);
+        }
+        Err(PluginError::new("register plugins before appending source").into())
+    }
+
+    fn append<'src>(
+        &mut self,
+        out: &mut Vec<Change>,
+        source: impl FnOnce() -> &'src str,
+    ) -> Result<(), ParseError> {
+        let Some(engine) = &mut self.engine else {
+            return Err(ParseError::Finished);
+        };
+        let previous_end = engine.metrics().input_bytes;
+        let source = source();
+        if source.len() < previous_end {
+            return Err(ParseError::SourceShrunk);
+        }
+        if source.len() == previous_end {
+            return Ok(());
+        }
+        let start = out.len();
+        if let Err(error) = engine.consume(source, false, block::Output::Stream(out, start)) {
+            out.truncate(start);
+            self.finished_metrics = engine.metrics();
+            self.engine = None;
+            return Err(error);
+        }
+        engine.publish_html_container_progress(previous_end, out);
+        Ok(())
+    }
+
+    fn finish(&mut self, source: &str, out: &mut Vec<Change>) -> Result<(), ParseError> {
+        let Some(engine) = &mut self.engine else {
+            return Ok(());
+        };
+        if source.len() < engine.metrics().input_bytes {
+            return Err(ParseError::SourceShrunk);
+        }
+        let start = out.len();
+        let result = engine.consume(source, true, block::Output::Stream(out, start));
+        self.finished_metrics = engine.metrics();
+        self.engine = None;
+        if result.is_err() {
+            out.truncate(start);
+        }
+        result
+    }
+
+    fn metrics(&self) -> Metrics {
         self.engine
             .as_ref()
             .map_or(self.finished_metrics, block::Engine::metrics)

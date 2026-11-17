@@ -4,6 +4,8 @@
 
 仓库包含 Rust 批处理和增量解析核心、可选 WASM 插件宿主、规范测试和原生基准。TUI 可以使用 `Parser::append` 获取变化批次，通过 `Parser::finish` 收尾，或用 `parse` 得到完整结构。 将 `Options::math` 与 `Options::footnotes` 设为 `true` 可启用数学和命名脚注扩展。`Options::markstream` 开启 VMR 容器、提示块、CJK 强调和排版扩展。通过 `Options::custom_tags` 注册的标签可借用属性和原始正文，同时携带解析后的行内子节点。AI 预览可为打开的段落和标题交付临时行内覆盖，关闭节点时交付最终结构。一次追加的变化批次可以合并同一节点的临时更新，已经返回给调用方的历史批次保持原样。
 
+已经持有原文的 TUI 可以把 `String` 移入 `SourceBuffer`，用 `BorrowedParser` 解析追加到其中的内容。解析器交付的区间直接引用这一份原文。 [源码与增量输出](docs/design.md#源码与增量输出)
+
 ## 运行验证
 
 使用 Rust 1.88 或更新工具链及 pnpm。
