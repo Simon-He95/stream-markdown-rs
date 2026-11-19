@@ -452,6 +452,49 @@ fn malformed_targets_keep_their_source_text_and_linkified_tail() {
 }
 
 #[test]
+fn a_space_separated_destination_keeps_its_prefix_link_and_suffix() {
+    let options = options();
+    for (source, prefix, href, suffix) in [
+        (
+            "![a](https://e.com/a b.png)",
+            "![a](",
+            "https://e.com/a",
+            " b.png)",
+        ),
+        (
+            "[a](https://e.com/a b.png)",
+            "[a](",
+            "https://e.com/a",
+            " b.png)",
+        ),
+    ] {
+        let blocks = parse(source, &options).unwrap().nodes;
+        let nodes = nodes_of(&blocks[0]);
+        let [
+            Inline {
+                kind: InlineKind::Text(prefix_text),
+                ..
+            },
+            Inline {
+                kind: InlineKind::Link(link),
+                ..
+            },
+            Inline {
+                kind: InlineKind::Text(suffix_text),
+                ..
+            },
+        ] = nodes
+        else {
+            panic!("unexpected shape for {source:?}: {nodes:?}");
+        };
+        assert_eq!(prefix_text.as_str(source), prefix);
+        assert_eq!(link.destination.as_str(source), href);
+        assert_eq!(visible_text(source, &link.children), href);
+        assert_eq!(suffix_text.as_str(source), suffix);
+    }
+}
+
+#[test]
 fn spaced_brackets_are_not_folded_into_links() {
     let options = options();
     for (source, expected_visible) in [
@@ -485,42 +528,46 @@ fn spaced_brackets_are_not_folded_into_links() {
 #[test]
 fn a_closed_image_bracket_that_cannot_be_an_image_stays_text_while_streaming() {
     let options = options();
-    for (source, expected_visible) in [
-        (
-            "Use vec![1, 2, 3] to build it.",
-            "Use vec![1, 2, 3] to build it.",
-        ),
-        ("Hello![world] there", "Hello![world] there"),
-        ("好的![微笑] 我们继续。", "好的![微笑] 我们继续。"),
-        ("![alt] ", "![alt] "),
-        ("![alt]", "![alt]"),
-        ("**vec![1, 2]** ok", "**vec![1, 2]** ok"),
+    for source in [
+        "Use vec![1, 2, 3] to build it.",
+        "Hello![world] there",
+        "好的![微笑] 我们继续。",
+        "![alt] ",
+        "![alt]",
+        "**vec![1, 2]** ok",
     ] {
+        let expected = parse(source, &options).unwrap().nodes;
         let mut parser = Parser::new(options.clone());
         let mut changes = Vec::new();
         let mut view = View::default();
         parser.append(source, &mut changes).unwrap();
         view.apply(&mut changes);
+        let overlay: Vec<Inline> = view
+            .previews
+            .values()
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>();
         assert!(
-            preview_kinds(
-                &view
-                    .previews
-                    .values()
-                    .flatten()
-                    .cloned()
-                    .collect::<Vec<_>>()
-            )
-            .is_empty(),
+            preview_kinds(&overlay).is_empty(),
             "a confirmed inline overlay can remain while the block is open: {:?}",
             view.previews
+        );
+        assert!(
+            !has_target(&overlay),
+            "an open overlay gained a confirmed target: {source:?}: {overlay:?}"
         );
         let block = view.blocks.values().last().unwrap();
         match &block.data {
             BlockData::Paragraph(InlineContent::Plain(span)) => {
-                assert_eq!(span_text(source, *span), expected_visible);
+                assert_eq!(span_text(source, *span), source);
             }
             BlockData::Paragraph(InlineContent::Parsed(nodes)) => {
-                assert_eq!(visible_text(source, nodes), expected_visible, "{source:?}");
+                assert_eq!(
+                    visible_text(source, nodes),
+                    block_visible_text(source, &expected[0]),
+                    "{source:?}"
+                );
                 assert!(
                     !has_target(nodes),
                     "a closed bracket became a target before it could be one: {source:?}: {block:?}"
@@ -528,6 +575,19 @@ fn a_closed_image_bracket_that_cannot_be_an_image_stays_text_while_streaming() {
             }
             _ => panic!("unexpected block for {source:?}: {block:?}"),
         }
+        parser.finish(&mut changes).unwrap();
+        view.apply(&mut changes);
+        view.assert_no_previews();
+        let final_block = view.blocks.values().last().unwrap();
+        assert_eq!(
+            block_visible_text(source, final_block),
+            block_visible_text(source, &expected[0]),
+            "{source:?}"
+        );
+        assert!(
+            !has_target(&all_nodes(std::slice::from_ref(final_block))),
+            "a closed bracket became a target at final: {source:?}: {final_block:?}"
+        );
     }
 }
 
@@ -730,6 +790,10 @@ fn table_cells_admonitions_and_custom_tags_finalize_without_provisional_targets(
     let table_source = "| h |\n|---|\n| [x](https://e.com/s |";
     let (blocks, view) = final_view(table_source, &options);
     view.assert_no_previews();
+    assert!(
+        preview_kinds(&all_nodes(&blocks)).is_empty(),
+        "a table cell kept a provisional node"
+    );
     let table = blocks
         .iter()
         .find_map(|block| match &block.data {
@@ -748,10 +812,20 @@ fn table_cells_admonitions_and_custom_tags_finalize_without_provisional_targets(
     };
     assert_eq!(visible_text(table_source, nodes), "[x](https://e.com/s");
     assert!(!has_image(nodes), "a table cell kept an image");
+    assert!(
+        nodes
+            .iter()
+            .any(|node| matches!(node.kind, InlineKind::Link(_))),
+        "a table cell lost its linkified tail: {nodes:?}"
+    );
 
     let admonition_source = "::: tip\n[a *em*](https://e.com/s\n:::";
     let (blocks, view) = final_view(admonition_source, &options);
     view.assert_no_previews();
+    assert!(
+        preview_kinds(&all_nodes(&blocks)).is_empty(),
+        "an admonition kept a provisional node"
+    );
     let paragraph = blocks
         .iter()
         .find(|block| matches!(block.data, BlockData::Paragraph(_)))
@@ -761,11 +835,44 @@ fn table_cells_admonitions_and_custom_tags_finalize_without_provisional_targets(
         visible_text(admonition_source, nodes),
         "[a em](https://e.com/s"
     );
-    assert!(
-        nodes
-            .iter()
-            .any(|node| matches!(node.kind, InlineKind::Link(_))),
-        "{nodes:?}"
+    let Some(Inline {
+        kind: InlineKind::Link(link),
+        ..
+    }) = nodes
+        .iter()
+        .find(|node| matches!(node.kind, InlineKind::Link(_)))
+    else {
+        panic!("expected an admonition linkified tail: {nodes:?}");
+    };
+    assert_eq!(
+        link.destination.as_str(admonition_source),
+        "https://e.com/s"
+    );
+    assert_eq!(
+        visible_text(admonition_source, &link.children),
+        "https://e.com/s"
+    );
+
+    let autolink_source = "::: tip\n<https://example.com>\n:::";
+    let (blocks, view) = final_view(autolink_source, &options);
+    view.assert_no_previews();
+    let nodes = all_nodes(&blocks);
+    let Some(Inline {
+        kind: InlineKind::Link(link),
+        ..
+    }) = nodes
+        .iter()
+        .find(|node| matches!(node.kind, InlineKind::Link(_)))
+    else {
+        panic!("expected an autolink in the admonition: {nodes:?}");
+    };
+    assert_eq!(
+        link.destination.as_str(autolink_source),
+        "https://example.com"
+    );
+    assert_eq!(
+        visible_text(autolink_source, &link.children),
+        "https://example.com"
     );
 
     let custom_options = Options {
@@ -776,6 +883,10 @@ fn table_cells_admonitions_and_custom_tags_finalize_without_provisional_targets(
     let (blocks, view) = final_view(tag_source, &custom_options);
     view.assert_no_previews();
     let nodes = all_nodes(&blocks);
+    assert!(
+        preview_kinds(&nodes).is_empty(),
+        "a custom tag kept a provisional node"
+    );
     assert!(
         nodes
             .iter()
