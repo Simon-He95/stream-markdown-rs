@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use stream_markdown_rs::{
     Block, BlockData, BlockId, BlockStatus, Change, Inline, InlineContent, InlineKind, Options,
-    ParseError, Parser, Preview, PreviewHint, Text, parse,
+    ParseError, Parser, Preview, PreviewHint, Syntax, Text, parse,
 };
 
 #[derive(Default)]
@@ -1436,6 +1436,52 @@ fn a_fence_releases_a_partial_line_when_it_cannot_close_the_block() {
         panic!("expected code")
     };
     assert_eq!(parser.source(body), "`value\n    ```");
+}
+
+#[test]
+fn standard_ai_preview_shows_a_disambiguated_first_inline_before_newline() {
+    for syntax in [Syntax::CommonMark, Syntax::Gfm] {
+        for marker in ["**", "__", "`"] {
+            let options = Options {
+                syntax,
+                preview: Preview::Ai,
+                ..Options::default()
+            };
+            let mut parser = Parser::new(options.clone());
+            let mut changes = Vec::new();
+            let mut view = View::default();
+
+            parser.append(marker, &mut changes).unwrap();
+            assert!(changes.is_empty(), "{syntax:?} {marker}");
+            parser
+                .append(&format!("PREVIEW{marker} 中文 "), &mut changes)
+                .unwrap();
+            let Some(Change::Insert { block, .. }) = changes.first() else {
+                panic!("expected a provisional paragraph for {syntax:?} {marker}: {changes:?}");
+            };
+            assert_eq!(block.status, BlockStatus::Open);
+            assert!(matches!(block.data, BlockData::Paragraph(_)));
+            let id = block.id;
+            assert!(changes.iter().any(
+                |change| matches!(change, Change::PreviewInlines { id: projected, nodes }
+                if *projected == id && match &nodes[0].kind {
+                    InlineKind::Strong(_) => marker != "`",
+                    InlineKind::Code(_) => marker == "`",
+                    _ => false,
+                })
+            ));
+            view.apply(&mut changes);
+
+            parser.append("😀\n", &mut changes).unwrap();
+            view.apply(&mut changes);
+            parser.finish(&mut changes).unwrap();
+            view.apply(&mut changes);
+            assert_eq!(
+                view.blocks.into_values().collect::<Vec<_>>(),
+                parse(parser.source_text(), &options).unwrap().nodes
+            );
+        }
+    }
 }
 
 #[test]

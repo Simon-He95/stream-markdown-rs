@@ -2171,13 +2171,16 @@ impl Engine {
         let root_preview = self.options.preview == Preview::Ai && self.containers.is_empty();
         let bracket_preview =
             root_preview || self.options.preview == Preview::Ai && self.partial_container.is_some();
-        let inline_text = self.options.markstream
-            && (self.draft.is_some()
+        let inline_text = if self.options.markstream {
+            self.draft.is_some()
                 || partial_inline_start(head, bracket_preview)
                 || self.options.preview == Preview::Ai
                     && self.partial_container.is_some()
                     && bare_code_marker(head)
-                || root_preview && byte.is_ascii_digit() && numeric_text_prefix(head));
+                || root_preview && byte.is_ascii_digit() && numeric_text_prefix(head)
+        } else {
+            root_preview && matches!(byte, b'*' | b'_' | b'`') && partial_inline_start(head, false)
+        };
         if !(ordinary_start(byte) || header_text || inline_text) || self.has_block_plugin(byte) {
             return;
         }
