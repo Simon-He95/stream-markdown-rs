@@ -23,6 +23,8 @@ pub enum InlineKind {
     Text(Text),
     Code(Text),
     /// A Markstream AI preview whose closing delimiter has yet to arrive.
+    ///
+    /// Preview nodes never survive finalization; an unmatched run becomes literal text.
     CodePreview(Text),
     Math {
         body: Text,
@@ -36,8 +38,14 @@ pub enum InlineKind {
     Highlight(Vec<Inline>),
     Insert(Vec<Inline>),
     Link(Box<Link>),
+    /// A provisional link whose destination has not closed.
+    ///
+    /// Preview nodes never survive finalization.
     LinkPreview(Box<Link>),
     Image(Box<Link>),
+    /// A provisional image whose destination has not closed.
+    ///
+    /// Preview nodes never survive finalization.
     ImagePreview(Box<Link>),
     NumericReference(Span),
     Html,

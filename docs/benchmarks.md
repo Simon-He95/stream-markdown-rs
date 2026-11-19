@@ -100,7 +100,7 @@ python3 -B crates/bench/run_evidence.py \
 
 The suite grows mixed Markdown and a real-chat fixture across five sizes, exercises six additional input shapes at 16 KiB, and runs borrowed 32-byte streaming at 16 KiB. It uses eleven timing rounds through 128 KiB, five at 1 MiB, and three at 8 MiB. The matrix alternates engine order across workloads. Each timed worker warms up first. Suite workers run sequentially. Matrix reports retain failed rows and timeouts. The source digest is tied to the recorded Rust toolchain. The underlying real-chat fixture is [checked in](../fixtures/corpus/ai-chat-streaming.md).
 
-For correctness outside the timed GFM overlap, run the [Rust, Node compatibility, and CommonMark/GFM suites](../README.md#运行验证). The Node bridge includes transport and adaptation overhead, so native parser numbers use the native benchmark executables.
+For correctness outside the timed GFM overlap, run the [Rust, Node compatibility, and CommonMark/GFM suites](../README.md#verification). The Node bridge includes transport and adaptation overhead, so native parser numbers use the native benchmark executables.
 
 ## Challenge a result
 

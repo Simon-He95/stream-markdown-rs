@@ -1,61 +1,61 @@
-# 面向 Rust TUI 的流式 Markdown 解析架构
+# Streaming Markdown parser architecture for Rust TUIs
 
-## 目标与配置
+## Goals and configuration
 
-一个 AI 回复对应一个解析会话。每次追加产生一批带 ID、类型、类型数据和生命周期的更新。TUI 按类型选择组件，按状态决定是否预览、更新或收尾。原生 Rust 提供完整解析和追加解析，共用语法规则。核心只处理 Markdown 数据，换行布局、代码着色和终端转义由 TUI 负责。
+One AI response corresponds to one parser session. Each append produces a batch of updates carrying an ID, kind, typed data, and lifecycle state. A TUI selects a component by kind and uses the state to decide whether to preview, update, or finalize. Native Rust provides both complete parsing and append parsing over the same grammar rules. The core handles Markdown data only; line layout, syntax highlighting, and terminal escaping belong to the TUI.
 
-语法与预览是两个独立的配置。默认语法采用 GFM，纯 CommonMark 可单独选择。AI 预览显式开启，两种语法都可以搭配 AI 预览。数学、自定义块和 Markstream 特有规则由显式扩展开关控制。语法配置和插件在会话开始前确定。
+Syntax and previews are independent options. The default syntax is GFM; pure CommonMark is available separately. AI preview is explicit and composes with either syntax. Math, custom blocks, and Markstream-specific rules are controlled by explicit extension flags. Syntax configuration and plugins are fixed before a session starts.
 
-| 配置 | 决定什么 | TUI 示例 |
+| Option | What it controls | TUI example |
 | --- | --- | --- |
-| `Syntax::Gfm` / `Syntax::CommonMark` | 块与行内语法，决定完整文本的解析结果。 | GFM 支持表格和任务项。 |
-| `Preview::Off` / `Preview::Ai` | 前缀证据足够时，是否给 UI 提前发送暂定类型或样式。 | `Syntax::Gfm` + `Preview::Ai` 同时提供 GFM 表格和未完成表格预览。 |
+| `Syntax::Gfm` / `Syntax::CommonMark` | Block and inline grammar, and therefore the complete parse of a text. | GFM supports tables and task items. |
+| `Preview::Off` / `Preview::Ai` | Whether enough prefix evidence exists to send a provisional kind or style to the UI early. | `Syntax::Gfm` + `Preview::Ai` provides both real GFM tables and previews of unfinished tables. |
 
-相同语法、扩展和内容在 `finish()` 之后应与完整解析一致，打开或关闭预览均如此。匹配官方示例时使用对应语法及示例指定的扩展。物理围栏是否到齐可以另作生命周期状态记录，完整的语法结构仍按规范生成。 [CommonMark 解析策略](https://spec.commonmark.org/0.31.2/#appendix-a-parsing-strategy) · [GFM 规范](https://github.github.com/gfm/)
+For identical syntax, extensions, and content, `finish()` must match complete parsing, with previews on or off. When matching official examples, use the syntax and extensions that the example specifies. Whether a physical fence has arrived may be recorded separately as lifecycle state; the complete syntax tree still follows the specification. [CommonMark parsing strategy](https://spec.commonmark.org/0.31.2/#appendix-a-parsing-strategy) · [GFM specification](https://github.github.com/gfm/)
 
-## 解析流程
+## Parsing pipeline
 
 ```mermaid
 flowchart LR
-  A["追加有效 UTF-8"] --> B["续扫行和语法前缀"]
-  B --> C["推进活动块和容器"]
-  C --> D["解析行内片段"]
-  C --> E["确认引用定义"]
+  A["Append valid UTF-8"] --> B["Resume line and syntax prefix scan"]
+  B --> C["Advance active blocks and containers"]
+  C --> D["Parse inline fragments"]
+  C --> E["Confirm reference definitions"]
   E --> D
-  B --> F["检查当前前缀的预判条件"]
-  D --> G["生成节点变化"]
+  B --> F["Check preview conditions for the current prefix"]
+  D --> G["Emit node changes"]
   F --> G
-  G --> H["Rust TUI 应用增量"]
+  G --> H["Rust TUI applies the increment"]
 ```
 
-1. **预扫描**从上次游标继续消费新增字节，识别换行、缩进、转义和可能的语法触发符。记录当前行与候选分隔符进度。收到末尾 `\r` 时等待是否与下一段开头的 `\n` 组成 CRLF。网络层拼齐 UTF-8 字符后调用 `append(&str)`。所有位置都以原始输入字节计。
-2. **块解析**用活动容器栈按行推进，先检查列表、引用等父块的续行条件，再应用当前语法的块开始、延续和结束规则。区分 lazy continuation、Setext 下划线、GFM 表格分隔行及围栏关闭。确认后的正文区间交给对应叶子块，代码和原始 HTML 等叶子块走各自的正文规则。未完成行只推进当前检查点，后续字节使结论成立时才提交结构。
-3. **行内解析**按当前叶子块或表格单元格推进，维护未决的分隔符、反引号长度、括号及引用候选。普通文本追加跨度，局部结论改变时从受影响位置纠正行内结果。块结构变化可重解释其未提交的叶子内容。跨块引用使用单独的依赖索引。
-4. **预览投影**读取当前游标的规则状态，经证据门槛产生独立的预览更新。预览在同一块 ID 下发布，并可撤回。源码、语法栈和引用索引只接收真实输入字节。
-5. **产生更新**时先创建父节点，再写其子节点或正文。合并同一批次内连续的文本追加。调用方应用变化后可以继续消费下一批。
+1. **Prescan** consumes new bytes from the previous cursor and identifies line endings, indentation, escapes, and possible syntax triggers. It records the current line and the progress of candidate delimiters. A trailing `\r` waits to see whether the next chunk starts with `\n`, forming CRLF. The network layer assembles complete UTF-8 characters before calling `append(&str)`. All positions count bytes in the original input.
+2. **Block parsing** advances line by line with the active container stack. It first checks continuation conditions for parents such as lists and block quotes, then applies the block start, continuation, and end rules of the current syntax. It distinguishes lazy continuation, Setext underlines, GFM table delimiter rows, and fence closers. Confirmed body ranges go to the corresponding leaf block; leaves such as code and raw HTML use their own body rules. An unfinished line only advances the current checkpoint; later bytes commit structure when the conclusion becomes provable.
+3. **Inline parsing** advances per active leaf block or table cell and tracks unresolved delimiters, backtick lengths, brackets, and reference candidates. Plain text appends spans, and local conclusions that change are corrected from the affected position. A block structure change can reinterpret its uncommitted leaf content. Cross-block references use a separate dependency index.
+4. **Preview projection** reads the rule state at the current cursor and produces independent preview updates after an evidence threshold. Previews are published under the same block ID and can be withdrawn. Source, grammar stack, and reference index only receive real input bytes.
+5. **Change emission** creates a parent node before writing its children or body. Consecutive text appends in the same batch are merged. The caller applies the changes and can consume the next batch.
 
-## 如何预判
+## How previews are predicted
 
-预判使用已读取的语法证据。单个触发符只进入规则的候选状态。每条规则定义触发位置、继续等待条件、首次允许展示的条件、确认条件和否决条件。检查转义、容器位置和当前活动块后才发送预览。证据不足时保持现有展示，可在当前尾部继续显示普通文本，或在 AI 模式短暂收住歧义标记。
+Previews use grammar evidence that has already arrived. A single trigger character only moves a rule into its candidate state. Each rule defines a trigger position, continuation conditions, the first condition that permits display, a confirmation condition, and a rejection condition. No preview is sent until escapes, container position, and the current active block have been checked. When evidence is insufficient, the existing display stays in place: the tail may continue to show ordinary text, or AI mode may briefly hold back an ambiguous marker.
 
-| 规则 | 等待阶段 | 达到预览门槛 | 确认或撤回 |
+| Rule | Waiting stage | Preview threshold | Confirmation or withdrawal |
 | --- | --- | --- | --- |
-| GFM 表格 | 只有表头行，或下一行到目前只有管道和空白。 | 完整候选表头后，分隔行已有实际短横线，已读部分仍能补成合法分隔行，列数未超出表头。可以发出表格预览。 | 分隔行结束并匹配列数时确认。遇到不可恢复的字符或列数错误时保留段落。 |
-| 列表和引用 | 孤立的 `-`、`>`、`2.`、`1. *`。数字本身可继续作为普通文本。 | 标记、语法要求的边界和该层首个可辨识正文均到齐时再投影容器。 | 正式块规则决定中断段落、缩进和续行；EOF 决定合法的空列表项或空引用。 |
-| 围栏代码 | 开头反引号或波浪号数量不足，或 info string 尚不完整。 | 行首位置、缩进、容器条件和完整开围栏行都符合语法时展示代码块；语言从已完成的 info string 读取。 | 确认开围栏即进入 `Open`。只有关闭围栏行确认后才进入 `Closed`。 |
-| 强调和行内代码 | 只有 `*`、`**` 或反引号串。 | 已满足分隔符上下文，且有可展示内容时可给同一段落加暂定样式。 | 配对后确认；未配对在段落边界或 EOF 按语法还原。 |
-| 链接和图片 | 孤立的 `[`、`![`，或标签还未闭合。 | 标签和目的地起始结构已识别，有合法前缀时可以展示标签预览。 | 语法确认、目的地可用后再提供可交互的链接或图片；补充内容否决时撤回预览。 |
-| 数学和自定义块 | 孤立的 `$`、`<`、不完整标签名或不完整扩展前缀。 | 启用对应扩展，达到其专属边界和正文门槛后才投影。货币和比较表达式保留文字。 | 使用扩展自己的结束和回落规则。普通代码、转义及已经确认的语法上下文仍有优先权。 |
+| GFM table | Only the header row has arrived, or the next row so far contains only pipes and whitespace. | After a complete candidate header, the delimiter row has at least one actual hyphen, the bytes read so far can still form a valid delimiter row, and the column count does not exceed the header. A table preview may be emitted. | Confirmed when the delimiter row ends and matches the column count. Keep the paragraph when an unrecoverable character or column-count error appears. |
+| Lists and block quotes | An isolated `-`, `>`, `2.`, or `1. *`. A number can still continue as ordinary text. | Project the container only after the marker, the boundary required by the grammar, and the first identifiable body text for that level have all arrived. | Formal block rules decide paragraph interruption, indentation, and continuation; EOF decides a legal empty list item or empty block quote. |
+| Fenced code | Fewer opening backticks or tildes than required, or an incomplete info string. | Show a code block once the line-start position, indentation, container conditions, and complete opening fence line all satisfy the grammar; the language is read from the completed info string. | Confirming the opening fence enters `Open`. Only a confirmed closing fence line enters `Closed`. |
+| Emphasis and inline code | Only `*`, `**`, or a backtick run. | Once delimiter context is satisfied and displayable content exists, the owning paragraph can receive a provisional style. | Confirmed when paired; an unmatched delimiter is restored as literal text at the paragraph boundary or EOF. |
+| Links and images | An isolated `[`, `![`, or an unclosed label. | Once the label and the start of a destination structure are recognized, a label preview may be shown when a valid prefix exists. | Provide an interactive link or image only after syntax confirmation and an available destination; withdraw the preview when later content rejects it. |
+| Math and custom blocks | An isolated `$`, `<`, an incomplete tag name, or an incomplete extension prefix. | Project only when the corresponding extension is enabled and its specific boundary and body threshold have been reached. Currency and comparison expressions stay literal. | Use the extension's own closing and fallback rules. Ordinary code, escapes, and already-confirmed syntax context still take precedence. |
 
-例如逐次追加 `A | B\n`、`|`、`-`、`| - |\n`。第一步仍是段落，第二步只是候选扫描状态，第三步可发暂定表格，第四步才确认。若在第三步后接上 `no`，只更新当前块，恢复文本视图。候选检查按新字节推进，前缀越长也无需重复扫描整行。
+For example, append `A | B\n`, `|`, `-`, and `| - |\n` one at a time. The first step is still a paragraph, the second only updates candidate scan state, the third may emit a provisional table, and the fourth confirms it. If `no` arrives after the third step, only the current block is updated and the text view returns. Candidate checks advance with new bytes, so a longer prefix never rescans the whole line.
 
-表格确认后，新行的行首 `|` 已足以识别表格行。此时可以交付空的暂定单元格，正文到达后更新同一行。
+Once a table is confirmed, a leading `|` on a new line is enough to recognize a table row. An empty provisional cell can be delivered at that point and updated when its body arrives.
 
-以现有 `stream-markdown-parser` 的回归用例给规则取正例和负例。单行表头不应启动表格、孤立列表标记不应引入嵌套项、未闭合粗体最终退回正文，都是现成例子。旧表格预览允许第二行只有管道或后续全角冒号时也保持 loading。新原生 AI 规则要求实际分隔符证据，这些前缀记入迁移差异，并分别保留旧断言和新规则断言。对拍核对可观察行为，差异报告明确到用例及前缀。 [表格回归](../test/original/table-loading-midstate.test.ts) · [有序列表回归](../test/behavior/ordered-list-streaming-jitter.test.ts) · [未闭合粗体回归](../test/behavior/final-unclosed-strong-literal.test.ts)
+The regression cases of `stream-markdown-parser` provide positive and negative examples for these rules. A single-line header must not start a table, an isolated list marker must not introduce a nested item, and an unclosed bold run must eventually fall back to text. The legacy table preview also stayed loading when the second row held only pipes or later a full-width colon. The new native AI rules require actual delimiter evidence; those prefixes are recorded as migration differences, and the legacy assertions and the new rule assertions are kept separately. Differential comparison checks observable behavior, and the difference report names each case and prefix. [Table regression](../test/original/table-loading-midstate.test.ts) · [Ordered-list regression](../test/behavior/ordered-list-streaming-jitter.test.ts) · [Unclosed-bold regression](../test/behavior/final-unclosed-strong-literal.test.ts)
 
-## 节点、状态和 Rust 接口
+## Nodes, states, and the Rust API
 
-首版只在节点上持久化生命周期、原文区间和带类型的数据。`BlockData` 的枚举变体就是节点类型。`BlockId` 是更新流中的地址，在 TUI 的节点表里可直接作为键。创建节点时给出父级和插入位置，树的顺序由消费方保管。同一起点的段落转成 Setext 标题时沿用 ID，分裂出的新块分配新 ID。
+The first version persists only lifecycle, source range, and typed data on a node. The variants of `BlockData` are the node kinds. `BlockId` is the address in the update stream and can be used directly as a key in the TUI's node table. Node creation supplies the parent and insertion position; the consumer owns tree order. A paragraph that becomes a Setext heading keeps its ID; a split that creates a new block allocates a new ID.
 
 ```rust
 struct Block {
@@ -71,59 +71,95 @@ enum BlockStatus {
 }
 ```
 
-| 类型 | 给 UI 的最少数据 |
+| Kind | Minimum data for the UI |
 | --- | --- |
-| 段落、标题 | 已确认的行内内容。正文与块区间完全一致时直接引用块区间；标题另有级别。 |
-| 代码块 | info string 与代码正文。语言由 info string 派生，`diff`、`mermaid` 等交给专用视图。 |
-| 列表、引用 | 子块由树中的位置表达。列表额外记录会影响显示的起始编号、松紧和任务状态。 |
-| 表格 | 列对齐、表头和行内单元格，变化按行或当前单元格定位。 |
-| HTML 和已注册的自定义标签 | 自定义标签可读取标签名和属性，正文按规则交付。规范模式下的原始 HTML 保留其源码区间。 |
-| 数学、脚注、其它扩展节点 | 语法实际需要的类型数据。扩展节点用注册时确定的类型标识和类型化字段。 |
+| Paragraph, heading | Confirmed inline content. When the body is identical to the block range, reference that range directly; a heading also carries its level. |
+| Code block | Info string and code body. The language is derived from the info string; `diff`, `mermaid`, and similar values go to specialized views. |
+| List, block quote | Child blocks are represented by their position in the tree. A list additionally records the start number, tightness, and task state that affect display. |
+| Table | Column alignment, header, and inline cells; changes address a row or the current cell. |
+| HTML and registered custom tags | A custom tag exposes its tag name and attributes; its body follows the tag rules. Raw HTML in conformance mode keeps its source range. |
+| Math, footnotes, and other extension nodes | The typed data the grammar actually requires. Extension nodes use the kind identifier and typed fields fixed at registration time. |
 
-围栏的 info string 通过 `BlockData::code_info()` 读取。摘要和脚注共享所属块的源码起点，通过 `Block::summary_opening()` 和 `Block::footnote_label()` 获取完整区间。
+A fence's info string is read through `BlockData::code_info()`. A summary and a footnote share the source start of their owning block; `Block::summary_opening()` and `Block::footnote_label()` return the complete ranges.
 
-### HTML/XML 风格的自定义标签
+### HTML/XML-style custom tags
 
-在 `Options::custom_tags` 注册的标签可以成为 `BlockData::CustomTag` 或 `InlineKind::CustomTag`。块和行内节点都通过 `element.tag.tag_name(source)` 和 `element.tag.attrs(source)` 向 TUI 提供名称和属性。标签元数据只存标签名和属性区域的源码区间。迭代属性时直接借用原文，保留原始拼写、实体引用和属性顺序，并用 `None` 和 `Some("")` 区分缺失值与空字符串。正文由源码区间和解析出的 Markdown 子节点提供。
+Tags registered in `Options::custom_tags` can become `BlockData::CustomTag` or `InlineKind::CustomTag`. Both block and inline nodes expose the name and attributes to the TUI through `element.tag.tag_name(source)` and `element.tag.attrs(source)`. Tag metadata stores only the source ranges of the tag name and attribute region. Attribute iteration borrows the original text, preserving original spelling, entity references, and attribute order, and distinguishes a missing value (`None`) from an empty value (`Some("")`). The body is provided by its source range and parsed Markdown children.
 
-例如依次收到 `<tool-call name="search" title="a >` 和 ` b">`。预扫描跨 chunk 保留当前引号状态，引号内的 `>` 是属性值的一部分。等引号外的 `>` 到齐，再发出已确认的 `tool-call` 节点及属性。块级配对标签在正文到达期间是 `Open`，收到匹配的结束标签后变为 `Closed`。自闭合写法 `<tool-call name="search" />` 首次交付即为 `Closed`。若开标签已确认但结束标签在 EOF 前缺失，块变为 `Incomplete`。行内标签的暂定样式和更新由所属块管理。
+For example, receive `<tool-call name="search" title="a >` followed by ` b">`. Prescan preserves the current quote state across chunks; a `>` inside a quoted value is part of the attribute. Once the `>` outside quotes arrives, the confirmed `tool-call` node and its attributes are emitted. A paired block-level tag is `Open` while its body arrives and becomes `Closed` after the matching end tag. The self-closing form `<tool-call name="search" />` is delivered as `Closed` immediately. If the opening tag is confirmed but the end tag is missing before EOF, the block becomes `Incomplete`. Provisional styles and updates for inline tags are managed by the owning block.
 
-顶层注册标签的开标签可以跨物理行，带引号的属性值保留原始换行。候选判定失败或未完成就到达 EOF 时，已缓冲的行交回普通 Markdown 处理。
+An opening tag for a top-level registered tag may span physical lines, and a quoted attribute value keeps its original newlines. If candidate detection fails or EOF arrives before completion, the buffered lines return to ordinary Markdown handling.
 
-注册标签正文中的 `<!-- ... -->` 和 `<![CDATA[ ... ]]>` 保留原文。两者内部的同名闭标签不会结束正文，结束标记到达后从当前游标继续扫描。
+Within a registered tag body, `<!-- ... -->` and `<![CDATA[ ... ]]>` keep their source text. A same-name closing tag inside either construct does not end the body; scanning resumes from the current cursor after the closing marker arrives.
 
-注册标签使用 ASCII 名称并按大小写匹配。名称中的冒号作为原始字符保留。CommonMark/GFM 识别的原始 HTML 通过其源码区间交付。 [XML 起始标签、结束标签和空元素标签](https://www.w3.org/TR/xml/#sec-starttags)
+Registered tags use ASCII names and match case-sensitively. A colon in a name is preserved as a literal character. Raw HTML recognized by CommonMark/GFM is delivered through its source range. [XML start tags, end tags, and empty-element tags](https://www.w3.org/TR/xml/#sec-starttags)
 
-启用 Markstream 后，顶层独立的 `<div>` 或 `<section>` 先按原始 HTML 交付。空行到达且开标签仍未闭合时，解析器复用块 ID，升格为 `HtmlWrapper`。空行前的正文只回读一次并交付为 Markdown 子块，后续正文按行增量解析。
+With Markstream enabled, a standalone top-level `<div>` or `<section>` is first delivered as raw HTML. If a blank line arrives while the opening tag is still unclosed, the parser reuses the block ID and promotes it to `HtmlWrapper`. The body before the blank line is read back once and delivered as Markdown child blocks; later body content is parsed incrementally line by line.
 
-### 三种块状态与暂定预览
+### Three block states
 
-| 持久状态 | 需要区分的行为 |
+| Persisted state | Behavior it must distinguish |
 | --- | --- |
-| `Open` | 追加仍能改变块。Setext 下划线等正式语法可以改判仍开放的块。 |
-| `Closed` | 块的局部语法结构已结束。普通追加跳过该块，晚到引用仍可定点更新内容。 |
-| `Incomplete` | 会话已结束，明确需要的闭合标记未到。TUI 停止 loading，仍可区分完整围栏和被截断的围栏。 |
+| `Open` | Appends can still change the block. Formal syntax such as a Setext underline can reclassify a block that is still open. |
+| `Closed` | The block's local syntax structure has ended. Ordinary appends skip the block; a late reference can still update its content in place. |
+| `Incomplete` | The session has ended and a required closing marker did not arrive. The TUI stops loading and can still distinguish a complete fence from a truncated one. |
 
-TUI 可见的「暂定」来自独立的预览更新。预览只携带块 ID、覆盖区间和提示的类型或样式；需要新锚点时先建立该位置的普通文本视图，再按该 ID 发布预览。确认或撤回时复用 ID。节点替换、移除或结束时清理覆盖的预览，其它提前撤回的情况发清除操作。仅在内部等待证据的候选保留扫描进度，暂时没有 UI 状态。
+### Finalization and malformed input
 
-表格分隔行、引用和数学预览共享一份工作状态，在首次使用其中一项时分配。
+A parser session has exactly one final marker: `finish()`. Complete parsing (`parse()`) is final by definition. The API deliberately has no per-append `final` boolean because append boundaries do not change meaning: a session may receive the message in one chunk or in thousands, and `finish()` settles whatever the last append left open.
 
-| 流式场景 | 需要的最小变化 |
+This is the Rust equivalent of `final: true` in `stream-markdown-parser`:
+
+- `Parser::finish` / `BorrowedParser::finish` are the final mode for a streaming session. Call `finish()` after the last chunk even when that chunk appears to complete the message. An append on its own is always a streaming state.
+- `parse()` is the final mode for a complete document and the right entry point for history messages.
+- `finish()` is idempotent. A second call emits no changes, and an append after it returns `ParseError::Finished`.
+
+Finalization is authoritative:
+
+- Every provisional inline node (`InlineKind::CodePreview`, `InlineKind::LinkPreview`, `InlineKind::ImagePreview`) and every `Preview`/`PreviewInlines` overlay is withdrawn.
+- Incomplete inline syntax is reparsed as literal source according to CommonMark/GFM. An unclosed link or image destination does not remain linked, and a closed `![...]` that cannot become an image stays text. A URL that GFM autolinking recognizes inside the resulting literal source may still become an ordinary `Link`.
+- Unclosed block constructs become `Incomplete`; paragraphs whose grammar is complete become `Closed`.
+- A final parse never reports a loading construct that can no longer resolve. The Rust API represents "loading" as a preview node or overlay, so `finish()` is the point after which no loading state remains.
+
+| Final input | Final block content |
 | --- | --- |
-| 只收到 `*` 或表格第二行的 `|` | 解析器暂存未决规则状态。UI 维持当前文本或展示收到的普通内容。 |
-| `**粗体` 或表格开始满足预判 | 为所属块的源码范围发预览。行内标记由块管理，避免给每个行内片段附加生命周期。 |
-| 表格确认或候选被否决 | 正式替换同 ID 的块，或清除预览并保留原有文本。 |
-| 围栏正文仍在到达 | 保持 `Open`，发布正文增量。收到合法关闭围栏后发送一次 `Closed` 更新。 |
-| EOF 到达且围栏仍未闭合 | 将块更新为 `Incomplete`。EOF 能自然闭合的普通段落更新为 `Closed`。未配对的行内样式按语法还原。 |
-| 引用定义在文末到达 | 定点更新已 `Closed` 的块，保留状态和 ID。块移除由更新流表达，传输取消或出错由应用层记录。 |
+| `![a](https://e.com/a.png` | Text `![a](` plus an autolink for `https://e.com/a.png`; no image. |
+| `[a](https://e.com/a.png` | Text `[a](` plus an autolink; no link syntax that never closed. |
+| `![a](https://e.com/a b.png)` | Text `![a](`, autolink `https://e.com/a`, text ` b.png)`; no image. |
+| `![a] (https://e.com/l)` | Text `![a] (`, autolink, text `)`; a space between `]` and `(` is never folded into link syntax. |
+| `vec![1, 2, 3]` / `![alt]` | Literal text; a closed bracket that cannot become an image is not a placeholder. |
+| `See [![logo](a.png)]( http://s` | Text `See [`, the real `a.png` image, text `]( http://s`; the image stays visible instead of hiding behind an unfinished link. |
+| `::: tip`<br>`<https://example.com>`<br>`:::` | An autolink whose label is the destination. |
+| `![a](javascript:alert(1))` | An image whose destination is delivered verbatim; scheme policy belongs to the renderer. |
 
-`finish()` 消费最后一行，再处理未决引用和活动块，结束时所有块都是 `Closed` 或 `Incomplete`，所有预览已清除。重复结束无新增变化，结束后追加返回会话已结束。
+**Security boundary.** The parser is not a sanitizer. Raw HTML is delivered as source ranges, and link and image destinations are delivered verbatim. A TUI must validate URL schemes and sanitize HTML before rendering or activating anything. The core does not reject `javascript:`, `data:`, or `file:` destinations because such filtering is a rendering policy rather than CommonMark/GFM syntax, and a parser-level filter would make `parse()` and `finish()` diverge from the specification.
 
-Markstream 的 AI 预览用 `InlineKind::CodePreview` 表示已有正文、仍在等待结束反引号的行内代码。补全后交付 `InlineKind::Code`，收尾时仍未匹配的分隔符保留为文字。段落和暂定表格行共用这两种类型，TUI 可以沿用同一套渲染组件和状态样式。
+The final-source shapes above, preview withdrawal, streaming/static parity, and idempotent completion are pinned in [`tests/finalization.rs`](../tests/finalization.rs). The cases mirror the recent `final: true` fixes in `stream-markdown-parser` for unclosed destinations, closed brackets that cannot become images, images inside unfinished links, and spaced brackets.
 
-### 源码与增量输出
+### Provisional previews
 
-首版接口形状如下。调用方持有并复用 `out`，解析器向后追加操作。
+The "provisional" view visible to a TUI comes from independent preview updates. A preview carries a block ID, an overlay range, and a hinted kind or style; when a new anchor is needed, the parser first establishes an ordinary text view at that position and then publishes the preview under that ID. Confirmation or withdrawal reuses the ID. Node replacement, removal, or closure clears covered previews; other early withdrawals emit a clear operation. A candidate that is only waiting for internal evidence keeps scan progress and has no UI state yet.
+
+`PreviewInlines` is an inline overlay, not a guarantee that every node inside it is provisional. Once a construct is confirmed while its block is still open, the overlay may contain confirmed nodes; the overlay is cleared when the block is replaced or closed, or when an empty node list is emitted. This keeps a single rendering path for open paragraphs and headings.
+
+Table delimiter rows, reference previews, and math previews share one working state, allocated when the first of them is used.
+
+| Streaming case | Minimum change required |
+| --- | --- |
+| Only `*` or the leading pipe of a table's second row has arrived | The parser stores unresolved rule state. The UI keeps the current text or shows the ordinary content received so far. |
+| `**bold` or a table start meets its preview threshold | Emit a preview for the owning block's source range. Inline markers are managed by the block, avoiding a lifecycle object for every inline fragment. |
+| A table is confirmed or a candidate is rejected | Replace the block under the same ID with its formal form, or clear the preview and keep the existing text. |
+| Fence body is still arriving | Stay `Open` and publish body increments. Emit one `Closed` update after a legal closing fence. |
+| EOF arrives while a fence is still open | Update the block to `Incomplete`. An ordinary paragraph that EOF can close naturally becomes `Closed`. Unmatched inline styles are restored according to the grammar. |
+| A reference definition arrives at the end of the document | Update the already-`Closed` block in place, preserving its state and ID. Block removal is expressed by the update stream; transport cancellation or failure is recorded by the application. |
+
+`finish()` consumes the last line, settles pending references and active blocks, and returns with every block `Closed` or `Incomplete` and every preview cleared. Repeated completion emits no new changes; appending afterwards returns the session-finished error.
+
+Markstream's AI preview uses `InlineKind::CodePreview` for inline code that has content but is still waiting for its closing backticks. Completion delivers `InlineKind::Code`; an unmatched delimiter at finalization stays literal text. Paragraphs and provisional table rows share the same kinds, so a TUI can reuse one set of renderers and status styles.
+
+### Source and incremental output
+
+The first version has the following interface shape. The caller owns and reuses `out`; the parser appends operations to it.
 
 ```rust
 fn append(&mut self, chunk: &str, out: &mut Vec<Change>) -> Result<(), ParseError>;
@@ -132,55 +168,55 @@ fn source(&self, span: Span) -> &str;
 fn parse<'src>(source: &'src str, options: &Options) -> Result<Document<'src>, ParseError>;
 ```
 
-`Change` 包含插入、更新、替换、移除和预览。更新按节点类型表达追加代码正文、添加表格行、更新局部行内内容、改变松紧或更新状态。`loading`、`final` 和可交互状态由 TUI 从块状态、是否有预览及可用数据推导。一个块的内容追加和状态更新可以独立发送，正文保持原位。
+`Change` covers insert, update, replace, remove, and preview. Updates express appending a code body, adding a table row, changing local inline content, changing list tightness, or changing status, according to node kind. The TUI derives `loading`, `final`, and interactivity from block status, the presence of a preview, and available data. Content append and status update for one block may be sent independently; the body stays in place.
 
-源码在会话中保留一份。连续文本用半开区间表达，容器缩进和跨行正文可用多个原文片段表达。实体解码等确实产生新内容时才持有新文本。TUI 可以保存节点和区间，按需借用源码；最终消息若要超过会话寿命，可以接管最终源码和节点。解析器把正式节点交给调用方，自己只保留活动规则、待解决依赖和相应位置。已交付的数据无需在解析端留第二棵树。
+The session keeps one copy of the source. Contiguous text is expressed as a half-open range; container indentation and multi-line bodies can use several source fragments. New text is retained only when decoding entities or another operation genuinely produces different content. A TUI can store nodes and ranges and borrow the source on demand; if a final message must outlive the session, it can take ownership of the final source and nodes. The parser hands formal nodes to the caller and retains only active rules, unresolved dependencies, and their positions. Delivered data needs no second tree in the parser.
 
-`Parser` 持有源码并接收单个分包。已由 TUI 管理源码的会话可以把原来的 `String` 移入 `SourceBuffer`，通过 `BorrowedParser` 直接解析同一份源码。每次追加后，调用方把缓冲区和可见的 UTF-8 字节终点传给解析器。缓冲区只提供追加操作，解析会话绑定其身份，并验证可见终点不会回退。节点区间可以直接用于读取 `SourceBuffer::as_str()`。两个入口共用增量状态、插件注册和错误回滚逻辑。
+`Parser` owns the source and accepts individual chunks. A session whose TUI already manages the source can move its `String` into `SourceBuffer` and parse appended content directly through `BorrowedParser`. After each append, the caller passes the buffer and the visible UTF-8 byte end to the parser. The buffer only supports appends, and the session is bound to its identity and verifies that the visible end never moves backwards. Node ranges can be used directly to read `SourceBuffer::as_str()`. Both entry points share incremental state, plugin registration, and error rollback.
 
-这里的最小表示指语义字段。实际字节数还取决于最大枚举变体、对齐和子数据分配。首版记录 `Block`、`Change`、源码区间的大小以及每个场景的堆分配，届时再决定是否缩窄偏移、分离大变体或压缩字段。
+"Minimum representation" here means semantic fields. Actual byte size also depends on the largest enum variant, alignment, and allocation of child data. The first version records the size of `Block`, `Change`, a source range, and the heap allocation per scenario; these measurements decide later whether to narrow offsets, split large variants, or compress fields.
 
-## 增量状态与块缓存
+## Incremental state and block cache
 
-| 状态 | 从第一版保留的最小信息 | 何时重算 |
+| State | Minimum information retained from the first version | When it is recomputed |
 | --- | --- | --- |
-| 预扫游标与活动块 | 当前行字节位置、容器栈、分隔符进度、最近可确认边界。 | 每次只处理新增内容和确实影响的开放区间。 |
-| 结构已确认的块 | 仅在有待解决依赖时索引块 ID 和源码位置。 | 正常追加跳过此前的源码、块和行内解析。已知要回改时才按 ID 定位。 |
-| 引用定义与等待者 | 已确认定义，以及规范化标签到受影响叶子块、标题或单元格的索引。 | 首个有效定义确认后，只重算登记的行内范围。 |
-| 删除、截断或配置变化 | 由调用方销毁旧会话并重建。 | 追加是首版热路径，编辑型增量独立考虑。 |
+| Prescan cursor and active block | Current line byte position, container stack, delimiter progress, and the most recent confirmable boundary. | Process only new content and open ranges that are actually affected on each append. |
+| Structurally confirmed block | Index block ID and source position only while an unresolved dependency exists. | Normal appends skip earlier source, block, and inline parsing. Locate by ID only when a change is known to be needed. |
+| Reference definitions and waiters | Confirmed definitions plus an index from normalized labels to affected leaf blocks, headings, or cells. | After the first valid definition is confirmed, recompute only registered inline ranges. |
+| Deletion, truncation, or configuration change | The caller destroys the old session and builds a new one. | Append is the hot path in the first version; editing increments are considered separately. |
 
-引用定义可能跨行，标题补全或后续文本都可能影响它是否成立。先等块规则确认，再通知等待者。晚到定义可能影响括号结合和嵌套关系，回改最小的完整行内上下文，而非仅替换一个链接字段。脚注等影响显示顺序的扩展独立登记依赖。最长未决跨度取决于语法，缓存边界由语法状态确定。
+A reference definition may span lines, and completing a title or later text can affect whether it holds. Wait for the block rule to confirm it, then notify waiters. A late definition can affect bracket binding and nesting, so reparse the smallest complete inline context rather than replacing a single link field. Extensions that affect display order, such as footnotes, register dependencies independently. The longest unresolved span depends on the grammar; the cache boundary is determined by grammar state.
 
-活动段落和标题的 AI 预览只缓存经过确认的普通文本前缀区间。词法探测从最后一个安全的空白边界继续，原始范围仍用于判断行内分隔符和生成更新。遇到无法证明稳定的字符就保留后续上下文。缓存不复制源码或节点。`Metrics` 分别记录预览探测和词法入口处理的字节数。
+AI previews for active paragraphs and headings cache only confirmed plain-text prefix ranges. Lexical probing resumes from the last safe whitespace boundary, while the original range is still used to decide inline delimiters and emit updates. When a character cannot be proven stable, later context is retained. The cache does not copy source or nodes. `Metrics` records bytes submitted to preview probing and lexical entry points separately.
 
-后续通过扫描计数和分配剖析决定是否引入小对象内联、区间压缩、SIMD 扫描或额外热点缓存。第一版的缓存重点是续跑、跳过稳定块和定位真实失效。
+Later work uses scan counts and allocation profiles to decide whether to introduce small-object inlining, range compression, SIMD scanning, or additional hot caches. The first version's cache focuses on resuming, skipping stable blocks, and locating real invalidation.
 
-## 完整解析
+## Complete parsing
 
-完整解析直接借用已有 `&str`，按批处理入口执行同一套块、行内、插件和结束规则。块解析收集全部定义，随后一次解析各块的行内数据，直接构建最终 `Document`。完整路径可以预分配已知容量，并跳过流式预览、待引用通知和变化记录。与流式结束结果比较时按结构、数据、源码区间和结束状态核对，块 ID 只在各自会话内比较。
+Complete parsing borrows an existing `&str` and runs the same block, inline, plugin, and finalization rules through the batch entry point. Block parsing collects all definitions, then parses each block's inline data once and builds the final `Document` directly. The complete path can preallocate known capacity and skip streaming previews, pending-reference notifications, and change recording. Comparison with a streamed final result checks structure, data, source ranges, and final status; block IDs are only compared within their own sessions.
 
-聊天历史中的独立消息可以用 `restore_history(messages, visible, options)` 恢复。迭代器先交付可见范围中的消息，再按原始顺序交付其他消息。每项带原始消息索引，TUI 可以用 `by_ref().take(n)` 控制单次工作量并定点填回。消息间不共享引用定义。超长单条消息仍由单次 `parse` 处理。
+Independent messages in chat history can be restored with `restore_history(messages, visible, options)`. The iterator delivers messages in the visible range first, then the remaining messages in original order. Each item carries its original message index, so a TUI can limit work per call with `by_ref().take(n)` and fill slots back in place. Reference definitions are not shared between messages. An oversized single message still goes through one `parse` call.
 
-## 插件架构
+## Plugin architecture
 
-第一版提供内置扩展、Rust 静态注册和运行时加载第三方插件。注册描述包含 ASCII 触发字符、块或行内范围以及结果节点类型。内置规则保留直接调用，第三方规则只接收核心确认可用且命中触发字符的候选。
+The first version supports built-in extensions, static Rust registration, and runtime loading of third-party plugins. A registration describes ASCII trigger characters, block or inline scope, and the resulting node type. Built-in rules keep direct calls; third-party rules receive only candidates that the core has confirmed are available and whose trigger character matched.
 
-| 规则阶段 | 插件拿到的输入 | 允许返回 |
+| Rule phase | Input the plugin receives | Allowed result |
 | --- | --- | --- |
-| 探测 | 从触发字符开始的有界源码片段。 | 拒绝、等待更多输入或接受。 |
-| 推进 | 从上次未消费位置开始的有界源码片段。 | 消费进度、等待后续输入或接受。 |
-| 结束 | 文档或父容器结束时剩余的输入。 | 接受或把候选交回普通 Markdown。 |
+| Probe | A bounded source fragment starting at the trigger character. | Reject, wait for more input, or accept. |
+| Advance | A bounded source fragment starting at the previous unconsumed position. | Consume progress, wait for more input, or accept. |
+| Finish | Remaining input when the document or parent container ends. | Accept, or return the candidate to ordinary Markdown. |
 
-块规则在完整 Markdown 行上按注册顺序探测。行内规则在核心提供的原文文本区间内执行，转义和代码等语法边界由核心判定。块规则等待输入时保留游标和状态，确认接受后由核心分配节点 ID 并输出结构。已消费部分输入的块候选随后拒绝时，核心仅回放该候选的源码，按普通 Markdown 准确恢复块边界。父容器结束时先结束候选，再处理下一行。持续等待且无法在有界窗口内推进会返回插件错误。
+Block rules are probed on complete Markdown lines in registration order. Inline rules run over original text ranges supplied by the core; grammar boundaries such as escapes and code are decided by the core. A block rule that waits keeps its cursor and state; once it accepts, the core allocates a node ID and emits structure. If a block candidate that consumed part of its input later rejects, the core replays only that candidate's source and restores block boundaries exactly as ordinary Markdown. When a parent container ends, candidates finish before the next line is processed. Waiting indefinitely without progress inside the bounded window returns a plugin error.
 
-运行时插件采用 **WASM 模块 + 有版本的宿主协议**。作为可选宿主层接入，纯 Rust TUI 可以按需选择是否打包运行时。应用注册本地模块及规则描述，宿主在加载时校验协议版本、触发条件和节点字段类型。模块代码可以复用，解析状态按会话隔离。候选命中后通过一次调用传递相关片段或增量，并回收已经结束的规则状态。数据跨边界使用明确的整数、字节区间和类型字段，插件拿不到宿主内存指针。
+Runtime plugins use a **WASM module plus a versioned host protocol**, integrated as an optional host layer; a pure Rust TUI can choose whether to package the runtime. The application registers local modules and rule descriptions. The host validates protocol version, trigger conditions, and node field types at load time. Module code can be reused, while parser state is isolated per session. After a candidate matches, one call carries the relevant fragment or increment, and finished rule state is reclaimed. Data crossing the boundary uses explicit integers, byte ranges, and typed fields; plugins never receive host memory pointers.
 
-宿主为第三方插件限制可读区间、指令、线性内存和输出量，只提供解析协议需要的能力。错误的范围、无进展的推进、执行失败和超限作为插件错误返回给调用方。失败时丢弃本次追加产生的变化并终止会话，TUI 可保留此前成功显示的内容。插件通过节点类型和字段与 TUI 对接。ABI v1 交付匹配区间，ABI v2 可附加借用匹配原文的区间、整数和布尔值。 [WASM 宿主与协议](../crates/plugin-host/README.md) · [WebAssembly 核心规范](https://webassembly.github.io/spec/core/intro/introduction.html)
+The host constrains readable ranges, instructions, linear memory, and output size for third-party plugins, exposing only what the parsing protocol requires. Invalid ranges, advancing without progress, execution failures, and limit violations are returned to the caller as plugin errors. On failure, changes from the current append are discarded and the session ends; the TUI may keep content it has already displayed successfully. Plugins connect to the TUI through node kinds and fields. ABI v1 delivers match ranges; ABI v2 may add ranges borrowing matched source, integers, and booleans. [WASM host and protocol](../crates/plugin-host/README.md) · [WebAssembly core specification](https://webassembly.github.io/spec/core/intro/introduction.html)
 
-## 验证与实施顺序
+## Verification and implementation order
 
-1. 先实现 Rust 接口、增量更新和完整解析的最小路径，覆盖段落、Setext、围栏以及晚到引用。为每条预判验证「不足」「可预览」「确认」「否决」「EOF」，同时断言状态转换、预览清理和块 ID。按每个字符边界和固定种子随机切分。相同前缀在不同切法下应产生等价的可见状态，结束后应与静态结构一致。
-2. 实现相同插件契约下的一个静态规则与一个运行时规则，并覆盖块、行内候选的优先级和结束行为。验证单个插件追加路径、无匹配规则的调度成本、错误返回及会话隔离。
-3. 补齐语法与兼容性。运行官方 CommonMark/GFM 示例、现有候选行为测试和逐前缀差分，从混合测试中继续提取节点层断言。保留旧解析器内部测试，显式记录兼容输出的有意差异。
-4. 建立原生基准和 TUI 数据更新基准，再做热点优化。用 Release 构建测静态吞吐、首批有效更新、追加 p95、结束耗时和累计 CPU；单独测应用更新、终端绘制和排队延迟。分配测量独立记录计数、活跃和峰值字节、源码与索引容量、会话释放后保留量；插件另记首次加载、增量调用成本和运行时体积。
-5. 在长段落、长围栏、长列表、表格、稳定块和晚到引用上按 1×、2×、4× 检查扩展性。至少记录新增字节、实际扫描字节、稳定块重扫字节、失效块和输出变化数。正常追加要求稳定块重扫为零；晚到引用要求只访问登记的依赖。生态对照以相同输入、切分、语义及输出工作量为前提。 [现有基准脚本](../scripts/benchmark.mjs)
+1. Implement the minimal Rust interface, incremental updates, and complete parsing, covering paragraphs, Setext headings, fences, and late references. For every preview rule, verify "insufficient", "previewable", "confirmed", "rejected", and "EOF", asserting state transitions, preview cleanup, and block IDs. Split at every character boundary and at fixed random seeds. The same prefix split differently must produce an equivalent visible state and must match the static structure after finalization.
+2. Implement one static rule and one runtime rule under the same plugin contract, and cover priority and finishing behavior for block and inline candidates. Verify the single-plugin append path, dispatch cost when no rule matches, error returns, and session isolation.
+3. Complete syntax and compatibility coverage. Run the official CommonMark/GFM examples, existing candidate behavior tests, and per-prefix differential comparison; keep extracting node-level assertions from mixed tests. Keep legacy parser-internal tests and record intentional differences in compatible output explicitly.
+4. Build native benchmarks and TUI data-update benchmarks before optimizing hot paths. Use release builds to measure static throughput, first meaningful update, append p95, finish time, and cumulative CPU; measure applying updates, terminal drawing, and queueing latency separately. Allocation measurements independently record count, live and peak bytes, source and index capacity, and retained bytes after session release; plugins additionally record first load, incremental call cost, and runtime size.
+5. Check scaling at 1x, 2x, and 4x on long paragraphs, long fences, long lists, tables, stable blocks, and late references. Record at least new bytes, actually scanned bytes, bytes rescanned in stable blocks, invalidated blocks, and emitted change count. Normal appends require zero stable-block rescans; a late reference requires access only to registered dependencies. Ecosystem comparisons require identical input, splitting, semantics, and output work. [Existing benchmark script](../scripts/benchmark.mjs)

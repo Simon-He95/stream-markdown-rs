@@ -2,17 +2,19 @@
 
 Incremental CommonMark and GitHub Flavored Markdown parser for Rust terminal UIs. It delivers typed block updates with lifecycle state, optional AI streaming previews, and full-document parsing.
 
-[Performance report and reproduction protocol](docs/benchmarks.md) · [Parser design (中文)](docs/design.md)
+[Performance report and reproduction protocol](docs/benchmarks.md) · [Parser design](docs/design.md)
 
-为 Rust TUI 解析 AI 流式 Markdown 的库。解析器把每次追加转换成带类型、内容变化和生命周期状态的块更新。终端 UI 可以用同一条流逐步显示段落、代码、表格和列表，按块状态决定何时提交最终样式。原生追加延迟、内存占用和更新范围是首要指标。默认 GFM，AI 预判可与 GFM 或 CommonMark 同时开启，运行时插件作为可选宿主层接入。
+A Rust library for parsing AI streaming Markdown in terminal UIs. The parser turns each append into typed block updates with content changes and lifecycle state. A terminal UI can render paragraphs, code, tables, and lists progressively from the same stream and use block status to decide when to commit final styling. Native append latency, memory use, and update scope are the primary metrics. GFM is the default; AI previews can be combined with GFM or CommonMark, and runtime plugins are an optional host layer.
 
-仓库包含 Rust 批处理和增量解析核心、可选 WASM 插件宿主、规范测试和原生基准。TUI 可以使用 `Parser::append` 获取变化批次，通过 `Parser::finish` 收尾，或用 `parse` 得到完整结构。 将 `Options::math` 与 `Options::footnotes` 设为 `true` 可启用数学和命名脚注扩展。`Options::markstream` 开启 VMR 容器、提示块、CJK 强调和排版扩展。通过 `Options::custom_tags` 注册的标签可借用属性和原始正文，同时携带解析后的行内子节点。AI 预览可为打开的段落和标题交付临时行内覆盖，关闭节点时交付最终结构。一次追加的变化批次可以合并同一节点的临时更新，已经返回给调用方的历史批次保持原样。
+The repository contains the Rust batch and incremental parsing core, an optional WASM plugin host, conformance tests, and native benchmarks. A TUI can call `Parser::append` for change batches, `Parser::finish` to settle the session, or `parse` for a complete document. Set `Options::math` and `Options::footnotes` to `true` to enable math and named footnotes. `Options::markstream` enables VMR containers, admonitions, CJK emphasis, and typographic extensions. Tags registered through `Options::custom_tags` borrow their attributes and raw body while also carrying parsed inline children. AI previews can deliver temporary inline overlays for open paragraphs and headings; closing a node delivers its final structure. A change batch from one append can merge temporary updates for the same node, while batches already returned to the caller stay unchanged.
 
-已经持有原文的 TUI 可以把 `String` 移入 `SourceBuffer`，用 `BorrowedParser` 解析追加到其中的内容。解析器交付的区间直接引用这一份原文。 [源码与增量输出](docs/design.md#源码与增量输出)
+Finalization is explicit. `finish()` is the final marker for a streaming session: it consumes the last line, settles pending references and active blocks, clears every preview, and leaves every block `Closed` or `Incomplete`. `parse()` is final by definition. Call `finish()` even when the last chunk appears to complete the message; an append alone is always a streaming state. See [finalization and malformed input](docs/design.md#finalization-and-malformed-input).
 
-## 运行验证
+A TUI that already owns the source can move its `String` into `SourceBuffer` and parse appended content with `BorrowedParser`. Ranges delivered by the parser borrow that single source. [Source and incremental output](docs/design.md#source-and-incremental-output)
 
-克隆仓库后，使用 Rust 1.88 或更新工具链及 pnpm 运行以下验证。
+## Verification
+
+After cloning the repository, use Rust 1.88 or newer and pnpm to run the following checks.
 
 ```sh
 cargo test --locked --workspace
@@ -25,16 +27,16 @@ pnpm --silent bench > results/reference-node.json
 pnpm test:spec --list
 ```
 
-- `test/behavior` 中的节点行为用例能在参考实现和候选适配器之间切换。
-- `test/original` 保存其余原始用例，涵盖依赖旧 token、插件和运行时内部的断言，以及还有待拆出节点断言的混合用例。
-- `test:differential` 重放固定种子和真实语料。候选模式逐提交与新建的参考实例对拍。参考模式还记录旧版复用过的 sync 实例与新实例的差异。
-- `test:spec` 首次运行下载并校验 CommonMark 0.31.2 和 cmark-gfm 0.29.0.gfm.13 的官方示例。`--native` 检查完整 Rust 解析，`--native-stream` 检查逐 Unicode 字符追加并应用变化后的结果。参考源码和真实语料自带，安装后可以离线运行回归测试。
+- Node behavior cases in `test/behavior` can switch between the reference implementation and the candidate adapter.
+- `test/original` holds the remaining original cases, including assertions that depend on legacy tokens, plugins, and runtime internals, plus mixed cases whose node-level assertions have not yet been extracted.
+- `test:differential` replays fixed seeds and real corpora. Candidate mode compares every commit with a freshly created reference instance. Reference mode also records how reused sync instances differ from new instances.
+- `test:spec` downloads and verifies the official CommonMark 0.31.2 and cmark-gfm 0.29.0.gfm.13 examples on first run. `--native` checks complete Rust parsing; `--native-stream` checks appending one Unicode scalar at a time and applying the resulting changes. The reference source and real corpus are bundled, so regression tests run offline after installation.
 
-参考源码归档和语料固定在 `markstream-vue` 的 `31668cf54cb74fc46a6b4d0e9e7f0db67fe8bfed`。归档和旧 tokenizer 只服务于验证。原仓库的未提交改动未纳入基线。
+The reference source archive and corpus are pinned to `markstream-vue` commit `31668cf54cb74fc46a6b4d0e9e7f0db67fe8bfed`. The archive and the legacy tokenizer serve verification only. Uncommitted changes from the original repository are not part of the baseline.
 
-## 接入候选实现
+## Candidate integration
 
-用本仓库的 Rust 候选运行兼容性测试：
+Run compatibility tests against this repository's Rust candidate:
 
 ```sh
 cargo build --locked --release --example node_candidate
@@ -42,7 +44,7 @@ node --test test/native-candidate.test.mjs
 PARSER_CANDIDATE=./scripts/native-candidate.mjs pnpm test:candidate
 ```
 
-Node 验证桥在同一个 Rust 会话上逐段追加，并把 Rust 变化应用到旧版节点视图。此桥用于兼容性测试，Rust TUI 和原生性能基准直接调用 Rust API。
+The Node verification bridge appends chunk by chunk to one Rust session and applies Rust changes to the legacy node view. The bridge is for compatibility tests; Rust TUIs and native benchmarks call the Rust API directly.
 
 ```sh
 PARSER_CANDIDATE=./path/to/adapter.mjs pnpm test:candidate
@@ -50,8 +52,8 @@ PARSER_CANDIDATE=./path/to/adapter.mjs pnpm test:spec
 PARSER_CANDIDATE=./path/to/adapter.mjs pnpm --silent bench > results/comparison-node.json
 ```
 
-Node 验证适配器导出同步的 `createSession({ id, factoryOptions, parseOptions })`，返回 `append(chunk)`、`finish()`、`snapshot()` 和可选的 `dispose()`、`metrics()`。适配器逐次应用候选输出的增量更新，测试需要时才读取当前节点。规范入口调用 `renderSpec(source, { dialect, extensions })`，把同一个核心解析出的节点转换成规范示例的 HTML。
+The Node verification adapter exports synchronous `createSession({ id, factoryOptions, parseOptions })`, returning `append(chunk)`, `finish()`, `snapshot()`, and optional `dispose()` and `metrics()`. The adapter applies each candidate update in order and reads current nodes only when a test needs them. The conformance entry point calls `renderSpec(source, { dialect, extensions })` and converts nodes from the same core into HTML for the specification examples.
 
-[查看流式预判、Rust 接口、插件、块缓存与验收设计](docs/design.md)
+[Streaming previews, Rust API, plugins, block caching, and acceptance design](docs/design.md)
 
-[原生性能基准](crates/bench/README.md) · [WASM 插件宿主与协议](crates/plugin-host/README.md)
+[Native benchmarks](crates/bench/README.md) · [WASM plugin host and protocol](crates/plugin-host/README.md)
