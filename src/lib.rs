@@ -56,28 +56,37 @@ impl Text {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Syntax {
+    /// Strict CommonMark 0.31.2 block and inline grammar.
     CommonMark,
+    /// CommonMark plus the GitHub Flavored Markdown extensions.
     #[default]
     Gfm,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Preview {
+    /// Deliver only syntax that has been confirmed.
     #[default]
     Off,
+    /// Deliver provisional previews for open blocks once prefix evidence is sufficient.
     Ai,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Options {
+    /// Block and inline grammar. Defaults to GFM.
     pub syntax: Syntax,
+    /// Provisional AI previews. Off by default.
     pub preview: Preview,
     /// Preview a complete pipe-delimited header before its separator arrives.
     pub preview_table_header: bool,
+    /// Enables math syntax and math blocks.
     pub math: bool,
+    /// Enables named footnote definitions and references.
     pub footnotes: bool,
     /// Enables Markstream syntax and typography extensions.
     pub markstream: bool,
+    /// Requires a closing `**` before emitting strong emphasis.
     pub require_closing_strong: bool,
     /// HTML-like element names that produce structured custom nodes.
     pub custom_tags: Vec<String>,
@@ -88,8 +97,13 @@ pub struct BlockId(pub usize);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BlockStatus {
+    /// Appends can still change the block.
     Open,
+    /// The block's local syntax structure has ended.
+    ///
+    /// A late reference definition may still update the block's content in place.
     Closed,
+    /// The session ended before a required closing marker arrived.
     Incomplete,
 }
 
@@ -326,6 +340,9 @@ pub enum Change {
     },
     /// Temporary inline overlay for a visible paragraph or heading.
     /// An empty vector clears it. Replacement or closure also clears it.
+    ///
+    /// An overlay may contain confirmed nodes while its block is still open;
+    /// it is not a guarantee that every node inside it is provisional.
     PreviewInlines {
         id: BlockId,
         nodes: Vec<Inline>,
@@ -434,6 +451,7 @@ pub struct Parser {
 }
 
 impl Parser {
+    /// Creates a session. Syntax, extensions, and preview mode are fixed for its lifetime.
     pub fn new(options: Options) -> Self {
         Self {
             source: String::new(),
@@ -445,6 +463,11 @@ impl Parser {
         self.stream.add_plugin(plugin)
     }
 
+    /// Appends valid UTF-8 bytes and emits the resulting change batch.
+    ///
+    /// Chunk boundaries are not semantic. The parser never infers that a chunk is
+    /// the last one; call [`Parser::finish`] after the final append to produce a
+    /// final render.
     pub fn append(&mut self, chunk: &str, out: &mut Vec<Change>) -> Result<(), ParseError> {
         let source = &mut self.source;
         self.stream.append(out, || {
@@ -453,6 +476,12 @@ impl Parser {
         })
     }
 
+    /// Finalizes the session and emits the remaining changes.
+    ///
+    /// This is the Rust equivalent of `final: true` in `stream-markdown-parser`.
+    /// It consumes the last line, settles pending references and active blocks,
+    /// clears every preview, and leaves every block `Closed` or `Incomplete`.
+    /// The call is idempotent; appending afterwards returns [`ParseError::Finished`].
     pub fn finish(&mut self, out: &mut Vec<Change>) -> Result<(), ParseError> {
         self.stream.finish(&self.source, out)
     }
@@ -509,6 +538,7 @@ pub struct BorrowedParser {
 }
 
 impl BorrowedParser {
+    /// Creates a session bound to `source`. Plugins must be registered before the first append.
     pub fn new(source: &SourceBuffer, options: Options) -> Self {
         Self {
             identity: source.identity.clone(),
@@ -521,6 +551,10 @@ impl BorrowedParser {
     }
 
     /// Advances to the visible UTF-8 byte end and emits changes with absolute source spans.
+    ///
+    /// The end may not move backwards, and it must be a UTF-8 boundary. Chunk
+    /// boundaries are not semantic; call [`BorrowedParser::finish`] when the
+    /// message is complete.
     pub fn append(
         &mut self,
         source: &SourceBuffer,
@@ -531,7 +565,9 @@ impl BorrowedParser {
         self.stream.append(out, || prefix)
     }
 
-    /// Consumes the visible prefix and settles pending blocks.
+    /// Consumes the visible prefix and finalizes the session.
+    ///
+    /// This is the borrowed-source equivalent of [`Parser::finish`].
     pub fn finish(
         &mut self,
         source: &SourceBuffer,
@@ -630,7 +666,11 @@ impl StreamState {
     }
 }
 
-/// Parses borrowed source and materializes the final nodes once.
+/// Parses a complete borrowed document and materializes the final nodes once.
+///
+/// This is final by definition: it is equivalent to a session that receives the
+/// whole source through [`Parser::append`] and then calls [`Parser::finish`],
+/// without preview updates or change batches.
 pub fn parse<'src>(source: &'src str, options: &Options) -> Result<Document<'src>, ParseError> {
     parse_with_plugins(source, options, Vec::new())
 }
