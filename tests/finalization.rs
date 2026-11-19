@@ -157,26 +157,89 @@ fn nodes_of(block: &Block) -> &[Inline] {
     }
 }
 
-fn all_nodes(blocks: &[Block]) -> Vec<Inline> {
-    fn walk(nodes: &[Inline], out: &mut Vec<Inline>) {
-        for node in nodes {
-            out.push(node.clone());
-            match &node.kind {
-                InlineKind::Emphasis(children)
-                | InlineKind::Strong(children)
-                | InlineKind::Strikethrough(children)
-                | InlineKind::Highlight(children)
-                | InlineKind::Insert(children) => walk(children, out),
-                InlineKind::Link(link) | InlineKind::Image(link) => walk(&link.children, out),
-                _ => {}
-            }
+fn walk(nodes: &[Inline], out: &mut Vec<Inline>) {
+    for node in nodes {
+        out.push(node.clone());
+        match &node.kind {
+            InlineKind::Emphasis(children)
+            | InlineKind::Strong(children)
+            | InlineKind::Strikethrough(children)
+            | InlineKind::Highlight(children)
+            | InlineKind::Insert(children) => walk(children, out),
+            InlineKind::Link(link)
+            | InlineKind::LinkPreview(link)
+            | InlineKind::Image(link)
+            | InlineKind::ImagePreview(link) => walk(&link.children, out),
+            InlineKind::CustomTag(element) => walk(&element.children, out),
+            _ => {}
         }
     }
+}
+
+fn walk_content(content: &InlineContent, out: &mut Vec<Inline>) {
+    if let InlineContent::Parsed(nodes) = content {
+        walk(nodes, out);
+    }
+}
+
+fn all_nodes(blocks: &[Block]) -> Vec<Inline> {
     let mut out = Vec::new();
     for block in blocks {
-        walk(nodes_of(block), &mut out);
+        match &block.data {
+            BlockData::Paragraph(content)
+            | BlockData::Heading { content, .. }
+            | BlockData::Footnote { content, .. }
+            | BlockData::Summary { content, .. } => walk_content(content, &mut out),
+            BlockData::Table(table) => {
+                for cell in table.header().iter().chain(table.rows().flatten()) {
+                    walk_content(cell, &mut out);
+                }
+            }
+            BlockData::CustomTag(element) => walk(&element.children, &mut out),
+            _ => {}
+        }
     }
     out
+}
+
+fn block_visible_text(source: &str, block: &Block) -> String {
+    match &block.data {
+        BlockData::Paragraph(InlineContent::Plain(span)) => span_text(source, *span).to_owned(),
+        BlockData::Paragraph(InlineContent::Parsed(nodes))
+        | BlockData::Heading {
+            content: InlineContent::Parsed(nodes),
+            ..
+        } => visible_text(source, nodes),
+        _ => String::new(),
+    }
+}
+
+fn has_target(nodes: &[Inline]) -> bool {
+    nodes.iter().any(|node| match &node.kind {
+        InlineKind::Link(_) | InlineKind::Image(_) => true,
+        InlineKind::Emphasis(children)
+        | InlineKind::Strong(children)
+        | InlineKind::Strikethrough(children)
+        | InlineKind::Highlight(children)
+        | InlineKind::Insert(children) => has_target(children),
+        InlineKind::LinkPreview(link) | InlineKind::ImagePreview(link) => {
+            has_target(&link.children)
+        }
+        _ => false,
+    })
+}
+
+fn has_image(nodes: &[Inline]) -> bool {
+    nodes.iter().any(|node| match &node.kind {
+        InlineKind::Image(_) | InlineKind::ImagePreview(_) => true,
+        InlineKind::Emphasis(children)
+        | InlineKind::Strong(children)
+        | InlineKind::Strikethrough(children)
+        | InlineKind::Highlight(children)
+        | InlineKind::Insert(children) => has_image(children),
+        InlineKind::Link(link) | InlineKind::LinkPreview(link) => has_image(&link.children),
+        _ => false,
+    })
 }
 
 fn span_text(source: &str, span: stream_markdown_rs::Span) -> &str {
@@ -270,6 +333,8 @@ fn malformed_inline_targets_finalize_like_a_complete_parse_without_previews() {
         "Hello![world] there",
         "![alt]",
         "![alt] ",
+        "`code",
+        "`code with **strong**",
         "好的![微笑] 我们继续。",
         "**vec![1, 2]** ok",
         "[![img](a.png)]( http://s",
@@ -420,13 +485,16 @@ fn spaced_brackets_are_not_folded_into_links() {
 #[test]
 fn a_closed_image_bracket_that_cannot_be_an_image_stays_text_while_streaming() {
     let options = options();
-    for source in [
-        "Use vec![1, 2, 3] to build it.",
-        "Hello![world] there",
-        "好的![微笑] 我们继续。",
-        "![alt] ",
-        "![alt]",
-        "**vec![1, 2]** ok",
+    for (source, expected_visible) in [
+        (
+            "Use vec![1, 2, 3] to build it.",
+            "Use vec![1, 2, 3] to build it.",
+        ),
+        ("Hello![world] there", "Hello![world] there"),
+        ("好的![微笑] 我们继续。", "好的![微笑] 我们继续。"),
+        ("![alt] ", "![alt] "),
+        ("![alt]", "![alt]"),
+        ("**vec![1, 2]** ok", "**vec![1, 2]** ok"),
     ] {
         let mut parser = Parser::new(options.clone());
         let mut changes = Vec::new();
@@ -448,13 +516,16 @@ fn a_closed_image_bracket_that_cannot_be_an_image_stays_text_while_streaming() {
         );
         let block = view.blocks.values().last().unwrap();
         match &block.data {
-            BlockData::Paragraph(InlineContent::Plain(_)) => {}
-            BlockData::Paragraph(InlineContent::Parsed(nodes)) => assert!(
-                nodes
-                    .iter()
-                    .all(|node| matches!(node.kind, InlineKind::Text(_) | InlineKind::Strong(_))),
-                "unexpected provisional image for {source:?}: {block:?}"
-            ),
+            BlockData::Paragraph(InlineContent::Plain(span)) => {
+                assert_eq!(span_text(source, *span), expected_visible);
+            }
+            BlockData::Paragraph(InlineContent::Parsed(nodes)) => {
+                assert_eq!(visible_text(source, nodes), expected_visible, "{source:?}");
+                assert!(
+                    !has_target(nodes),
+                    "a closed bracket became a target before it could be one: {source:?}: {block:?}"
+                );
+            }
             _ => panic!("unexpected block for {source:?}: {block:?}"),
         }
     }
@@ -548,7 +619,7 @@ fn previews_are_replaced_when_the_target_closes_or_the_session_finishes() {
         "finalization kept an image for an unclosed destination: {block:?}"
     );
 
-    let mut parser = Parser::new(options);
+    let mut parser = Parser::new(options.clone());
     parser
         .append("[a](https://e.com/a.png", &mut changes)
         .unwrap();
@@ -572,6 +643,29 @@ fn previews_are_replaced_when_the_target_closes_or_the_session_finishes() {
         )),
         "finalization kept a provisional link: {block:?}"
     );
+
+    let mut parser = Parser::new(options);
+    parser.append("`code", &mut changes).unwrap();
+    view = View::default();
+    view.apply(&mut changes);
+    assert!(
+        view.previews
+            .values()
+            .flatten()
+            .any(|node| matches!(node.kind, InlineKind::CodePreview(_))),
+        "expected a code preview before finalization"
+    );
+    parser.finish(&mut changes).unwrap();
+    view.apply(&mut changes);
+    view.assert_no_previews();
+    let block = view.blocks.values().next().unwrap();
+    assert_eq!(block_visible_text(parser.source_text(), block), "`code");
+    assert!(
+        all_nodes(std::slice::from_ref(block))
+            .iter()
+            .all(|node| !matches!(node.kind, InlineKind::Code(_) | InlineKind::CodePreview(_))),
+        "finalization kept code for an unclosed backtick: {block:?}"
+    );
 }
 
 #[test]
@@ -591,6 +685,7 @@ fn an_image_inside_an_unfinished_link_stays_visible_at_final() {
         unreachable!()
     };
     assert_eq!(image.destination.as_str(source), "a.png");
+    assert_eq!(visible_text(source, &image.children), "logo");
     assert!(
         nodes
             .iter()
@@ -606,18 +701,94 @@ fn unsafe_or_unknown_schemes_are_delivered_verbatim_for_the_renderer() {
         ("[a](javascript:alert(1))", "javascript:alert(1)"),
         ("![a](javascript:alert(1))", "javascript:alert(1)"),
         ("[a](ftp://e.com/a.png)", "ftp://e.com/a.png"),
+        ("[a](data:text/html;base64,AA)", "data:text/html;base64,AA"),
+        ("![a](data:text/html;base64,AA)", "data:text/html;base64,AA"),
+        ("[a](file:///C:/x.png)", "file:///C:/x.png"),
+        ("![a](file:///C:/x.png)", "file:///C:/x.png"),
     ] {
-        let blocks = parse(source, &options).unwrap().nodes;
-        let node = all_nodes(&blocks)
-            .into_iter()
-            .find(|node| matches!(node.kind, InlineKind::Link(_) | InlineKind::Image(_)))
-            .unwrap_or_else(|| panic!("expected a target node for {source:?}"));
-        let delivered = match &node.kind {
-            InlineKind::Link(link) | InlineKind::Image(link) => link.destination.as_str(source),
-            _ => unreachable!(),
-        };
-        assert_eq!(delivered, destination, "{source:?}");
+        let parsed = parse(source, &options).unwrap().nodes;
+        let (streamed, view) = final_view(source, &options);
+        view.assert_no_previews();
+        for blocks in [&parsed, &streamed] {
+            let node = all_nodes(blocks)
+                .into_iter()
+                .find(|node| matches!(node.kind, InlineKind::Link(_) | InlineKind::Image(_)))
+                .unwrap_or_else(|| panic!("expected a target node for {source:?}"));
+            let delivered = match &node.kind {
+                InlineKind::Link(link) | InlineKind::Image(link) => link.destination.as_str(source),
+                _ => unreachable!(),
+            };
+            assert_eq!(delivered, destination, "{source:?}");
+        }
     }
+}
+
+#[test]
+fn table_cells_admonitions_and_custom_tags_finalize_without_provisional_targets() {
+    let options = options();
+
+    let table_source = "| h |\n|---|\n| [x](https://e.com/s |";
+    let (blocks, view) = final_view(table_source, &options);
+    view.assert_no_previews();
+    let table = blocks
+        .iter()
+        .find_map(|block| match &block.data {
+            BlockData::Table(table) => Some(table),
+            _ => None,
+        })
+        .expect("expected a table");
+    let cells: Vec<_> = table
+        .header()
+        .iter()
+        .chain(table.rows().flatten())
+        .collect();
+    assert_eq!(cells.len(), 2);
+    let InlineContent::Parsed(nodes) = cells[1] else {
+        panic!("expected a parsed table cell: {:?}", cells[1]);
+    };
+    assert_eq!(visible_text(table_source, nodes), "[x](https://e.com/s");
+    assert!(!has_image(nodes), "a table cell kept an image");
+
+    let admonition_source = "::: tip\n[a *em*](https://e.com/s\n:::";
+    let (blocks, view) = final_view(admonition_source, &options);
+    view.assert_no_previews();
+    let paragraph = blocks
+        .iter()
+        .find(|block| matches!(block.data, BlockData::Paragraph(_)))
+        .expect("expected an admonition body paragraph");
+    let nodes = nodes_of(paragraph);
+    assert_eq!(
+        visible_text(admonition_source, nodes),
+        "[a em](https://e.com/s"
+    );
+    assert!(
+        nodes
+            .iter()
+            .any(|node| matches!(node.kind, InlineKind::Link(_))),
+        "{nodes:?}"
+    );
+
+    let custom_options = Options {
+        custom_tags: vec!["tool-call".into()],
+        ..options
+    };
+    let tag_source = "<tool-call>[x](https://e.com/s</tool-call>";
+    let (blocks, view) = final_view(tag_source, &custom_options);
+    view.assert_no_previews();
+    let nodes = all_nodes(&blocks);
+    assert!(
+        nodes
+            .iter()
+            .any(|node| matches!(node.kind, InlineKind::Link(_))),
+        "expected the linkified tail inside the custom tag: {nodes:?}"
+    );
+    assert!(
+        nodes.iter().all(|node| !matches!(
+            node.kind,
+            InlineKind::LinkPreview(_) | InlineKind::ImagePreview(_) | InlineKind::CodePreview(_)
+        )),
+        "{nodes:?}"
+    );
 }
 
 #[test]
